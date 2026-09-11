@@ -11,6 +11,7 @@ pub enum ProxyProtocol {
     Socks4a,
     Socks5,
     Socks5h,
+    Reverse,
 }
 
 impl fmt::Display for ProxyProtocol {
@@ -22,6 +23,7 @@ impl fmt::Display for ProxyProtocol {
             Self::Socks4a => write!(f, "socks4a"),
             Self::Socks5 => write!(f, "socks5"),
             Self::Socks5h => write!(f, "socks5h"),
+            Self::Reverse => write!(f, "reverse"),
         }
     }
 }
@@ -58,14 +60,22 @@ impl ProxyNode {
             "socks4a" => ProxyProtocol::Socks4a,
             "socks5" => ProxyProtocol::Socks5,
             "socks5h" => ProxyProtocol::Socks5h,
+            "reverse" => ProxyProtocol::Reverse,
             other => return Err(format!("Unsupported proxy protocol '{}'", other)),
         };
 
-        let host = parsed.host_str().ok_or("Missing host in proxy URL")?.to_string();
+        let host = parsed
+            .host_str()
+            .ok_or("Missing host in proxy URL")?
+            .to_string();
         let port = parsed.port().unwrap_or(match protocol {
             ProxyProtocol::Http => 8080,
             ProxyProtocol::Https => 443,
-            ProxyProtocol::Socks4 | ProxyProtocol::Socks4a | ProxyProtocol::Socks5 | ProxyProtocol::Socks5h => 1080,
+            ProxyProtocol::Socks4
+            | ProxyProtocol::Socks4a
+            | ProxyProtocol::Socks5
+            | ProxyProtocol::Socks5h => 1080,
+            ProxyProtocol::Reverse => 0,
         });
 
         let username = if !parsed.username().is_empty() {

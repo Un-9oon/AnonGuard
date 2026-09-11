@@ -1,25 +1,35 @@
 //! Tokio asynchronous local gateway server listening on 127.0.0.1:9050.
 
-use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
-use crate::morphing::PoissonJitter;
+use crate::morphing::{morph_bidirectional, JitterEngine, LorenzAttractor, PoissonJitter};
 
 pub struct GatewayServer {
     config: GuardConfig,
     pool: ProxyPool,
     kill_switch: KillSwitchController,
-    jitter: Option<PoissonJitter>,
+    jitter: Option<JitterEngine>,
 }
 
 impl GatewayServer {
     pub fn new(config: GuardConfig, pool: ProxyPool, kill_switch: KillSwitchController) -> Self {
-        let jitter = if config.enable_jitter {
-            Some(PoissonJitter::new(config.jitter_lambda, 5.0, 45.0))
+        let jitter = if config.enable_chaos {
+            Some(JitterEngine::Chaos(LorenzAttractor::new(
+                config.chaos_sigma,
+                config.chaos_rho,
+                config.chaos_beta,
+                0.01,
+            )))
+        } else if config.enable_jitter {
+            Some(JitterEngine::Poisson(PoissonJitter::new(
+                config.jitter_lambda,
+                5.0,
+                45.0,
+            )))
         } else {
             None
         };
@@ -59,36 +69,46 @@ impl GatewayServer {
                     return;
                 }
 
-                if let Some(j) = jitter {
-                    j.apply().await;
-                }
-
                 let mut client = client_stream;
-                
+
                 // 1. Intercept SOCKS5 from local client to find target
-                let (target_host, target_port) = match crate::gateway::chain::intercept_socks5_request(&mut client).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("Failed to intercept client SOCKS5 handshake: {}", e);
-                        return;
-                    }
-                };
+                let (target_host, target_port) =
+                    match crate::gateway::chain::intercept_socks5_request(&mut client).await {
+                        Ok(res) => res,
+                        Err(e) => {
+                            error!("Failed to intercept client SOCKS5 handshake: {}", e);
+                            return;
+                        }
+                    };
 
                 if config.relay_mode {
                     // Node Mode: Connect directly to the requested target
                     let target_addr = format!("{}:{}", target_host, target_port);
                     match TcpStream::connect(&target_addr).await {
                         Ok(mut target_stream) => {
-                            info!("Relay Mode: Forwarding traffic to {}:{}", target_host, target_port);
-                            let _ = copy_bidirectional(&mut client, &mut target_stream).await;
+                            info!(
+                                "Relay Mode: Forwarding traffic to {}:{}",
+                                target_host, target_port
+                            );
+                            let _ = morph_bidirectional(
+                                &mut client,
+                                &mut target_stream,
+                                jitter.clone(),
+                            )
+                            .await;
                         }
                         Err(e) => {
-                            error!("Relay Mode: Failed to connect to target {}: {}", target_addr, e);
+                            error!(
+                                "Relay Mode: Failed to connect to target {}: {}",
+                                target_addr, e
+                            );
                         }
                     }
                 } else {
                     // Client Mode: Select dynamic random proxy chain
-                    let chain = pool.get_random_chain(config.min_chain_length, config.max_chain_length).await;
+                    let chain = pool
+                        .get_random_chain(config.min_chain_length, config.max_chain_length)
+                        .await;
                     if chain.is_empty() {
                         warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
                         return;
@@ -102,16 +122,57 @@ impl GatewayServer {
 
                         // If first node, connect raw TCP
                         if is_first {
-                            let addr = format!("{}:{}", node.host, node.port);
-                            match TcpStream::connect(&addr).await {
-                                Ok(s) => current_stream = Some(s),
-                                Err(e) => {
-                                    error!("Failed to connect to entry node {}: {}", addr, e);
-                                    pool.rotate_on_block(&node.raw_url).await;
-                                    if config.strict_killswitch {
-                                        kill_switch.trip("Entry node connection failure");
+                            if node.raw_url.starts_with("reverse://") {
+                                let node_id = node.host.clone();
+                                let tracker_url = config
+                                    .tracker_url
+                                    .as_ref()
+                                    .expect("tracker_url required for reverse")
+                                    .trim_start_matches("http://")
+                                    .to_string();
+                                match TcpStream::connect(&tracker_url).await {
+                                    Ok(mut s) => {
+                                        use tokio::io::{
+                                            AsyncBufReadExt, AsyncWriteExt, BufReader,
+                                        };
+                                        let payload = format!("CONNECT_REVERSE {}\n", node_id);
+                                        let _ = s.write_all(payload.as_bytes()).await;
+                                        let mut reader = BufReader::new(s);
+                                        let mut resp = String::new();
+                                        if reader.read_line(&mut resp).await.is_ok() {
+                                            if resp.trim() == "OK" {
+                                                current_stream = Some(reader.into_inner());
+                                            } else {
+                                                error!(
+                                                    "Tracker rejected CONNECT_REVERSE: {}",
+                                                    resp
+                                                );
+                                                pool.rotate_on_block(&node.raw_url).await;
+                                                return;
+                                            }
+                                        }
                                     }
-                                    return;
+                                    Err(e) => {
+                                        error!(
+                                            "Failed to connect to tracker {}: {}",
+                                            tracker_url, e
+                                        );
+                                        pool.rotate_on_block(&node.raw_url).await;
+                                        return;
+                                    }
+                                }
+                            } else {
+                                let addr = format!("{}:{}", node.host, node.port);
+                                match TcpStream::connect(&addr).await {
+                                    Ok(s) => current_stream = Some(s),
+                                    Err(e) => {
+                                        error!("Failed to connect to entry node {}: {}", addr, e);
+                                        pool.rotate_on_block(&node.raw_url).await;
+                                        if config.strict_killswitch {
+                                            kill_switch.trip("Entry node connection failure");
+                                        }
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -128,12 +189,19 @@ impl GatewayServer {
                         };
 
                         if let Some(s) = current_stream.take() {
-                            match crate::gateway::chain::socks5_connect_through(s, &next_host, next_port).await {
+                            match crate::gateway::chain::socks5_connect_through(
+                                s, &next_host, next_port,
+                            )
+                            .await
+                            {
                                 Ok(s_new) => {
                                     current_stream = Some(s_new);
                                 }
                                 Err(e) => {
-                                    error!("Failed to negotiate tunnel at node {}: {}", node.host, e);
+                                    error!(
+                                        "Failed to negotiate tunnel at node {}: {}",
+                                        node.host, e
+                                    );
                                     pool.rotate_on_block(&node.raw_url).await;
                                     if config.strict_killswitch {
                                         kill_switch.trip("Tunnel negotiation failure");
@@ -146,11 +214,97 @@ impl GatewayServer {
 
                     // 4. Stream data through the completed onion tunnel
                     if let Some(mut upstream_stream) = current_stream {
-                        info!("Established {}-hop onion tunnel to {}:{}", chain.len(), target_host, target_port);
-                        let _ = copy_bidirectional(&mut client, &mut upstream_stream).await;
+                        info!(
+                            "Established {}-hop onion tunnel to {}:{}",
+                            chain.len(),
+                            target_host,
+                            target_port
+                        );
+                        let _ =
+                            morph_bidirectional(&mut client, &mut upstream_stream, jitter.clone())
+                                .await;
                     }
                 }
             });
         }
+    }
+
+    pub async fn run_reverse_relay(
+        &self,
+        tracker_url: &str,
+        node_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let host_port = tracker_url.trim_start_matches("http://");
+        info!("[AnonGuard Reverse Relay] Active and guarded. Maintaining outbound pool to Tracker: {}", host_port);
+
+        // Keep a pool of 3 connections
+        for _ in 0..3 {
+            let hp = host_port.to_string();
+            let nid = node_id.to_string();
+            let jitter = self.jitter.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    match TcpStream::connect(&hp).await {
+                        Ok(mut stream) => {
+                            use tokio::io::AsyncWriteExt;
+                            let payload = format!("REGISTER_REVERSE {}\n", nid);
+                            if stream.write_all(payload.as_bytes()).await.is_ok() {
+                                // Wait for the tracker to send data (meaning a client has connected to this stream)
+                                // We peek 1 byte to see if data arrived. If so, it's a SOCKS5 client!
+                                let mut buf = [0u8; 1];
+                                if stream.peek(&mut buf).await.is_ok() {
+                                    info!("Reverse Relay: Received incoming client connection from tracker!");
+
+                                    // Process exactly like a Relay Mode client
+                                    let (target_host, target_port) =
+                                        match crate::gateway::chain::intercept_socks5_request(
+                                            &mut stream,
+                                        )
+                                        .await
+                                        {
+                                            Ok(res) => res,
+                                            Err(e) => {
+                                                error!("Reverse Relay: Failed to intercept client SOCKS5 handshake: {}", e);
+                                                continue; // reconnect to refill pool
+                                            }
+                                        };
+
+                                    let target_addr = format!("{}:{}", target_host, target_port);
+                                    match TcpStream::connect(&target_addr).await {
+                                        Ok(mut target_stream) => {
+                                            info!(
+                                                "Reverse Relay: Forwarding traffic to {}:{}",
+                                                target_host, target_port
+                                            );
+                                            let _ = morph_bidirectional(
+                                                &mut stream,
+                                                &mut target_stream,
+                                                jitter.clone(),
+                                            )
+                                            .await;
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Reverse Relay: Failed to connect to target {}: {}",
+                                                target_addr, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to connect to Tracker: {}", e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Block forever
+        std::future::pending::<()>().await;
+        Ok(())
     }
 }

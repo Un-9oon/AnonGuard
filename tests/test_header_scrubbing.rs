@@ -8,9 +8,9 @@ fn test_leak_header_scrubbing() {
         ("Via".to_string(), "1.1 proxy".to_string()),
         ("User-Agent".to_string(), "test".to_string()),
     ];
-    
+
     HeaderNormalizer::scrub_leak_headers(&mut headers);
-    
+
     assert_eq!(headers.len(), 2);
     assert_eq!(headers[0].0, "Host");
     assert_eq!(headers[1].0, "User-Agent");
@@ -24,9 +24,9 @@ fn test_chrome_header_ordering() {
         ("User-Agent".to_string(), "test".to_string()),
         ("Connection".to_string(), "keep-alive".to_string()),
     ];
-    
+
     HeaderNormalizer::order_headers_chrome(&mut headers);
-    
+
     // Order should be Host, Connection, User-Agent, Accept-Language
     assert_eq!(headers[0].0, "Host");
     assert_eq!(headers[1].0, "Connection");

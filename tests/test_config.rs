@@ -3,7 +3,7 @@ use anonguard::core::GuardConfig;
 #[test]
 fn test_guard_config_defaults() {
     let config = GuardConfig::default();
-    
+
     assert!(config.strict_killswitch);
     assert!(config.enforce_remote_dns);
     assert!(config.disable_ipv6);

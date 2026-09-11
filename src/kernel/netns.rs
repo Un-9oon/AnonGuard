@@ -7,7 +7,11 @@ pub struct NetnsConfig {
 }
 
 impl NetnsConfig {
-    pub fn new(namespace_name: impl Into<String>, proxy_ip: impl Into<String>, proxy_port: u16) -> Self {
+    pub fn new(
+        namespace_name: impl Into<String>,
+        proxy_ip: impl Into<String>,
+        proxy_port: u16,
+    ) -> Self {
         Self {
             namespace_name: namespace_name.into(),
             authorized_proxy_ip: proxy_ip.into(),

@@ -17,7 +17,11 @@ pub enum TargetAddress {
 
 /// Serializes target host and port into a strict SOCKS5h request frame.
 /// Guarantees that domains are formatted as FQDNs (AddrType 0x03) so resolution happens on the proxy.
-pub fn build_socks5h_connect_frame(target: &TargetAddress, port: u16, block_ipv6: bool) -> Result<Vec<u8>> {
+pub fn build_socks5h_connect_frame(
+    target: &TargetAddress,
+    port: u16,
+    block_ipv6: bool,
+) -> Result<Vec<u8>> {
     let mut frame = Vec::with_capacity(32);
     frame.push(0x05); // SOCKS version 5
     frame.push(CMD_CONNECT); // Command 0x01 (CONNECT)
@@ -26,7 +30,10 @@ pub fn build_socks5h_connect_frame(target: &TargetAddress, port: u16, block_ipv6
     match target {
         TargetAddress::Domain(domain) => {
             if domain.len() > 255 {
-                return Err(Error::new(ErrorKind::InvalidInput, "Domain name exceeds 255 bytes"));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Domain name exceeds 255 bytes",
+                ));
             }
             frame.push(ADDR_TYPE_DOMAIN);
             frame.push(domain.len() as u8);

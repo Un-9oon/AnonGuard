@@ -9,7 +9,9 @@ pub mod kernel;
 pub mod mesh;
 pub mod morphing;
 
-pub use crate::core::{ActiveGuarded, DroppedFailClosed, GuardConfig, GuardError, GuardedSocket, State};
+pub use crate::core::{
+    ActiveGuarded, DroppedFailClosed, GuardConfig, GuardError, GuardedSocket, State,
+};
 pub use crate::crypto::{HeaderNormalizer, TlsProfile};
 pub use crate::gateway::GatewayServer;
 pub use crate::kernel::{build_socks5h_connect_frame, KillSwitchController, TargetAddress};

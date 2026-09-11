@@ -4,7 +4,9 @@ use anonguard::mesh::{ProxyPool, ProxyProtocol};
 async fn test_proxy_pool_add_and_rotate() {
     let pool = ProxyPool::new();
 
-    pool.add_proxy("socks5://user:pass@1.1.1.1:1080").await.unwrap();
+    pool.add_proxy("socks5://user:pass@1.1.1.1:1080")
+        .await
+        .unwrap();
     pool.add_proxy("http://2.2.2.2:8080").await.unwrap();
 
     assert_eq!(pool.total_count().await, 2);

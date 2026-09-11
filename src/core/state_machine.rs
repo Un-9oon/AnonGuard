@@ -13,22 +13,30 @@ pub trait State: Send + Sync + 'static {
 
 pub struct Uninitialized;
 impl State for Uninitialized {
-    fn name() -> &'static str { "UNINITIALIZED" }
+    fn name() -> &'static str {
+        "UNINITIALIZED"
+    }
 }
 
 pub struct Verifying;
 impl State for Verifying {
-    fn name() -> &'static str { "VERIFYING" }
+    fn name() -> &'static str {
+        "VERIFYING"
+    }
 }
 
 pub struct ActiveGuarded;
 impl State for ActiveGuarded {
-    fn name() -> &'static str { "ACTIVE_GUARDED" }
+    fn name() -> &'static str {
+        "ACTIVE_GUARDED"
+    }
 }
 
 pub struct DroppedFailClosed;
 impl State for DroppedFailClosed {
-    fn name() -> &'static str { "DROPPED_FAIL_CLOSED" }
+    fn name() -> &'static str {
+        "DROPPED_FAIL_CLOSED"
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

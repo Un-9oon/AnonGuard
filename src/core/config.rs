@@ -14,6 +14,11 @@ pub struct GuardConfig {
     pub enable_jitter: bool,
     /// Jitter rate parameter (lambda for exponential distribution)
     pub jitter_lambda: f64,
+    /// Enable Chaotic Attractor Morphing
+    pub enable_chaos: bool,
+    pub chaos_sigma: f64,
+    pub chaos_rho: f64,
+    pub chaos_beta: f64,
     /// Enable MTU chunk padding
     pub enable_padding: bool,
     /// Padding block size in bytes (e.g. 512, 1024, 1460)
@@ -26,6 +31,8 @@ pub struct GuardConfig {
     pub max_chain_length: usize,
     /// Run as a native SOCKS5 relay node
     pub relay_mode: bool,
+    pub reverse_relay_mode: bool,
+    pub tracker_url: Option<String>,
     /// Gateway listen address
     pub listen_addr: String,
 }
@@ -38,12 +45,18 @@ impl Default for GuardConfig {
             disable_ipv6: true,
             enable_jitter: false,
             jitter_lambda: 0.05,
+            enable_chaos: false,
+            chaos_sigma: 10.0,
+            chaos_rho: 28.0,
+            chaos_beta: 8.0 / 3.0,
             enable_padding: false,
             padding_block_size: 512,
             ja4_profile: "chrome_120".to_string(),
             min_chain_length: 1,
             max_chain_length: 3,
             relay_mode: false,
+            reverse_relay_mode: false,
+            tracker_url: None,
             listen_addr: "127.0.0.1:9050".to_string(),
         }
     }

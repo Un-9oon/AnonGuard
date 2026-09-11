@@ -1,75 +1,53 @@
-# AnonGuard: Cross-Layer Anonymity and Anti-Attribution Engine
+# AnonGuard
 
-AnonGuard is a research-grade privacy and anti-attribution framework designed to protect security tools, automated agents, and penetration testing scanners against modern multi-layer surveillance, AI-driven WAFs, and traffic analysis.
+**AnonGuard** is a next-generation, decentralized anonymity network and proxy routing engine built in Rust. It is specifically designed as a research testbed for evaluating and defeating modern AI-driven flow-correlation and website fingerprinting attacks.
 
-## Core Capabilities
+## Core Features
 
-- **Zero-Leak Kernel & Transport Enforcement:** Fail-closed state machine with socket kill switch, remote DNS resolution (`socks5h`), and IPv6 blackholing.
-- **Layer 7 Anti-Fingerprinting:** JA4/JA3 TLS signature normalization and deterministic HTTP/2 header sequencing.
-- **Traffic Analysis Defenses:** Poisson-distributed timing jitter and MTU packet length padding to mitigate machine-learning flow correlation attacks.
-- **Dynamic Routing Mesh:** Multi-protocol proxy pooling (SOCKS4/5/HTTP), latency sorting, and automated rotation on WAF block.
-- **Cross-Layer Usability:** Seamless integration as a Python library (`from anonguard import AnonGuard`) or standalone local gateway daemon (`127.0.0.1:9050`).
+1. **Chaotic Attractor Morphing (Novel Cryptography):**
+   Unlike traditional obfuscation tools that rely on predictable stochastic noise, AnonGuard maps its packet sharding sizes and timing delays directly to the **Lorenz Attractor** (a deterministic chaotic system). Because the system exhibits extreme sensitivity to initial conditions, the traffic flow profile never repeats, completely denying machine learning models (CNNs, LSTMs, Transformers) the statistical patterns required for feature extraction.
 
-## Installation
+2. **Reverse Tunneling (Rendezvous):**
+   Deploying global proxy nodes is historically difficult due to NAT and firewalls. AnonGuard features a **Directory Authority Tracker** and a **Reverse Relay Mode**. Volunteers can run the relay daemon on their personal computers behind strict routers; the relay connects outbound to the Tracker. Clients seamlessly build Onion Tunnels that route through the Tracker and down into the volunteer's network without requiring any manual port forwarding.
+
+3. **Multi-Hop Onion Routing:**
+   Clients dynamically build multi-hop circuits through a pool of active proxy nodes to provide strong cryptographic separation between the entry node (which knows the client's IP) and the exit node (which knows the destination).
+
+## Build Instructions
+
+AnonGuard is written in Rust. You will need `cargo` to build the daemon.
 
 ```bash
-cd /home/we/AnonGuard
-
-# Install Rust engine
 cargo build --release
-
-# Install Python SDK (editable mode)
-pip install -e .
 ```
 
-## Quick Start (Python SDK)
+## Running the Network
 
-```python
-from anonguard import AnonGuard, GuardConfig
+A complete deployment of AnonGuard consists of three components:
 
-# Initialize AnonGuard with proxy nodes
-guard = AnonGuard(
-    proxies=["socks5://127.0.0.1:9050"],
-    config=GuardConfig(strict_killswitch=True, enable_jitter=True)
-)
-
-# Acquire a guarded session with fail-closed kill switch
-session = guard.get_guarded_session()
-response = session.get("https://api.ipify.org?format=json")
-print("Anonymized IP:", response.json()["ip"])
-```
-
-### GuardConfig Options
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `strict_killswitch` | `bool` | `True` | Immediately block all traffic if proxy fails |
-| `enforce_remote_dns` | `bool` | `True` | Force SOCKS5h remote FQDN resolution |
-| `disable_ipv6` | `bool` | `True` | Block IPv6 to prevent dual-stack leaks |
-| `verify_ip_before_start` | `bool` | `True` | Pre-flight IP leak verification |
-| `enable_jitter` | `bool` | `False` | Poisson timing jitter for anti-correlation |
-| `verification_timeout` | `float` | `8.0` | Timeout for IP verification endpoints (seconds) |
-
-## Running as Local Gateway
-
+### 1. The Directory Authority (Tracker)
+The tracker acts as a rendezvous point for reverse relays and serves a list of active nodes to clients.
 ```bash
-# Start the daemon on default port 9050
-./target/release/anonguard-daemon
-
-# Or with custom options
-./target/release/anonguard-daemon --listen 127.0.0.1:9050 --proxy socks5://127.0.0.1:1080 --jitter
+./target/release/anonguard-daemon --tracker --listen 0.0.0.0:8080
 ```
 
-## Running Tests
-
+### 2. The Volunteer Relay (Reverse Mode)
+Volunteers run this node behind NAT. It connects to the tracker and waits for incoming tunnel requests.
 ```bash
-# Rust unit tests
-cargo test
-
-# Python research benchmarks (requires PYTHONPATH)
-PYTHONPATH=python:$PYTHONPATH python3 python/research_benchmarks/leak_audit.py
-PYTHONPATH=python:$PYTHONPATH python3 python/research_benchmarks/timing_classifier.py
-
-# Full packet inspection test (localhost, no external dependencies)
-PYTHONPATH=python:$PYTHONPATH python3 research_benchmarks/packet_verifier.py
+./target/release/anonguard-daemon --reverse-relay --announce http://<tracker_ip>:8080
 ```
+
+### 3. The Local Client (with Chaotic Morphing)
+The user runs the client daemon locally. It automatically fetches the list of available volunteer nodes from the tracker, builds a multi-hop tunnel, and activates the Lorenz Chaos engine.
+```bash
+./target/release/anonguard-daemon \
+  --listen 127.0.0.1:9050 \
+  --fetch-from http://<tracker_ip>:8080 \
+  --chaos
+```
+
+You can now point your web browser or `curl` to `socks5://127.0.0.1:9050` to route your traffic securely through the chaotic AnonGuard network!
+
+## Research Applications
+
+This software provides a fully reproducible environment for Oxford University PhD research in Network Security and Applied Cryptography. By toggling the `--chaos` and `--jitter` flags, researchers can generate massive PCAP datasets comparing standard TCP streams, Poisson-jittered streams, and Chaos-morphed streams, directly feeding these datasets into adversarial AI models to prove the efficacy of deterministic chaos in traffic obfuscation.

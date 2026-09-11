@@ -35,7 +35,10 @@ impl KillSwitchController {
     /// Immediately triggers the kill switch, broadcasting cancellation to all active workers.
     pub fn trip(&self, reason: &str) {
         if !self.tripped.swap(true, Ordering::SeqCst) {
-            tracing::error!(reason = reason, "[AnonGuard KillSwitch] TRIPPED! Enforcing strict fail-closed drop.");
+            tracing::error!(
+                reason = reason,
+                "[AnonGuard KillSwitch] TRIPPED! Enforcing strict fail-closed drop."
+            );
             let _ = self.notifier_tx.send(true);
         }
     }

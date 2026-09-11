@@ -1,13 +1,13 @@
 //! High-concurrency proxy pool with auto-rotation on block.
 
+use rand::seq::SliceRandom;
+use rand::Rng;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use rand::seq::SliceRandom;
-use rand::Rng;
 
 use crate::mesh::node::ProxyNode;
 
@@ -40,14 +40,13 @@ impl ProxyPool {
         let reader = BufReader::new(file);
         let mut loaded = 0;
 
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                let trimmed = l.trim();
-                if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                    if self.add_proxy(trimmed).await.is_ok() {
-                        loaded += 1;
-                    }
-                }
+        for l in reader.lines().flatten() {
+            let trimmed = l.trim();
+            if !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && self.add_proxy(trimmed).await.is_ok()
+            {
+                loaded += 1;
             }
         }
         Ok(loaded)
@@ -78,7 +77,7 @@ impl ProxyPool {
     pub async fn get_random_chain(&self, min_hops: usize, max_hops: usize) -> Vec<ProxyNode> {
         let list = self.nodes.read().await;
         let mut healthy: Vec<ProxyNode> = list.iter().filter(|n| n.is_alive).cloned().collect();
-        
+
         // Fallback if all are marked dead (for testing/fault tolerance)
         if healthy.is_empty() {
             healthy = list.clone();
@@ -91,7 +90,7 @@ impl ProxyPool {
         let mut rng = rand::thread_rng();
         let max_possible = healthy.len().min(max_hops);
         let min_possible = min_hops.min(max_possible);
-        
+
         // Ensure path_len is at least 1 if possible
         let path_len = if min_possible < max_possible {
             rng.gen_range(min_possible..=max_possible)
@@ -102,7 +101,6 @@ impl ProxyPool {
         healthy.shuffle(&mut rng);
         healthy.into_iter().take(path_len).collect()
     }
-
 
     /// Rotates away from a blocked proxy and returns a fresh healthy node.
     pub async fn rotate_on_block(&self, blocked_url: &str) -> Option<ProxyNode> {
@@ -125,7 +123,12 @@ impl ProxyPool {
     }
 
     pub async fn alive_count(&self) -> usize {
-        self.nodes.read().await.iter().filter(|n| n.is_alive).count()
+        self.nodes
+            .read()
+            .await
+            .iter()
+            .filter(|n| n.is_alive)
+            .count()
     }
 }
 

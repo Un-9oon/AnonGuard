@@ -1,4 +1,6 @@
-use anonguard::core::{ActiveGuarded, DroppedFailClosed, GuardedSocket, State, Uninitialized, Verifying};
+use anonguard::core::{
+    ActiveGuarded, DroppedFailClosed, GuardedSocket, State, Uninitialized, Verifying,
+};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
