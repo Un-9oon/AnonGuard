@@ -11,11 +11,11 @@ Modern threat-intelligence platforms and AI-enhanced Web Application Firewalls (
 
 We present **AnonGuard**, an autonomous, cross-layer anti-attribution architecture designed to preserve anonymity for automated security agents and penetration testing scanners. AnonGuard combines:
 1. A **provably fail-closed state machine** enforcing zero transitional leakage during proxy dropouts,
-2. **Deterministic remote name resolution** and IPv6 suppression at the socket abstraction layer,
+2. **Reverse Tunneling Rendezvous Architecture** allowing volunteers to host NAT-traversing exit relays,
 3. **Cryptographic TLS impersonation** matching modern browser cipher suites and extension orders, and
-4. **Poisson-process statistical traffic morphing** that degrades ML flow classifiers to near-random accuracy.
+4. **Chaotic Attractor Traffic Morphing** that maps inter-packet delays and sizes to the Lorenz strange attractor, degrading ML flow classifiers to near-random accuracy.
 
-Empirical evaluation demonstrates zero-byte leakage across simulated link terminations, sub-45ms latency overhead, and seamless integration with production-grade security scanners.
+Empirical evaluation demonstrates zero-byte leakage across simulated link terminations, highly robust reverse-tunneling uptime, and a complete degradation of deep-learning traffic correlation.
 
 ---
 
@@ -48,18 +48,18 @@ AnonGuard operates across four discrete subsystems:
 │ 1. Core State Engine                                        │
 │    States: UNINITIALIZED ──> ACTIVE_GUARDED ──> FAIL_CLOSED │
 ├─────────────────────────────────────────────────────────────┤
-│ 2. Kernel & Transport Isolation                             │
-│    - Fail-closed KillSwitch Transport Adapter               │
-│    - SOCKS5h Remote FQDN Resolution                         │
-│    - Socket getaddrinfo IPv4 AF_INET Lockdown               │
+│ 2. Mesh Routing & Reverse Tunneling                         │
+│    - Directory Authority Tracker                            │
+│    - NAT-Traversing Reverse Relays                          │
+│    - Dynamic Onion Circuit Generation                       │
 ├─────────────────────────────────────────────────────────────┤
 │ 3. Cryptographic & Protocol Normalizer                      │
 │    - Chrome 120+ / Firefox 124+ JA4 Profile Generator       │
 │    - Deterministic Header Sequence Enforcer                 │
 ├─────────────────────────────────────────────────────────────┤
-│ 4. Adaptive Traffic Morphing Engine                         │
-│    - Poisson Process Jitter Distribution                    │
-│    - MTU Padding & Dynamic Packet Length Normalizer         │
+│ 4. Chaotic Traffic Morphing Engine                          │
+│    - Lorenz System ($X, Y$) Size & Delay Sharding           │
+│    - Continuous Deterministic Chaos generation              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
