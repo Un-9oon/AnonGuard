@@ -1,0 +1,18 @@
+# Rust artifacts
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Test & OS artifacts
+*.pcap
+*.log
+.DS_Store
