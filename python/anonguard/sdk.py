@@ -34,6 +34,8 @@ class GuardConfig:
     disable_ipv6: bool = True
     verify_ip_before_start: bool = True
     enable_jitter: bool = False
+    min_chain_length: int = 1
+    max_chain_length: int = 3
     verification_endpoints: List[str] = field(
         default_factory=lambda: [
             "https://api.ipify.org?format=json",

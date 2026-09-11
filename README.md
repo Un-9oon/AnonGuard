@@ -14,6 +14,11 @@ AnonGuard is a research-grade privacy and anti-attribution framework designed to
 
 ```bash
 cd /home/we/AnonGuard
+
+# Install Rust engine
+cargo build --release
+
+# Install Python SDK (editable mode)
 pip install -e .
 ```
 
@@ -25,7 +30,7 @@ from anonguard import AnonGuard, GuardConfig
 # Initialize AnonGuard with proxy nodes
 guard = AnonGuard(
     proxies=["socks5://127.0.0.1:9050"],
-    config=GuardConfig(strict=True, enable_jitter=True)
+    config=GuardConfig(strict_killswitch=True, enable_jitter=True)
 )
 
 # Acquire a guarded session with fail-closed kill switch
@@ -34,8 +39,37 @@ response = session.get("https://api.ipify.org?format=json")
 print("Anonymized IP:", response.json()["ip"])
 ```
 
+### GuardConfig Options
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `strict_killswitch` | `bool` | `True` | Immediately block all traffic if proxy fails |
+| `enforce_remote_dns` | `bool` | `True` | Force SOCKS5h remote FQDN resolution |
+| `disable_ipv6` | `bool` | `True` | Block IPv6 to prevent dual-stack leaks |
+| `verify_ip_before_start` | `bool` | `True` | Pre-flight IP leak verification |
+| `enable_jitter` | `bool` | `False` | Poisson timing jitter for anti-correlation |
+| `verification_timeout` | `float` | `8.0` | Timeout for IP verification endpoints (seconds) |
+
 ## Running as Local Gateway
 
 ```bash
-anonguard serve --listen 127.0.0.1:9050 --pool proxies.txt
+# Start the daemon on default port 9050
+./target/release/anonguard-daemon
+
+# Or with custom options
+./target/release/anonguard-daemon --listen 127.0.0.1:9050 --proxy socks5://127.0.0.1:1080 --jitter
+```
+
+## Running Tests
+
+```bash
+# Rust unit tests
+cargo test
+
+# Python research benchmarks (requires PYTHONPATH)
+PYTHONPATH=python:$PYTHONPATH python3 python/research_benchmarks/leak_audit.py
+PYTHONPATH=python:$PYTHONPATH python3 python/research_benchmarks/timing_classifier.py
+
+# Full packet inspection test (localhost, no external dependencies)
+PYTHONPATH=python:$PYTHONPATH python3 research_benchmarks/packet_verifier.py
 ```

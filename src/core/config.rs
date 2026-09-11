@@ -20,6 +20,12 @@ pub struct GuardConfig {
     pub padding_block_size: usize,
     /// TLS JA4 emulation profile (e.g. "chrome_120", "firefox_124")
     pub ja4_profile: String,
+    /// Minimum number of proxies to chain
+    pub min_chain_length: usize,
+    /// Maximum number of proxies to chain
+    pub max_chain_length: usize,
+    /// Run as a native SOCKS5 relay node
+    pub relay_mode: bool,
     /// Gateway listen address
     pub listen_addr: String,
 }
@@ -35,6 +41,9 @@ impl Default for GuardConfig {
             enable_padding: false,
             padding_block_size: 512,
             ja4_profile: "chrome_120".to_string(),
+            min_chain_length: 1,
+            max_chain_length: 3,
+            relay_mode: false,
             listen_addr: "127.0.0.1:9050".to_string(),
         }
     }

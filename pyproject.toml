@@ -31,9 +31,6 @@ dev = [
     "pytest-cov>=4.0.0",
 ]
 
-[project.scripts]
-anonguard = "anonguard.api.gateway:main"
-
 [tool.setuptools.packages.find]
 where = ["python"]
 

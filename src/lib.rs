@@ -44,3 +44,9 @@ impl AnonGuardEngine {
         self.kill_switch.is_tripped()
     }
 }
+
+impl Default for AnonGuardEngine {
+    fn default() -> Self {
+        Self::new(GuardConfig::default())
+    }
+}

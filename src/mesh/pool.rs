@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use rand::seq::SliceRandom;
+use rand::Rng;
 
 use crate::mesh::node::ProxyNode;
 
@@ -71,6 +73,36 @@ impl ProxyPool {
         let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % count;
         Some(list[idx].clone())
     }
+
+    /// Retrieves a random chain of unique healthy proxies
+    pub async fn get_random_chain(&self, min_hops: usize, max_hops: usize) -> Vec<ProxyNode> {
+        let list = self.nodes.read().await;
+        let mut healthy: Vec<ProxyNode> = list.iter().filter(|n| n.is_alive).cloned().collect();
+        
+        // Fallback if all are marked dead (for testing/fault tolerance)
+        if healthy.is_empty() {
+            healthy = list.clone();
+        }
+
+        if healthy.is_empty() {
+            return Vec::new();
+        }
+
+        let mut rng = rand::thread_rng();
+        let max_possible = healthy.len().min(max_hops);
+        let min_possible = min_hops.min(max_possible);
+        
+        // Ensure path_len is at least 1 if possible
+        let path_len = if min_possible < max_possible {
+            rng.gen_range(min_possible..=max_possible)
+        } else {
+            min_possible.max(1).min(healthy.len())
+        };
+
+        healthy.shuffle(&mut rng);
+        healthy.into_iter().take(path_len).collect()
+    }
+
 
     /// Rotates away from a blocked proxy and returns a fresh healthy node.
     pub async fn rotate_on_block(&self, blocked_url: &str) -> Option<ProxyNode> {

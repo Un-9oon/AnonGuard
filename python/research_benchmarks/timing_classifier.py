@@ -49,6 +49,9 @@ def evaluate_entropy(delays: List[float], bins: int = 10) -> float:
 
 
 def main():
+    # Fixed seed for reproducibility
+    random.seed(42)
+
     print("=================================================================")
     print(" AnonGuard Research: Traffic Analysis & Anti-Correlation Benchmark")
     print("=================================================================")
@@ -61,7 +64,9 @@ def main():
 
     print(f"[-] Unprotected Scanner Traffic Entropy: {unprotected_entropy:.4f} bits")
     print(f"[+] AnonGuard Poisson-Morphed Entropy:    {morphed_entropy:.4f} bits")
-    print(f"[*] Entropy Increase:                    +{((morphed_entropy - unprotected_entropy) / unprotected_entropy) * 100:.2f}%")
+    pct_change = ((morphed_entropy - unprotected_entropy) / unprotected_entropy) * 100
+    sign = "+" if pct_change >= 0 else ""
+    print(f"[*] Entropy Change:                      {sign}{pct_change:.2f}%")
     print("\nResult: High entropy distribution effectively flattens timing signatures,")
     print("reducing ML classifier accuracy against traffic correlation down to chance levels (~50%).")
     print("=================================================================")
