@@ -589,25 +589,38 @@ pub async fn stream_onion_circuit(
         let _ = client_write.shutdown().await;
     };
 
-    if let Some(ks) = kill_switch {
-        let mut rx = ks.subscribe();
-        tokio::select! {
-            _ = fwd => {},
-            _ = bwd => {},
-            _ = async {
+    tokio::pin!(fwd);
+    tokio::pin!(bwd);
+
+    let mut fwd_done = false;
+    let mut rx_opt = kill_switch.map(|ks| ks.subscribe());
+
+    loop {
+        let kill_wait = async {
+            if let Some(ref mut rx) = rx_opt {
                 while rx.changed().await.is_ok() {
                     if *rx.borrow() {
-                        break;
+                        return;
                     }
                 }
-            } => {
-                tracing::error!("[AnonGuard KillSwitch] TRIPPED! Enforcing immediate fail-closed circuit termination.");
+            } else {
+                std::future::pending::<()>().await;
             }
-        }
-    } else {
+        };
+
         tokio::select! {
-            _ = fwd => {},
-            _ = bwd => {},
+            _ = kill_wait => {
+                tracing::error!("[AnonGuard KillSwitch] TRIPPED! Enforcing immediate fail-closed circuit termination.");
+                break;
+            }
+            _ = &mut bwd => {
+                // Upstream connection ended or remote sent Destroy cell
+                break;
+            }
+            _ = &mut fwd, if !fwd_done => {
+                // Client upload finished; keep bwd running until upstream closes
+                fwd_done = true;
+            }
         }
     }
 
@@ -780,9 +793,35 @@ pub async fn handle_onion_relay_connection(
                     }
                     res = ds.read(&mut raw_buf) => {
                         let n = match res {
-                            Ok(0) => break,
+                            Ok(0) => {
+                                if let Ok(destroy_cell) = OnionCell::new(
+                                    relay_hop.circuit_id,
+                                    CellCommand::Destroy,
+                                    1,
+                                    &[],
+                                    &relay_hop.crypt.mac_key,
+                                ) {
+                                    let mut wire = destroy_cell.serialize();
+                                    relay_hop.wrap_backward(&mut wire);
+                                    let _ = client.write_all(&wire).await;
+                                }
+                                break;
+                            }
                             Ok(n) => n,
-                            Err(_) => break,
+                            Err(_) => {
+                                if let Ok(destroy_cell) = OnionCell::new(
+                                    relay_hop.circuit_id,
+                                    CellCommand::Destroy,
+                                    1,
+                                    &[],
+                                    &relay_hop.crypt.mac_key,
+                                ) {
+                                    let mut wire = destroy_cell.serialize();
+                                    relay_hop.wrap_backward(&mut wire);
+                                    let _ = client.write_all(&wire).await;
+                                }
+                                break;
+                            }
                         };
                         let Ok(return_cell) = OnionCell::new(
                             relay_hop.circuit_id,
