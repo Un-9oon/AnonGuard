@@ -77,6 +77,14 @@ struct Args {
     #[arg(long)]
     authorities: Option<String>,
 
+    /// Comma-separated list of Directory Authority public keys (e.g. auth-primary:hex_key,...)
+    #[arg(long)]
+    authority_keys: Option<String>,
+
+    /// Quorum threshold for Directory Authority consensus
+    #[arg(long, default_value_t = 1)]
+    quorum_threshold: usize,
+
     /// Enable 3-hop Layered Onion Encryption (Sphinx / Tor-style cell peeling)
     #[arg(long, default_value_t = false)]
     onion: bool,
@@ -98,6 +106,17 @@ struct Args {
     fetch_from: Option<String>,
 }
 
+fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for i in 0..32 {
+        bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
@@ -114,6 +133,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         Vec::new()
     };
+
+    let mut trusted_authorities: std::collections::HashMap<String, ed25519_dalek::VerifyingKey> =
+        std::collections::HashMap::new();
+    if let Some(ref keys_str) = args.authority_keys {
+        for entry in keys_str.split(',') {
+            let parts: Vec<&str> = entry.trim().split(':').collect();
+            if parts.len() == 2 {
+                let id = parts[0].trim().to_string();
+                if let Some(bytes) = decode_hex_32(parts[1].trim()) {
+                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
+                        trusted_authorities.insert(id, vk);
+                    }
+                }
+            }
+        }
+    }
 
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
@@ -193,6 +228,100 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     if !args.relay && !args.reverse_relay {
+        // Wire Multi-Authority Consensus retrieval & cryptographic quorum verification
+        if !config.directory_authorities.is_empty() {
+            let pool_clone = pool.clone();
+            let auth_endpoints = config.directory_authorities.clone();
+            let mut auth_keys = trusted_authorities.clone();
+            let quorum_thresh = args.quorum_threshold;
+
+            tokio::spawn(async move {
+                loop {
+                    for endpoint in &auth_endpoints {
+                        let host_port = endpoint.trim_start_matches("http://");
+                        let pinned_key = if auth_keys.len() == 1 {
+                            auth_keys.values().next()
+                        } else {
+                            auth_keys.get(endpoint)
+                        };
+
+                        match tokio::net::TcpStream::connect(host_port).await {
+                            Ok(stream) => {
+                                match anonguard::mesh::SecureTransportSession::client_handshake(
+                                    stream, pinned_key,
+                                )
+                                .await
+                                {
+                                    Ok(mut session) => {
+                                        if let Some(peer_vk) = session.peer_verifying_key() {
+                                            if auth_keys.is_empty() {
+                                                auth_keys.insert(endpoint.clone(), peer_vk);
+                                                auth_keys
+                                                    .insert("auth-primary".to_string(), peer_vk);
+                                            }
+                                        }
+
+                                        if session.write_frame(b"GET_CONSENSUS").await.is_ok() {
+                                            if let Ok(frame) = session.read_frame().await {
+                                                if let Ok(doc) = serde_json::from_slice::<
+                                                    anonguard::mesh::ConsensusDocument,
+                                                >(
+                                                    &frame
+                                                ) {
+                                                    let now =
+                                                        anonguard::mesh::current_timestamp_secs();
+                                                    match pool_clone
+                                                        .load_from_consensus(
+                                                            &doc,
+                                                            &auth_keys,
+                                                            quorum_thresh,
+                                                            now,
+                                                        )
+                                                        .await
+                                                    {
+                                                        Ok(loaded) => {
+                                                            tracing::info!(
+                                                                loaded = loaded,
+                                                                endpoint = %endpoint,
+                                                                "[AnonGuard Consensus] Verified M-of-N consensus document and loaded active relays"
+                                                            );
+                                                            break;
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                error = %e,
+                                                                endpoint = %endpoint,
+                                                                "[AnonGuard Consensus] Consensus quorum verification failed"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            endpoint = %endpoint,
+                                            "[AnonGuard Consensus] Secure transport handshake with Directory Authority failed"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    endpoint = %endpoint,
+                                    "[AnonGuard Consensus] Failed to connect to Directory Authority"
+                                );
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
+        }
+
         if let Some(tracker_url) = args.fetch_from.clone() {
             let pool_clone = pool.clone();
             tokio::spawn(async move {
@@ -209,12 +338,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             let resp_str = String::from_utf8_lossy(&resp[..n]);
                             if let Some(idx) = resp_str.find("\r\n\r\n") {
                                 let body = &resp_str[idx + 4..];
-                                // Clear existing nodes and add new ones
+                                // Clear existing nodes and add new authenticated ones
                                 for line in body.lines() {
-                                    let node = line.trim();
-                                    if !node.is_empty() {
-                                        // Store as reverse:// to signal the engine to use Rendezvous connection
-                                        let reverse_uri = format!("reverse://{}:0", node);
+                                    let trimmed = line.trim();
+                                    if !trimmed.is_empty() {
+                                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                                        let reverse_uri = if parts.len() >= 2 {
+                                            format!("reverse://{}@{}:0", parts[1], parts[0])
+                                        } else {
+                                            format!("reverse://{}:0", parts[0])
+                                        };
                                         let _ = pool_clone.add_proxy(&reverse_uri).await;
                                     }
                                 }

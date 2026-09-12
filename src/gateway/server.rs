@@ -6,7 +6,10 @@ use tracing::{error, info, warn};
 use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
-use crate::morphing::{PoissonJitter, LorenzAttractor, QuantumRmtEngine, QuantumEnsemble, JitterEngine, morph_bidirectional_guarded};
+use crate::morphing::{
+    morph_bidirectional_guarded, JitterEngine, LorenzAttractor, PoissonJitter, QuantumEnsemble,
+    QuantumRmtEngine,
+};
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 use crate::onion::circuit::{
     build_create_cell, decode_extend_payload, encode_extend_payload, handle_create_cell,
@@ -30,7 +33,9 @@ impl GatewayServer {
             } else {
                 QuantumEnsemble::GOE
             };
-            Some(JitterEngine::Quantum(QuantumRmtEngine::new(ensemble, 1.5, 1024)))
+            Some(JitterEngine::Quantum(QuantumRmtEngine::new(
+                ensemble, 1.5, 1024,
+            )))
         } else if config.enable_chaos {
             Some(JitterEngine::Chaos(LorenzAttractor::new(
                 config.chaos_sigma,
@@ -90,10 +95,14 @@ impl GatewayServer {
                     let is_socks5 = client.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
                     if is_socks5 {
                         let (target_host, target_port) =
-                            match crate::gateway::chain::intercept_socks5_request(&mut client).await {
+                            match crate::gateway::chain::intercept_socks5_request(&mut client).await
+                            {
                                 Ok(res) => res,
                                 Err(e) => {
-                                    error!("Relay Mode: Failed to intercept SOCKS5 handshake: {}", e);
+                                    error!(
+                                        "Relay Mode: Failed to intercept SOCKS5 handshake: {}",
+                                        e
+                                    );
                                     return;
                                 }
                             };
@@ -143,32 +152,130 @@ impl GatewayServer {
                     };
 
                 // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
-                    let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
-                        pool.get_diverse_onion_chain(
-                            config.min_chain_length.max(3),
-                            config.max_chain_length.max(3),
-                            config.enforce_subnet_diversity,
-                        )
+                let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
+                    pool.get_diverse_onion_chain(
+                        config.min_chain_length.max(3),
+                        config.max_chain_length.max(3),
+                        config.enforce_subnet_diversity,
+                    )
+                    .await
+                } else {
+                    pool.get_random_chain(config.min_chain_length, config.max_chain_length)
                         .await
+                };
+                if chain.is_empty() {
+                    warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
+                    return;
+                }
+
+                if config.enable_onion_routing {
+                    // 3. Authenticated Telescopic Onion Routing
+                    // Connect TCP strictly to the entry Guard node (Hop 0).
+                    // Zero intermediate SOCKS5 chaining — eliminates path leak completely.
+                    let entry_node = &chain[0];
+                    let mut guard_stream = if entry_node.raw_url.starts_with("reverse://") {
+                        let node_id = entry_node.host.clone();
+                        let auth_token = entry_node.username.as_deref().unwrap_or("");
+                        let tracker_url = config
+                            .tracker_url
+                            .as_ref()
+                            .expect("tracker_url required for reverse")
+                            .trim_start_matches("http://")
+                            .to_string();
+                        match TcpStream::connect(&tracker_url).await {
+                            Ok(mut s) => {
+                                use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                                let payload = if !auth_token.is_empty() {
+                                    format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
+                                } else {
+                                    format!("CONNECT_REVERSE {}\n", node_id)
+                                };
+                                let _ = s.write_all(payload.as_bytes()).await;
+                                let mut reader = BufReader::new(s);
+                                let mut resp = String::new();
+                                if reader.read_line(&mut resp).await.is_ok() && resp.trim() == "OK"
+                                {
+                                    reader.into_inner()
+                                } else {
+                                    error!(
+                                        "Tracker rejected CONNECT_REVERSE for entry node: {}",
+                                        resp
+                                    );
+                                    pool.rotate_on_block(&entry_node.raw_url).await;
+                                    return;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to connect to tracker {}: {}", tracker_url, e);
+                                pool.rotate_on_block(&entry_node.raw_url).await;
+                                return;
+                            }
+                        }
                     } else {
-                        pool.get_random_chain(config.min_chain_length, config.max_chain_length)
-                            .await
+                        let addr = format!("{}:{}", entry_node.host, entry_node.port);
+                        match TcpStream::connect(&addr).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("Failed to connect to entry Guard node {}: {}", addr, e);
+                                pool.rotate_on_block(&entry_node.raw_url).await;
+                                if config.strict_killswitch {
+                                    kill_switch.trip("Entry Guard node connection failure");
+                                }
+                                return;
+                            }
+                        }
                     };
-                    if chain.is_empty() {
-                        warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
-                        return;
+
+                    // Generate circuit ID where highest byte is not 0x05 so Guard peeks != 0x05
+                    let mut circuit_id: u32 = rand::random();
+                    if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
+                        circuit_id ^= 0x10000000;
                     }
 
-                    // 3. Build Onion Tunnel
+                    match build_telescopic_circuit(
+                        &mut guard_stream,
+                        circuit_id,
+                        &chain,
+                        &target_host,
+                        target_port,
+                    )
+                    .await
+                    {
+                        Ok((circuit, exit_mac)) => {
+                            info!(
+                                circuit_id = circuit_id,
+                                hops = chain.len(),
+                                target = %format!("{}:{}", target_host, target_port),
+                                "Activating authentic 3-hop layered ChaCha20/HMAC-SHA256 onion circuit to destination"
+                            );
+                            let _ = stream_onion_circuit(
+                                &mut client,
+                                &mut guard_stream,
+                                circuit,
+                                exit_mac,
+                                jitter.clone(),
+                                Some(kill_switch.clone()),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            error!("Failed to negotiate telescopic onion circuit: {}", e);
+                            if config.strict_killswitch {
+                                kill_switch.trip("Telescopic circuit negotiation failure");
+                            }
+                        }
+                    }
+                } else {
+                    // Plain SOCKS5 multi-proxy chaining (when onion routing is disabled)
                     let mut current_stream = None;
                     for (i, node) in chain.iter().enumerate() {
                         let is_first = i == 0;
                         let is_last = i == chain.len() - 1;
 
-                        // If first node, connect raw TCP
                         if is_first {
                             if node.raw_url.starts_with("reverse://") {
                                 let node_id = node.host.clone();
+                                let auth_token = node.username.as_deref().unwrap_or("");
                                 let tracker_url = config
                                     .tracker_url
                                     .as_ref()
@@ -180,21 +287,22 @@ impl GatewayServer {
                                         use tokio::io::{
                                             AsyncBufReadExt, AsyncWriteExt, BufReader,
                                         };
-                                        let payload = format!("CONNECT_REVERSE {}\n", node_id);
+                                        let payload = if !auth_token.is_empty() {
+                                            format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
+                                        } else {
+                                            format!("CONNECT_REVERSE {}\n", node_id)
+                                        };
                                         let _ = s.write_all(payload.as_bytes()).await;
                                         let mut reader = BufReader::new(s);
                                         let mut resp = String::new();
-                                        if reader.read_line(&mut resp).await.is_ok() {
-                                            if resp.trim() == "OK" {
-                                                current_stream = Some(reader.into_inner());
-                                            } else {
-                                                error!(
-                                                    "Tracker rejected CONNECT_REVERSE: {}",
-                                                    resp
-                                                );
-                                                pool.rotate_on_block(&node.raw_url).await;
-                                                return;
-                                            }
+                                        if reader.read_line(&mut resp).await.is_ok()
+                                            && resp.trim() == "OK"
+                                        {
+                                            current_stream = Some(reader.into_inner());
+                                        } else {
+                                            error!("Tracker rejected CONNECT_REVERSE: {}", resp);
+                                            pool.rotate_on_block(&node.raw_url).await;
+                                            return;
                                         }
                                     }
                                     Err(e) => {
@@ -235,7 +343,10 @@ impl GatewayServer {
 
                         if let Some(s) = current_stream.take() {
                             match crate::gateway::chain::socks5_connect_through(
-                                s, &next_host, next_port, config.disable_ipv6,
+                                s,
+                                &next_host,
+                                next_port,
+                                config.disable_ipv6,
                             )
                             .await
                             {
@@ -257,52 +368,22 @@ impl GatewayServer {
                         }
                     }
 
-                    // 4. Stream data through the completed onion tunnel
                     if let Some(mut upstream_stream) = current_stream {
                         info!(
-                            "Established {}-hop onion tunnel to {}:{}",
+                            "Established {}-hop proxy tunnel to {}:{}",
                             chain.len(),
                             target_host,
                             target_port
                         );
-
-                        if config.enable_onion_routing {
-                            let circuit_id: u32 = rand::random();
-                            match build_telescopic_circuit(&mut upstream_stream, circuit_id, &chain).await {
-                                Ok((circuit, exit_mac)) => {
-                                    info!(
-                                        circuit_id = circuit_id,
-                                        hops = chain.len(),
-                                        "Activating 3-hop layered ChaCha20/HMAC-SHA256 onion encryption on tunnel"
-                                    );
-                                    let _ = stream_onion_circuit(
-                                        &mut client,
-                                        &mut upstream_stream,
-                                        circuit,
-                                        exit_mac,
-                                        jitter.clone(),
-                                        Some(kill_switch.clone()),
-                                    )
-                                    .await;
-                                }
-                                Err(e) => {
-                                    error!("Failed to negotiate telescopic onion circuit: {}", e);
-                                    if config.strict_killswitch {
-                                        kill_switch.trip("Telescopic circuit negotiation failure");
-                                    }
-                                }
-                            }
-                        } else {
-                            let _ =
-                                crate::morphing::morph_bidirectional_guarded(
-                                    &mut client,
-                                    &mut upstream_stream,
-                                    jitter.clone(),
-                                    Some(kill_switch.clone()),
-                                )
-                                .await;
-                        }
+                        let _ = crate::morphing::morph_bidirectional_guarded(
+                            &mut client,
+                            &mut upstream_stream,
+                            jitter.clone(),
+                            Some(kill_switch.clone()),
+                        )
+                        .await;
                     }
+                }
             });
         }
     }
@@ -313,12 +394,15 @@ impl GatewayServer {
         node_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let host_port = tracker_url.trim_start_matches("http://");
-        info!("[AnonGuard Reverse Relay] Active and guarded. Maintaining outbound pool to Tracker: {}", host_port);
+        // Generate a cryptographically secure authorization token for this reverse relay instance
+        let auth_token = format!("{:016x}", rand::random::<u64>());
+        info!("[AnonGuard Reverse Relay] Active and guarded (node: {}, token: {}). Maintaining outbound pool to Tracker: {}", node_id, auth_token, host_port);
 
         // Keep a pool of 3 connections
         for _ in 0..3 {
             let hp = host_port.to_string();
             let nid = node_id.to_string();
+            let token = auth_token.clone();
             let jitter = self.jitter.clone();
             let kill_switch = self.kill_switch.clone();
 
@@ -328,8 +412,13 @@ impl GatewayServer {
                         Ok(mut stream) => {
                             use tokio::io::AsyncWriteExt;
                             let now = crate::mesh::sybil::current_timestamp_secs();
-                            let nonce = crate::mesh::sybil::solve_pow(&nid, now, 12);
-                            let payload = format!("REGISTER_REVERSE {} {} {}\n", nid, now, nonce);
+                            let nonce = crate::mesh::sybil::solve_pow(
+                                &nid,
+                                now,
+                                crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
+                            );
+                            let payload =
+                                format!("REGISTER_REVERSE {} {} {} {}\n", nid, token, now, nonce);
                             if stream.write_all(payload.as_bytes()).await.is_ok() {
                                 // Wait for the tracker to send data (meaning a client has connected to this stream)
                                 // We peek 1 byte to see if data arrived. If so, it's a SOCKS5 client!
@@ -532,6 +621,8 @@ pub async fn build_telescopic_circuit(
     stream: &mut TcpStream,
     circuit_id: u32,
     chain: &[crate::mesh::node::ProxyNode],
+    target_host: &str,
+    target_port: u16,
 ) -> Result<(OnionCircuit, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -548,7 +639,7 @@ pub async fn build_telescopic_circuit(
     stream.read_exact(&mut created_buf).await?;
     let created_cell = OnionCell::parse(&created_buf)
         .map_err(|e| format!("Failed to parse CREATED cell: {}", e))?;
-    let (fwd0, bwd0, mac0) = process_created_cell(&created_cell, client_secret_0, 0)
+    let (fwd0, bwd0, mac0) = process_created_cell(&created_cell, client_secret_0)
         .map_err(|e| format!("Failed to process Hop 0 CREATED cell: {}", e))?;
     circuit.add_hop(fwd0, bwd0, mac0);
     let mut exit_mac = mac0;
@@ -583,13 +674,38 @@ pub async fn build_telescopic_circuit(
             .unwrap_backward(&mut return_wire)
             .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {}", hop_idx, e))?;
 
-        let (fwd, bwd, mac) =
-            process_created_cell(&resp_cell, client_secret, hop_idx as u8)
-                .map_err(|e| format!("Failed to authenticate Hop {}: {}", hop_idx, e))?;
+        let (fwd, bwd, mac) = process_created_cell(&resp_cell, client_secret)
+            .map_err(|e| format!("Failed to authenticate Hop {}: {}", hop_idx, e))?;
         if hop_idx == chain.len() - 1 {
             exit_mac = mac;
         }
         circuit.add_hop(fwd, bwd, mac);
+    }
+
+    // 3. Instruct the exit hop to connect in-band to target_host:target_port
+    let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
+        .map_err(|e| format!("Failed to encode RELAY target payload: {}", e))?;
+    let relay_cell = OnionCell::new(circuit_id, CellCommand::Relay, 0, &relay_payload, &exit_mac)
+        .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
+
+    let wire_buffer = circuit.wrap_forward(&relay_cell);
+    stream.write_all(&wire_buffer).await?;
+
+    let mut return_wire = [0u8; ONION_CELL_SIZE];
+    stream.read_exact(&mut return_wire).await?;
+    let resp_cell = circuit
+        .unwrap_backward(&mut return_wire)
+        .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {}", e))?;
+
+    if !resp_cell.is_mac_valid(&exit_mac) {
+        return Err("Exit hop RELAY response HMAC-SHA256 verification failed".into());
+    }
+    if resp_cell.command != CellCommand::Relay {
+        return Err(format!(
+            "Expected RELAY response from exit hop, got {:?}",
+            resp_cell.command
+        )
+        .into());
     }
 
     Ok((circuit, exit_mac))
@@ -610,13 +726,17 @@ pub async fn handle_onion_relay_connection(
     let create_cell = OnionCell::parse(&initial_buf)
         .map_err(|e| format!("Failed to parse incoming CREATE cell: {}", e))?;
 
-    let (mut relay_hop, created_cell) = handle_create_cell(&create_cell, 0)
+    let (mut relay_hop, created_cell) = handle_create_cell(&create_cell)
         .map_err(|e| format!("Failed to handle CREATE cell: {}", e))?;
     client.write_all(&created_cell.serialize()).await?;
-    info!(circuit_id = create_cell.circuit_id, "Relay established initial onion circuit hop");
+    info!(
+        circuit_id = create_cell.circuit_id,
+        "Relay established initial onion circuit hop"
+    );
 
     // 2. Relay packet processing loop
     let mut downstream: Option<TcpStream> = None;
+    let mut is_exit = false;
     let mut rx_kill = kill_switch.as_ref().map(|ks| ks.subscribe());
 
     loop {
@@ -627,7 +747,6 @@ pub async fn handle_onion_relay_connection(
         }
 
         let mut client_buf = [0u8; ONION_CELL_SIZE];
-        let mut ds_buf = [0u8; ONION_CELL_SIZE];
 
         let kill_wait = async {
             if let Some(ref mut rx) = rx_kill {
@@ -642,51 +761,98 @@ pub async fn handle_onion_relay_connection(
         };
 
         if let Some(ref mut ds) = downstream {
-            tokio::select! {
-                _ = kill_wait => break,
-                res = client.read_exact(&mut client_buf) => {
-                    if res.is_err() { break; }
-                    match relay_hop.peel_forward(&mut client_buf) {
-                        Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
-                            if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
-                                let target = format!("{}:{}", next_h, next_p);
-                                if let Ok(mut next_s) = TcpStream::connect(&target).await {
-                                    if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
-                                        if next_s.write_all(&c_cell.serialize()).await.is_ok() {
-                                            let mut resp = [0u8; ONION_CELL_SIZE];
-                                            if next_s.read_exact(&mut resp).await.is_ok() {
-                                                relay_hop.wrap_backward(&mut resp);
-                                                let _ = client.write_all(&resp).await;
-                                                downstream = Some(next_s);
+            if is_exit {
+                // Exit relay: downstream is the destination target server (raw TCP)
+                let mut raw_buf = [0u8; PAYLOAD_SIZE];
+                tokio::select! {
+                    _ = kill_wait => break,
+                    res = client.read_exact(&mut client_buf) => {
+                        if res.is_err() { break; }
+                        match relay_hop.peel_forward(&mut client_buf) {
+                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Data, payload)) => {
+                                if ds.write_all(&payload).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Destroy, _)) => break,
+                            _ => {}
+                        }
+                    }
+                    res = ds.read(&mut raw_buf) => {
+                        let n = match res {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(_) => break,
+                        };
+                        let Ok(return_cell) = OnionCell::new(
+                            relay_hop.circuit_id,
+                            CellCommand::Data,
+                            1,
+                            &raw_buf[..n],
+                            &relay_hop.crypt.mac_key,
+                        ) else {
+                            break;
+                        };
+                        let mut wire = return_cell.serialize();
+                        relay_hop.wrap_backward(&mut wire);
+                        if let Some(ref j) = jitter {
+                            j.apply_delay().await;
+                        }
+                        if client.write_all(&wire).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Intermediate relay: downstream is another onion relay
+                let mut ds_buf = [0u8; ONION_CELL_SIZE];
+                tokio::select! {
+                    _ = kill_wait => break,
+                    res = client.read_exact(&mut client_buf) => {
+                        if res.is_err() { break; }
+                        match relay_hop.peel_forward(&mut client_buf) {
+                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
+                                if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
+                                    let target = format!("{}:{}", next_h, next_p);
+                                    if let Ok(mut next_s) = TcpStream::connect(&target).await {
+                                        if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
+                                            if next_s.write_all(&c_cell.serialize()).await.is_ok() {
+                                                let mut resp = [0u8; ONION_CELL_SIZE];
+                                                if next_s.read_exact(&mut resp).await.is_ok() {
+                                                    relay_hop.wrap_backward(&mut resp);
+                                                    let _ = client.write_all(&resp).await;
+                                                    downstream = Some(next_s);
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
-                        }
-                        Ok(PeelResult::ForwardDownstream(forward_buf)) => {
-                            if let Some(ref j) = jitter {
-                                j.apply_delay().await;
+                            Ok(PeelResult::ForwardDownstream(forward_buf)) => {
+                                if let Some(ref j) = jitter {
+                                    j.apply_delay().await;
+                                }
+                                if ds.write_all(&*forward_buf).await.is_err() {
+                                    break;
+                                }
                             }
-                            if ds.write_all(&*forward_buf).await.is_err() {
-                                break;
-                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
-                }
-                res = ds.read_exact(&mut ds_buf) => {
-                    if res.is_err() { break; }
-                    relay_hop.wrap_backward(&mut ds_buf);
-                    if let Some(ref j) = jitter {
-                        j.apply_delay().await;
-                    }
-                    if client.write_all(&ds_buf).await.is_err() {
-                        break;
+                    res = ds.read_exact(&mut ds_buf) => {
+                        if res.is_err() { break; }
+                        relay_hop.wrap_backward(&mut ds_buf);
+                        if let Some(ref j) = jitter {
+                            j.apply_delay().await;
+                        }
+                        if client.write_all(&ds_buf).await.is_err() {
+                            break;
+                        }
                     }
                 }
             }
         } else {
+            // Awaiting initial EXTEND (as intermediate relay) or RELAY (as exit relay)
             tokio::select! {
                 _ = kill_wait => break,
                 res = client.read_exact(&mut client_buf) => {
@@ -704,12 +870,41 @@ pub async fn handle_onion_relay_connection(
                                                     relay_hop.wrap_backward(&mut resp);
                                                     let _ = client.write_all(&resp).await;
                                                     downstream = Some(next_s);
+                                                    is_exit = false;
                                                 }
                                             }
                                         }
                                     }
                                     Err(e) => {
                                         error!("Relay failed to connect to next hop {}: {}", target, e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
+                            if let Ok((target_h, target_p)) = crate::onion::circuit::decode_relay_target(&payload) {
+                                let target = format!("{}:{}", target_h, target_p);
+                                match TcpStream::connect(&target).await {
+                                    Ok(target_s) => {
+                                        if let Ok(resp_cell) = OnionCell::new(
+                                            relay_hop.circuit_id,
+                                            CellCommand::Relay,
+                                            0,
+                                            b"CONNECTED",
+                                            &relay_hop.crypt.mac_key,
+                                        ) {
+                                            let mut resp = resp_cell.serialize();
+                                            relay_hop.wrap_backward(&mut resp);
+                                            if client.write_all(&resp).await.is_ok() {
+                                                info!("Exit relay successfully bridged circuit {} to target {}", relay_hop.circuit_id, target);
+                                                downstream = Some(target_s);
+                                                is_exit = true;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Exit relay failed to connect to destination target {}: {}", target, e);
                                         break;
                                     }
                                 }

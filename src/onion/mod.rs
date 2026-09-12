@@ -27,10 +27,10 @@ mod tests {
         let create_cell_0 = build_create_cell(circuit_id, &client_pub_0).unwrap();
 
         // Relay Guard handles CREATE cell
-        let (mut relay_guard, created_cell_0) = handle_create_cell(&create_cell_0, 0).unwrap();
+        let (mut relay_guard, created_cell_0) = handle_create_cell(&create_cell_0).unwrap();
 
         // Client processes CREATED cell
-        let (fwd0, bwd0, mac0) = process_created_cell(&created_cell_0, client_secret_0, 0).unwrap();
+        let (fwd0, bwd0, mac0) = process_created_cell(&created_cell_0, client_secret_0).unwrap();
         client_circuit.add_hop(fwd0, bwd0, mac0);
         assert_eq!(client_circuit.hop_count(), 1);
 
@@ -40,14 +40,8 @@ mod tests {
         let extend_payload_1 = encode_extend_payload("10.0.0.2", 9002, &client_pub_1).unwrap();
 
         // Client creates EXTEND cell addressed to Hop 0 (mac0)
-        let extend_cell_1 = OnionCell::new(
-            circuit_id,
-            CellCommand::Extend,
-            0,
-            &extend_payload_1,
-            &mac0,
-        )
-        .unwrap();
+        let extend_cell_1 =
+            OnionCell::new(circuit_id, CellCommand::Extend, 0, &extend_payload_1, &mac0).unwrap();
 
         // Client wraps forward through current hops (Hop 0)
         let mut wire_buffer_1 = client_circuit.wrap_forward(&extend_cell_1);
@@ -64,7 +58,7 @@ mod tests {
 
         // Guard forwards CREATE to Relay Middle
         let create_cell_1 = build_create_cell(circuit_id, &middle_pub_for_relay).unwrap();
-        let (mut relay_middle, created_cell_1) = handle_create_cell(&create_cell_1, 1).unwrap();
+        let (mut relay_middle, created_cell_1) = handle_create_cell(&create_cell_1).unwrap();
 
         // Guard wraps Relay Middle's CREATED cell backward towards client
         let mut return_wire_1 = created_cell_1.serialize();
@@ -76,7 +70,7 @@ mod tests {
 
         // Client processes CREATED cell to complete Hop 1
         let (fwd1, bwd1, mac1) =
-            process_created_cell(&client_unwrapped_1, client_secret_1, 1).unwrap();
+            process_created_cell(&client_unwrapped_1, client_secret_1).unwrap();
         client_circuit.add_hop(fwd1, bwd1, mac1);
         assert_eq!(client_circuit.hop_count(), 2);
 
@@ -86,14 +80,8 @@ mod tests {
         let extend_payload_2 = encode_extend_payload("10.0.0.3", 9003, &client_pub_2).unwrap();
 
         // Client creates EXTEND cell addressed to Hop 1 (mac1)
-        let extend_cell_2 = OnionCell::new(
-            circuit_id,
-            CellCommand::Extend,
-            0,
-            &extend_payload_2,
-            &mac1,
-        )
-        .unwrap();
+        let extend_cell_2 =
+            OnionCell::new(circuit_id, CellCommand::Extend, 0, &extend_payload_2, &mac1).unwrap();
 
         // Client wraps forward across Hop 1 then Hop 0
         let mut wire_buffer_2 = client_circuit.wrap_forward(&extend_cell_2);
@@ -117,7 +105,7 @@ mod tests {
 
         // Middle forwards CREATE to Relay Exit
         let create_cell_2 = build_create_cell(circuit_id, &exit_pub_for_relay).unwrap();
-        let (mut relay_exit, created_cell_2) = handle_create_cell(&create_cell_2, 2).unwrap();
+        let (mut relay_exit, created_cell_2) = handle_create_cell(&create_cell_2).unwrap();
 
         // Middle wraps backward towards Guard
         let mut return_wire_2 = created_cell_2.serialize();
@@ -130,14 +118,13 @@ mod tests {
         assert_eq!(client_unwrapped_2.command, CellCommand::Created);
 
         let (fwd2, bwd2, mac2) =
-            process_created_cell(&client_unwrapped_2, client_secret_2, 2).unwrap();
+            process_created_cell(&client_unwrapped_2, client_secret_2).unwrap();
         client_circuit.add_hop(fwd2, bwd2, mac2);
         assert_eq!(client_circuit.hop_count(), 3);
 
         // --- STEP 4: Authenticated Data Flow across Telescopically Negotiated 3-Hop Circuit ---
         let payload = b"TELESCOPIC_ONION_AUTHENTICATED_VERIFICATION";
-        let data_cell =
-            OnionCell::new(circuit_id, CellCommand::Data, 1, payload, &mac2).unwrap();
+        let data_cell = OnionCell::new(circuit_id, CellCommand::Data, 1, payload, &mac2).unwrap();
         let mut client_send_buf = client_circuit.wrap_forward(&data_cell);
 
         // Relay 0 (Guard) peels Layer 0 -> forwards downstream
@@ -194,7 +181,10 @@ mod tests {
         let mac_key = [7u8; 32];
         let huge_payload = vec![0xAA; PAYLOAD_SIZE + 1];
         let res = OnionCell::new(101, CellCommand::Data, 1, &huge_payload, &mac_key);
-        assert!(res.is_err(), "Oversized payload must not be silently truncated");
+        assert!(
+            res.is_err(),
+            "Oversized payload must not be silently truncated"
+        );
     }
 
     #[test]
@@ -215,9 +205,9 @@ mod tests {
     #[test]
     fn test_3_hop_authenticated_onion_circuit() {
         // 1. Establish 3 hops: Guard (hop 0), Middle (hop 1), Exit (hop 2)
-        let (client_hop0, relay0_keys) = perform_client_relay_handshake(0);
-        let (client_hop1, relay1_keys) = perform_client_relay_handshake(1);
-        let (client_hop2, relay2_keys) = perform_client_relay_handshake(2);
+        let (client_hop0, relay0_keys) = perform_client_relay_handshake();
+        let (client_hop1, relay1_keys) = perform_client_relay_handshake();
+        let (client_hop2, relay2_keys) = perform_client_relay_handshake();
 
         // 2. Initialize Client Circuit with 3 hops (forward, backward, mac)
         let mut client_circuit = OnionCircuit::new(42);
@@ -228,39 +218,51 @@ mod tests {
 
         // 3. Initialize Relay states
         let mut relay_guard = RelayCircuitHop::new(42, relay0_keys.0, relay0_keys.1, relay0_keys.2);
-        let mut relay_middle = RelayCircuitHop::new(42, relay1_keys.0, relay1_keys.1, relay1_keys.2);
+        let mut relay_middle =
+            RelayCircuitHop::new(42, relay1_keys.0, relay1_keys.1, relay1_keys.2);
         let mut relay_exit = RelayCircuitHop::new(42, relay2_keys.0, relay2_keys.1, relay2_keys.2);
 
         // 4. Client creates an authenticated Data Cell intended for Exit (Hop 2)
         let exit_mac_key = client_circuit.get_hop_mac_key(2).unwrap();
         let secret_payload = b"TOP_SECRET_E2E_AUTHENTICATED_CELL";
-        let original_cell = OnionCell::new(42, CellCommand::Data, 7, secret_payload, &exit_mac_key).unwrap();
+        let original_cell =
+            OnionCell::new(42, CellCommand::Data, 7, secret_payload, &exit_mac_key).unwrap();
 
         // 5. Client wraps the cell in 3 layers of encryption
         let mut wire_buffer = client_circuit.wrap_forward(&original_cell);
 
         // 6. Node 1 (Guard) receives wire buffer and peels Layer 1
-        let peel_guard = relay_guard.peel_forward(&mut wire_buffer).expect("Guard peel error");
+        let peel_guard = relay_guard
+            .peel_forward(&mut wire_buffer)
+            .expect("Guard peel error");
         match peel_guard {
             PeelResult::ForwardDownstream(mut next_buffer) => {
                 // Guard forwards downstream
                 // 7. Node 2 (Middle) receives peeled buffer and peels Layer 2
-                let peel_middle = relay_middle.peel_forward(&mut next_buffer).expect("Middle peel error");
+                let peel_middle = relay_middle
+                    .peel_forward(&mut next_buffer)
+                    .expect("Middle peel error");
                 match peel_middle {
                     PeelResult::ForwardDownstream(mut exit_buffer) => {
                         // Middle forwards to Exit
                         // 8. Node 3 (Exit) receives peeled buffer and peels Layer 3
-                        let peel_exit = relay_exit.peel_forward(&mut exit_buffer).expect("Exit peel error");
+                        let peel_exit = relay_exit
+                            .peel_forward(&mut exit_buffer)
+                            .expect("Exit peel error");
                         match peel_exit {
                             PeelResult::AddressedToThisRelay(cmd, data) => {
                                 // Exit verifies Poly1305 MAC and extracts payload!
                                 assert_eq!(cmd, CellCommand::Data);
                                 assert_eq!(data.as_slice(), secret_payload);
                             }
-                            PeelResult::ForwardDownstream(_) => panic!("Exit node should have consumed the cell!"),
+                            PeelResult::ForwardDownstream(_) => {
+                                panic!("Exit node should have consumed the cell!")
+                            }
                         }
                     }
-                    PeelResult::AddressedToThisRelay(_, _) => panic!("Middle should not have matched MAC!"),
+                    PeelResult::AddressedToThisRelay(_, _) => {
+                        panic!("Middle should not have matched MAC!")
+                    }
                 }
             }
             PeelResult::AddressedToThisRelay(_, _) => panic!("Guard should not have matched MAC!"),
@@ -268,7 +270,8 @@ mod tests {
 
         // 9. Return Path (Backward Direction):
         let response_data = b"EXIT_AUTHENTICATED_RESPONSE";
-        let exit_resp_cell = OnionCell::new(42, CellCommand::Data, 7, response_data, &exit_mac_key).unwrap();
+        let exit_resp_cell =
+            OnionCell::new(42, CellCommand::Data, 7, response_data, &exit_mac_key).unwrap();
         let mut return_buffer = exit_resp_cell.serialize();
 
         // Exit wraps in Layer 3
@@ -285,6 +288,9 @@ mod tests {
 
         assert_eq!(client_recovered.command, CellCommand::Data);
         assert!(client_recovered.is_mac_valid(&exit_mac_key));
-        assert_eq!(&client_recovered.payload[..response_data.len()], response_data);
+        assert_eq!(
+            &client_recovered.payload[..response_data.len()],
+            response_data
+        );
     }
 }

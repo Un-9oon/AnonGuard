@@ -21,10 +21,25 @@ pub enum SybilError {
 impl std::fmt::Display for SybilError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidProofOfWork => write!(f, "Cryptographic Proof-of-Work invalid or insufficient difficulty"),
-            Self::ExpiredTimestamp(ts) => write!(f, "PoW registration challenge timestamp expired or drifted: {}", ts),
-            Self::SubnetCollision(prefix) => write!(f, "Sybil detection: Circuit nodes collide on /16 subnet prefix {}.{}", prefix[0], prefix[1]),
-            Self::DuplicateNode(host) => write!(f, "Sybil detection: Duplicate node address in circuit: {}", host),
+            Self::InvalidProofOfWork => write!(
+                f,
+                "Cryptographic Proof-of-Work invalid or insufficient difficulty"
+            ),
+            Self::ExpiredTimestamp(ts) => write!(
+                f,
+                "PoW registration challenge timestamp expired or drifted: {}",
+                ts
+            ),
+            Self::SubnetCollision(prefix) => write!(
+                f,
+                "Sybil detection: Circuit nodes collide on /16 subnet prefix {}.{}",
+                prefix[0], prefix[1]
+            ),
+            Self::DuplicateNode(host) => write!(
+                f,
+                "Sybil detection: Duplicate node address in circuit: {}",
+                host
+            ),
         }
     }
 }
@@ -143,7 +158,13 @@ mod tests {
         assert!(verify_pow(node_id, now, nonce, difficulty, now));
 
         // Tampering with node_id should fail
-        assert!(!verify_pow("ed25519_node_tampered", now, nonce, difficulty, now));
+        assert!(!verify_pow(
+            "ed25519_node_tampered",
+            now,
+            nonce,
+            difficulty,
+            now
+        ));
 
         // Expired timestamp should fail
         assert!(!verify_pow(node_id, now - 1000, nonce, difficulty, now));

@@ -65,7 +65,9 @@ impl DirectoryAuthority {
                 ));
             }
             if descriptor.registered_at <= existing.registered_at {
-                return Err("Replay attack prevented: registration timestamp is not newer".to_string());
+                return Err(
+                    "Replay attack prevented: registration timestamp is not newer".to_string(),
+                );
             }
         }
 
@@ -108,15 +110,17 @@ impl DirectoryAuthority {
             let signing_key = self.signing_key.clone();
 
             tokio::spawn(async move {
-                match SecureTransportSession::server_handshake(stream).await {
+                match SecureTransportSession::server_handshake(stream, Some(&signing_key)).await {
                     Ok(mut session) => {
                         while let Ok(frame) = session.read_frame().await {
                             let text = String::from_utf8_lossy(&frame);
                             if text.starts_with("GET_CONSENSUS") {
                                 let relays = active_relays.read().await;
-                                let relay_list: Vec<RelayDescriptor> = relays.values().cloned().collect();
+                                let relay_list: Vec<RelayDescriptor> =
+                                    relays.values().cloned().collect();
                                 let now = current_timestamp_secs();
-                                let mut consensus = ConsensusDocument::new(now, now + 3600, relay_list);
+                                let mut consensus =
+                                    ConsensusDocument::new(now, now + 3600, relay_list);
                                 consensus.sign_with_authority(&auth_id, &signing_key);
 
                                 if let Ok(serialized) = serde_json::to_vec(&consensus) {
@@ -128,14 +132,30 @@ impl DirectoryAuthority {
                                         let mut relays = active_relays.write().await;
                                         let now = current_timestamp_secs();
                                         if !desc.verify_identity() {
-                                            let _ = session.write_frame(b"ERROR_SIGNATURE_INVALID").await;
-                                        } else if !verify_pow(&desc.node_id, desc.registered_at, desc.pow_nonce, DEFAULT_POW_DIFFICULTY, now) {
+                                            let _ = session
+                                                .write_frame(b"ERROR_SIGNATURE_INVALID")
+                                                .await;
+                                        } else if !verify_pow(
+                                            &desc.node_id,
+                                            desc.registered_at,
+                                            desc.pow_nonce,
+                                            DEFAULT_POW_DIFFICULTY,
+                                            now,
+                                        ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
-                                            if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
-                                                let _ = session.write_frame(b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED").await;
+                                            if existing.identity_key_ed25519
+                                                != desc.identity_key_ed25519
+                                            {
+                                                let _ = session
+                                                    .write_frame(
+                                                        b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED",
+                                                    )
+                                                    .await;
                                             } else if desc.registered_at <= existing.registered_at {
-                                                let _ = session.write_frame(b"ERROR_REPLAY_DETECTED").await;
+                                                let _ = session
+                                                    .write_frame(b"ERROR_REPLAY_DETECTED")
+                                                    .await;
                                             } else {
                                                 relays.insert(desc.node_id.clone(), desc);
                                                 let _ = session.write_frame(b"OK_REGISTERED").await;
@@ -146,7 +166,9 @@ impl DirectoryAuthority {
                                         }
                                     }
                                     Err(_) => {
-                                        let _ = session.write_frame(b"ERROR_MALFORMED_DESCRIPTOR").await;
+                                        let _ = session
+                                            .write_frame(b"ERROR_MALFORMED_DESCRIPTOR")
+                                            .await;
                                     }
                                 }
                             }

@@ -97,8 +97,7 @@ impl OnionCell {
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
 
-        let mut mac = HmacSha256::new_from_slice(mac_key)
-            .expect("HMAC supports 32-byte keys");
+        let mut mac = HmacSha256::new_from_slice(mac_key).expect("HMAC supports 32-byte keys");
         mac.update(&circuit_id.to_be_bytes());
         mac.update(&[command]);
         mac.update(&stream_id.to_be_bytes());

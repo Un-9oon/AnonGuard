@@ -1,5 +1,5 @@
 //! Quantum Random Matrix Theory (Q-RMT) Timing Engine
-//! 
+//!
 //! Simulates the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE)
 //! and Gaussian Unitary Ensembles (GUE) using the Wigner Surmise.
 //! Provides computationally efficient O(1) level repulsion for traffic morphing.
@@ -37,7 +37,7 @@ impl QuantumRmtEngine {
             QuantumEnsemble::GOE => self.sample_goe(),
             QuantumEnsemble::GUE => self.sample_gue(),
         };
-        
+
         // Scale spacing to chunk size (e.g. baseline 1024 bytes)
         // Add a strict boundary to prevent zero-length or excessively large fragments
         let size = (spacing * self.base_size_bytes as f64) as usize;
@@ -50,7 +50,7 @@ impl QuantumRmtEngine {
             QuantumEnsemble::GOE => self.sample_goe(),
             QuantumEnsemble::GUE => self.sample_gue(),
         };
-        
+
         // Scale spacing to microsecond delay
         let delay_ms = spacing * self.base_delay_ms;
         (delay_ms * 1000.0) as u64
@@ -71,18 +71,18 @@ impl QuantumRmtEngine {
     /// Using Rejection Sampling with an exponential envelope.
     fn sample_gue(&self) -> f64 {
         let mut rng = rand::thread_rng();
-        
+
         loop {
             // Envelope generation: Exponential distribution is a good fit for the tail.
             // Simplified rejection sampling against uniform box [0, 3] covering 99.9% of mass
             // In a highly optimized version, we'd use a fitted bounding function.
             let s: f64 = rng.gen_range(0.0..3.0);
-            let p_s = (32.0 / (PI * PI)) * (s * s) * (- (4.0 / PI) * (s * s)).exp();
-            
+            let p_s = (32.0 / (PI * PI)) * (s * s) * (-(4.0 / PI) * (s * s)).exp();
+
             // Peak of GUE Wigner is roughly at s = sqrt(pi/4) approx 0.886
             // Max value is P(0.886) approx 0.932. Let's box max Y at 1.0
             let y: f64 = rng.gen_range(0.0..1.0);
-            
+
             if y <= p_s {
                 return s;
             }

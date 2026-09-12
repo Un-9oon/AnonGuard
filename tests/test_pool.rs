@@ -72,19 +72,31 @@ async fn test_proxy_pool_load_from_consensus_quorum() {
 
     // 1. Unsigned consensus fails
     let pool = ProxyPool::new();
-    assert!(pool.load_from_consensus(&doc, &trusted_authorities, 2, 1500).await.is_err());
+    assert!(pool
+        .load_from_consensus(&doc, &trusted_authorities, 2, 1500)
+        .await
+        .is_err());
 
     // 2. 1 signature with threshold 2 fails
     doc.sign_with_authority("auth-1", &auth1_key);
-    assert!(pool.load_from_consensus(&doc, &trusted_authorities, 2, 1500).await.is_err());
+    assert!(pool
+        .load_from_consensus(&doc, &trusted_authorities, 2, 1500)
+        .await
+        .is_err());
 
     // 3. 2 signatures with threshold 2 passes
     doc.sign_with_authority("auth-2", &auth2_key);
-    let loaded = pool.load_from_consensus(&doc, &trusted_authorities, 2, 1500).await.unwrap();
+    let loaded = pool
+        .load_from_consensus(&doc, &trusted_authorities, 2, 1500)
+        .await
+        .unwrap();
     assert_eq!(loaded, 2);
     assert_eq!(pool.total_count().await, 2);
 
     // 4. Expired document fails
     let pool2 = ProxyPool::new();
-    assert!(pool2.load_from_consensus(&doc, &trusted_authorities, 2, 4000).await.is_err());
+    assert!(pool2
+        .load_from_consensus(&doc, &trusted_authorities, 2, 4000)
+        .await
+        .is_err());
 }

@@ -40,23 +40,20 @@ impl HopCryptState {
 }
 
 /// Key derivation function turning an X25519 shared secret into forward, backward, and MAC keys.
-pub fn derive_hop_keys(shared_secret: &[u8; 32], hop_index: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
+pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut hasher_f = Sha256::new();
     hasher_f.update(shared_secret);
     hasher_f.update(b"AnonGuard-Forward-Key-v2");
-    hasher_f.update([hop_index]);
     let f_hash = hasher_f.finalize();
 
     let mut hasher_b = Sha256::new();
     hasher_b.update(shared_secret);
     hasher_b.update(b"AnonGuard-Backward-Key-v2");
-    hasher_b.update([hop_index]);
     let b_hash = hasher_b.finalize();
 
     let mut hasher_m = Sha256::new();
     hasher_m.update(shared_secret);
     hasher_m.update(b"AnonGuard-HMAC-SHA256-Key-v3");
-    hasher_m.update([hop_index]);
     let m_hash = hasher_m.finalize();
 
     let mut forward_key = [0u8; 32];
@@ -112,7 +109,10 @@ impl OnionCircuit {
 
     /// Backward Onion Decryption (Client receives return traffic):
     /// Removes Guard layer (Hop 0), then Middle (Hop 1), then Exit (Hop 2).
-    pub fn unwrap_backward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<OnionCell, String> {
+    pub fn unwrap_backward(
+        &mut self,
+        raw: &mut [u8; ONION_CELL_SIZE],
+    ) -> Result<OnionCell, String> {
         for hop in self.hops.iter_mut() {
             hop.encrypt_backward(&mut raw[4..]);
         }
@@ -172,7 +172,10 @@ impl RelayCircuitHop {
 }
 
 /// Builds a CREATE cell carrying the client's ephemeral X25519 public key.
-pub fn build_create_cell(circuit_id: u32, client_pub: &X25519PublicKey) -> Result<OnionCell, String> {
+pub fn build_create_cell(
+    circuit_id: u32,
+    client_pub: &X25519PublicKey,
+) -> Result<OnionCell, String> {
     let initial_mac_key = [0u8; 32];
     OnionCell::new(
         circuit_id,
@@ -184,12 +187,12 @@ pub fn build_create_cell(circuit_id: u32, client_pub: &X25519PublicKey) -> Resul
 }
 
 /// Relay processes a CREATE cell, performs X25519 Diffie-Hellman, and returns the established hop state and CREATED cell.
-pub fn handle_create_cell(
-    create_cell: &OnionCell,
-    hop_index: u8,
-) -> Result<(RelayCircuitHop, OnionCell), String> {
+pub fn handle_create_cell(create_cell: &OnionCell) -> Result<(RelayCircuitHop, OnionCell), String> {
     if create_cell.command != CellCommand::Create {
-        return Err(format!("Expected CREATE cell, got {:?}", create_cell.command));
+        return Err(format!(
+            "Expected CREATE cell, got {:?}",
+            create_cell.command
+        ));
     }
     if create_cell.length < 32 {
         return Err("CREATE cell payload too short for X25519 public key".to_string());
@@ -204,7 +207,7 @@ pub fn handle_create_cell(
     let relay_pub = X25519PublicKey::from(&relay_secret);
 
     let shared = relay_secret.diffie_hellman(&client_pub);
-    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes(), hop_index);
+    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
     let created_cell = OnionCell::new(
         create_cell.circuit_id,
@@ -214,7 +217,8 @@ pub fn handle_create_cell(
         &mac_key,
     )?;
 
-    let relay_hop = RelayCircuitHop::new(create_cell.circuit_id, forward_key, backward_key, mac_key);
+    let relay_hop =
+        RelayCircuitHop::new(create_cell.circuit_id, forward_key, backward_key, mac_key);
     Ok((relay_hop, created_cell))
 }
 
@@ -222,9 +226,9 @@ pub fn handle_create_cell(
 pub fn process_created_cell(
     created_cell: &OnionCell,
     client_secret: EphemeralSecret,
-    hop_index: u8,
 ) -> Result<HandshakeKeys, String> {
-    if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended {
+    if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended
+    {
         return Err(format!(
             "Expected CREATED or EXTENDED cell, got {:?}",
             created_cell.command
@@ -240,7 +244,7 @@ pub fn process_created_cell(
     let relay_pub = X25519PublicKey::from(relay_pub_bytes);
 
     let shared = client_secret.diffie_hellman(&relay_pub);
-    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes(), hop_index);
+    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
     if !created_cell.is_mac_valid(&mac_key) {
         return Err("Cell HMAC-SHA256 authentication verification failed".to_string());
@@ -293,10 +297,41 @@ pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519Publi
     Ok((host, port, client_pub))
 }
 
+/// Encodes a RELAY payload instructing the exit relay to connect to target_host:target_port.
+pub fn encode_relay_target(target_host: &str, target_port: u16) -> Result<Vec<u8>, String> {
+    let host_bytes = target_host.as_bytes();
+    if host_bytes.len() > 255 {
+        return Err("Target host string exceeds 255 bytes limit".to_string());
+    }
+    let mut payload = Vec::with_capacity(1 + host_bytes.len() + 2);
+    payload.push(host_bytes.len() as u8);
+    payload.extend_from_slice(host_bytes);
+    payload.extend_from_slice(&target_port.to_be_bytes());
+    Ok(payload)
+}
+
+/// Decodes a RELAY payload received by an exit relay.
+pub fn decode_relay_target(payload: &[u8]) -> Result<(String, u16), String> {
+    if payload.len() < 1 + 2 {
+        return Err("RELAY target payload too short".to_string());
+    }
+    let host_len = payload[0] as usize;
+    if payload.len() < 1 + host_len + 2 {
+        return Err("RELAY target payload truncated".to_string());
+    }
+    let host = String::from_utf8(payload[1..1 + host_len].to_vec())
+        .map_err(|_| "Invalid UTF-8 in RELAY target host".to_string())?;
+    let port_bytes: [u8; 2] = payload[1 + host_len..1 + host_len + 2]
+        .try_into()
+        .map_err(|_| "Failed to read port".to_string())?;
+    let port = u16::from_be_bytes(port_bytes);
+    Ok((host, port))
+}
+
 pub type HandshakeKeys = ([u8; 32], [u8; 32], [u8; 32]);
 
 /// Simulates an X25519 key exchange between client and a relay.
-pub fn perform_client_relay_handshake(hop_index: u8) -> (HandshakeKeys, HandshakeKeys) {
+pub fn perform_client_relay_handshake() -> (HandshakeKeys, HandshakeKeys) {
     let client_secret = EphemeralSecret::random_from_rng(OsRng);
     let client_public = X25519PublicKey::from(&client_secret);
 
@@ -306,8 +341,8 @@ pub fn perform_client_relay_handshake(hop_index: u8) -> (HandshakeKeys, Handshak
     let client_shared = client_secret.diffie_hellman(&relay_public);
     let relay_shared = relay_secret.diffie_hellman(&client_public);
 
-    let client_keys = derive_hop_keys(client_shared.as_bytes(), hop_index);
-    let relay_keys = derive_hop_keys(relay_shared.as_bytes(), hop_index);
+    let client_keys = derive_hop_keys(client_shared.as_bytes());
+    let relay_keys = derive_hop_keys(relay_shared.as_bytes());
 
     (client_keys, relay_keys)
 }
