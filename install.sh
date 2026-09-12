@@ -26,7 +26,7 @@ cat << "EOF"
 /_/  |_/_/ /_/\____/_/ /_/   \____/\__,_/\__,_/_/   \__,_/   
 EOF
 echo -e "${RESET}"
-echo -e "${BOLD}Military-Grade Decentralized Anonymity Gateway — Automated Setup${RESET}"
+echo -e "${BOLD}Authenticated Decentralized Anonymity Gateway — Automated Setup${RESET}"
 echo -e "${BLUE}=================================================================${RESET}\n"
 
 # 1. Privileges & Installation Targets
@@ -209,7 +209,7 @@ if [[ "${SERVICE_CHOICE}" =~ ^[Yy]$ ]]; then
     if [ "${IS_ROOT}" -eq 1 ]; then
         cat << EOF > "${SERVICE_FILE}"
 [Unit]
-Description=AnonGuard Military-Grade Anonymity Gateway
+Description=AnonGuard Authenticated Anonymity Gateway
 After=network.target network-online.target
 Wants=network-online.target
 Documentation=https://github.com/Un-9oon/AnonGuard
@@ -236,7 +236,7 @@ EOF
     else
         cat << EOF > "${SERVICE_FILE}"
 [Unit]
-Description=AnonGuard Military-Grade Anonymity Gateway (User Service)
+Description=AnonGuard Authenticated Anonymity Gateway (User Service)
 After=network.target
 Documentation=https://github.com/Un-9oon/AnonGuard
 

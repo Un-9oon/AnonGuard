@@ -52,6 +52,37 @@ impl ProxyPool {
         Ok(loaded)
     }
 
+    /// Loads authenticated relays from a Directory Authority Consensus Document,
+    /// strictly enforcing Directory Authority signature quorum, timestamp validity,
+    /// and individual relay Ed25519 identity bindings.
+    pub async fn load_from_consensus(
+        &self,
+        doc: &crate::mesh::consensus::ConsensusDocument,
+        authorities: &std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+        quorum_threshold: usize,
+        current_time: u64,
+    ) -> Result<usize, String> {
+        if !doc.verify_quorum(authorities, quorum_threshold, current_time) {
+            return Err("Directory consensus document quorum verification failed".to_string());
+        }
+
+        let mut loaded = 0;
+        for relay in &doc.relays {
+            if !relay.verify_identity() {
+                continue; // Skip relays with invalid or missing cryptographic identity signatures
+            }
+            let scheme = if relay.host.starts_with("reverse://") {
+                relay.host.clone()
+            } else {
+                format!("socks5://{}:{}", relay.host, relay.port)
+            };
+            if self.add_proxy(&scheme).await.is_ok() {
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
+    }
+
     /// Retrieves the next alive proxy using round-robin rotation.
     pub async fn get_next(&self) -> Option<ProxyNode> {
         let list = self.nodes.read().await;

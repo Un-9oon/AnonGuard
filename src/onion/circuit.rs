@@ -55,7 +55,7 @@ pub fn derive_hop_keys(shared_secret: &[u8; 32], hop_index: u8) -> ([u8; 32], [u
 
     let mut hasher_m = Sha256::new();
     hasher_m.update(shared_secret);
-    hasher_m.update(b"AnonGuard-Poly1305-MAC-Key-v2");
+    hasher_m.update(b"AnonGuard-HMAC-SHA256-Key-v3");
     hasher_m.update([hop_index]);
     let m_hash = hasher_m.finalize();
 
@@ -147,12 +147,12 @@ impl RelayCircuitHop {
         }
     }
 
-    /// Peels one layer of forward onion encryption and verifies the Poly1305 MAC.
+    /// Peels one layer of forward onion encryption and verifies the HMAC-SHA256 MAC.
     pub fn peel_forward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<PeelResult, String> {
         self.crypt.encrypt_forward(&mut raw[4..]);
 
         if let Ok(cell) = OnionCell::parse(raw) {
-            // Cryptographic Poly1305 MAC verification
+            // Cryptographic HMAC-SHA256 MAC verification
             if cell.is_mac_valid(&self.crypt.mac_key) {
                 let len = (cell.length as usize).min(cell.payload.len());
                 return Ok(PeelResult::AddressedToThisRelay(
@@ -169,6 +169,128 @@ impl RelayCircuitHop {
     pub fn wrap_backward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) {
         self.crypt.encrypt_backward(&mut raw[4..]);
     }
+}
+
+/// Builds a CREATE cell carrying the client's ephemeral X25519 public key.
+pub fn build_create_cell(circuit_id: u32, client_pub: &X25519PublicKey) -> Result<OnionCell, String> {
+    let initial_mac_key = [0u8; 32];
+    OnionCell::new(
+        circuit_id,
+        CellCommand::Create,
+        0,
+        client_pub.as_bytes(),
+        &initial_mac_key,
+    )
+}
+
+/// Relay processes a CREATE cell, performs X25519 Diffie-Hellman, and returns the established hop state and CREATED cell.
+pub fn handle_create_cell(
+    create_cell: &OnionCell,
+    hop_index: u8,
+) -> Result<(RelayCircuitHop, OnionCell), String> {
+    if create_cell.command != CellCommand::Create {
+        return Err(format!("Expected CREATE cell, got {:?}", create_cell.command));
+    }
+    if create_cell.length < 32 {
+        return Err("CREATE cell payload too short for X25519 public key".to_string());
+    }
+
+    let client_pub_bytes: [u8; 32] = create_cell.payload[..32]
+        .try_into()
+        .map_err(|_| "Failed to extract client public key".to_string())?;
+    let client_pub = X25519PublicKey::from(client_pub_bytes);
+
+    let relay_secret = EphemeralSecret::random_from_rng(OsRng);
+    let relay_pub = X25519PublicKey::from(&relay_secret);
+
+    let shared = relay_secret.diffie_hellman(&client_pub);
+    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes(), hop_index);
+
+    let created_cell = OnionCell::new(
+        create_cell.circuit_id,
+        CellCommand::Created,
+        0,
+        relay_pub.as_bytes(),
+        &mac_key,
+    )?;
+
+    let relay_hop = RelayCircuitHop::new(create_cell.circuit_id, forward_key, backward_key, mac_key);
+    Ok((relay_hop, created_cell))
+}
+
+/// Client processes a CREATED or EXTENDED cell from a relay, deriving the hop keys and confirming HMAC-SHA256 authentication.
+pub fn process_created_cell(
+    created_cell: &OnionCell,
+    client_secret: EphemeralSecret,
+    hop_index: u8,
+) -> Result<HandshakeKeys, String> {
+    if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended {
+        return Err(format!(
+            "Expected CREATED or EXTENDED cell, got {:?}",
+            created_cell.command
+        ));
+    }
+    if created_cell.length < 32 {
+        return Err("CREATED/EXTENDED cell payload too short for X25519 public key".to_string());
+    }
+
+    let relay_pub_bytes: [u8; 32] = created_cell.payload[..32]
+        .try_into()
+        .map_err(|_| "Failed to extract relay public key".to_string())?;
+    let relay_pub = X25519PublicKey::from(relay_pub_bytes);
+
+    let shared = client_secret.diffie_hellman(&relay_pub);
+    let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes(), hop_index);
+
+    if !created_cell.is_mac_valid(&mac_key) {
+        return Err("Cell HMAC-SHA256 authentication verification failed".to_string());
+    }
+
+    Ok((forward_key, backward_key, mac_key))
+}
+
+/// Encodes an EXTEND payload containing the next hop address and the client's ephemeral public key for that hop.
+pub fn encode_extend_payload(
+    next_host: &str,
+    next_port: u16,
+    client_pub: &X25519PublicKey,
+) -> Result<Vec<u8>, String> {
+    let host_bytes = next_host.as_bytes();
+    if host_bytes.len() > 255 {
+        return Err("Host string exceeds 255 bytes limit".to_string());
+    }
+
+    let mut payload = Vec::with_capacity(1 + host_bytes.len() + 2 + 32);
+    payload.push(host_bytes.len() as u8);
+    payload.extend_from_slice(host_bytes);
+    payload.extend_from_slice(&next_port.to_be_bytes());
+    payload.extend_from_slice(client_pub.as_bytes());
+    Ok(payload)
+}
+
+/// Decodes an EXTEND payload received by an intermediate relay.
+pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519PublicKey), String> {
+    if payload.len() < 1 + 2 + 32 {
+        return Err("EXTEND payload too short".to_string());
+    }
+    let host_len = payload[0] as usize;
+    if payload.len() < 1 + host_len + 2 + 32 {
+        return Err("EXTEND payload truncated".to_string());
+    }
+
+    let host = String::from_utf8(payload[1..1 + host_len].to_vec())
+        .map_err(|_| "Invalid UTF-8 in EXTEND host".to_string())?;
+    let port_bytes: [u8; 2] = payload[1 + host_len..1 + host_len + 2]
+        .try_into()
+        .map_err(|_| "Failed to read port".to_string())?;
+    let port = u16::from_be_bytes(port_bytes);
+
+    let pub_bytes: [u8; 32] = payload[1 + host_len + 2..1 + host_len + 2 + 32]
+        .try_into()
+        .map_err(|_| "Failed to read public key".to_string())?;
+    let client_pub = X25519PublicKey::from(pub_bytes);
+
+    Ok((host, port, client_pub))
 }
 
 pub type HandshakeKeys = ([u8; 32], [u8; 32], [u8; 32]);

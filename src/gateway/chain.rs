@@ -2,12 +2,15 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::kernel::dns::{build_socks5h_connect_frame, TargetAddress};
+
 /// Handshakes with a single SOCKS5 proxy to establish a tunnel to a target (IP/Domain + Port).
-/// Returns the negotiated stream.
+/// Guarantees that remote DNS and IPv6 blocking policies from kernel/dns.rs are enforced.
 pub async fn socks5_connect_through(
     mut stream: TcpStream,
     target_host: &str,
     target_port: u16,
+    block_ipv6: bool,
 ) -> std::io::Result<TcpStream> {
     // 1. Initial auth negotiation (No Auth)
     stream.write_all(&[0x05, 0x01, 0x00]).await?;
@@ -21,32 +24,16 @@ pub async fn socks5_connect_through(
         ));
     }
 
-    // 2. Connect request
-    let mut req = vec![0x05, 0x01, 0x00];
-
-    // Parse target_host as IPv4, IPv6, or Domain Name
-    if let Ok(ip) = target_host.parse::<Ipv4Addr>() {
-        req.push(0x01);
-        req.extend_from_slice(&ip.octets());
+    // 2. Build SOCKS5h request frame through unified kernel DNS engine
+    let target = if let Ok(ip) = target_host.parse::<Ipv4Addr>() {
+        TargetAddress::IPv4(ip.octets())
     } else if let Ok(ip) = target_host.parse::<Ipv6Addr>() {
-        req.push(0x04);
-        req.extend_from_slice(&ip.octets());
+        TargetAddress::IPv6(ip.octets())
     } else {
-        req.push(0x03);
-        let bytes = target_host.as_bytes();
-        if bytes.len() > 255 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Domain name too long",
-            ));
-        }
-        req.push(bytes.len() as u8);
-        req.extend_from_slice(bytes);
-    }
+        TargetAddress::Domain(target_host.to_string())
+    };
 
-    req.push((target_port >> 8) as u8);
-    req.push((target_port & 0xFF) as u8);
-
+    let req = build_socks5h_connect_frame(&target, target_port, block_ipv6)?;
     stream.write_all(&req).await?;
 
     // 3. Read response

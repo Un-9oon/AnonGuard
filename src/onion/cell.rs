@@ -1,7 +1,5 @@
-//! Fixed-size 1024-byte OnionCell protocol with Poly1305 Authenticated MAC.
+//! Fixed-size 1024-byte OnionCell protocol with HMAC-SHA256 Authenticated MAC.
 
-use poly1305::universal_hash::{KeyInit, UniversalHash};
-use poly1305::Poly1305;
 use std::convert::TryInto;
 
 pub const ONION_CELL_SIZE: usize = 1024;
@@ -49,10 +47,24 @@ pub struct OnionCell {
 }
 
 impl OnionCell {
-    pub fn new(circuit_id: u32, command: CellCommand, stream_id: u16, data: &[u8], mac_key: &[u8; 32]) -> Self {
+    pub fn new(
+        circuit_id: u32,
+        command: CellCommand,
+        stream_id: u16,
+        data: &[u8],
+        mac_key: &[u8; 32],
+    ) -> Result<Self, String> {
+        if data.len() > PAYLOAD_SIZE {
+            return Err(format!(
+                "Payload length {} exceeds maximum cell payload size {}",
+                data.len(),
+                PAYLOAD_SIZE
+            ));
+        }
+
         let mut payload = [0u8; PAYLOAD_SIZE];
-        let len = data.len().min(PAYLOAD_SIZE);
-        payload[..len].copy_from_slice(&data[..len]);
+        let len = data.len();
+        payload[..len].copy_from_slice(data);
 
         let mac = Self::calculate_mac(
             mac_key,
@@ -63,14 +75,14 @@ impl OnionCell {
             &payload[..len],
         );
 
-        Self {
+        Ok(Self {
             circuit_id,
             command,
             stream_id,
             length: len as u16,
             mac,
             payload,
-        }
+        })
     }
 
     pub fn calculate_mac(
@@ -81,17 +93,20 @@ impl OnionCell {
         len: u16,
         data: &[u8],
     ) -> [u8; 16] {
-        let mut poly = Poly1305::new(mac_key.into());
-        let mut header = [0u8; 9];
-        header[0..4].copy_from_slice(&circuit_id.to_be_bytes());
-        header[4] = command;
-        header[5..7].copy_from_slice(&stream_id.to_be_bytes());
-        header[7..9].copy_from_slice(&len.to_be_bytes());
-        poly.update_padded(&header);
-        poly.update_padded(data);
-        let tag = poly.finalize();
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(mac_key)
+            .expect("HMAC supports 32-byte keys");
+        mac.update(&circuit_id.to_be_bytes());
+        mac.update(&[command]);
+        mac.update(&stream_id.to_be_bytes());
+        mac.update(&len.to_be_bytes());
+        mac.update(data);
+        let tag = mac.finalize().into_bytes();
         let mut out = [0u8; 16];
-        out.copy_from_slice(&tag);
+        out.copy_from_slice(&tag[..16]);
         out
     }
 

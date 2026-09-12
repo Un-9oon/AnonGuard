@@ -43,6 +43,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 # Optional Python Bindings (PyO3)
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py310"], optional = true }
+hmac = "0.12"
 
 [features]
 default = []

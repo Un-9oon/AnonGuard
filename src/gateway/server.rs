@@ -6,9 +6,12 @@ use tracing::{error, info, warn};
 use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
-use crate::morphing::{PoissonJitter, LorenzAttractor, QuantumRmtEngine, QuantumEnsemble, JitterEngine, morph_bidirectional};
+use crate::morphing::{PoissonJitter, LorenzAttractor, QuantumRmtEngine, QuantumEnsemble, JitterEngine, morph_bidirectional_guarded};
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
-use crate::onion::circuit::{derive_hop_keys, OnionCircuit};
+use crate::onion::circuit::{
+    build_create_cell, decode_extend_payload, encode_extend_payload, handle_create_cell,
+    process_created_cell, OnionCircuit, PeelResult,
+};
 use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
 
@@ -82,6 +85,53 @@ impl GatewayServer {
 
                 let mut client = client_stream;
 
+                if config.relay_mode {
+                    let mut peek_buf = [0u8; 1];
+                    let is_socks5 = client.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
+                    if is_socks5 {
+                        let (target_host, target_port) =
+                            match crate::gateway::chain::intercept_socks5_request(&mut client).await {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    error!("Relay Mode: Failed to intercept SOCKS5 handshake: {}", e);
+                                    return;
+                                }
+                            };
+
+                        let target_addr = format!("{}:{}", target_host, target_port);
+                        match TcpStream::connect(&target_addr).await {
+                            Ok(mut target_stream) => {
+                                info!(
+                                    "Relay Mode: Forwarding traffic to {}:{}",
+                                    target_host, target_port
+                                );
+                                let _ = morph_bidirectional_guarded(
+                                    &mut client,
+                                    &mut target_stream,
+                                    jitter.clone(),
+                                    Some(kill_switch.clone()),
+                                )
+                                .await;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Relay Mode: Failed to connect to target {}: {}",
+                                    target_addr, e
+                                );
+                            }
+                        }
+                    } else {
+                        info!("Relay Mode: Processing incoming in-band Onion Cell connection");
+                        let _ = handle_onion_relay_connection(
+                            client,
+                            Some(kill_switch.clone()),
+                            jitter.clone(),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+
                 // 1. Intercept SOCKS5 from local client to find target
                 let (target_host, target_port) =
                     match crate::gateway::chain::intercept_socks5_request(&mut client).await {
@@ -92,31 +142,7 @@ impl GatewayServer {
                         }
                     };
 
-                if config.relay_mode {
-                    // Node Mode: Connect directly to the requested target
-                    let target_addr = format!("{}:{}", target_host, target_port);
-                    match TcpStream::connect(&target_addr).await {
-                        Ok(mut target_stream) => {
-                            info!(
-                                "Relay Mode: Forwarding traffic to {}:{}",
-                                target_host, target_port
-                            );
-                            let _ = morph_bidirectional(
-                                &mut client,
-                                &mut target_stream,
-                                jitter.clone(),
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            error!(
-                                "Relay Mode: Failed to connect to target {}: {}",
-                                target_addr, e
-                            );
-                        }
-                    }
-                } else {
-                    // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
+                // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                     let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
                         pool.get_diverse_onion_chain(
                             config.min_chain_length.max(3),
@@ -209,7 +235,7 @@ impl GatewayServer {
 
                         if let Some(s) = current_stream.take() {
                             match crate::gateway::chain::socks5_connect_through(
-                                s, &next_host, next_port,
+                                s, &next_host, next_port, config.disable_ipv6,
                             )
                             .await
                             {
@@ -242,41 +268,41 @@ impl GatewayServer {
 
                         if config.enable_onion_routing {
                             let circuit_id: u32 = rand::random();
-                            let mut circuit = OnionCircuit::new(circuit_id);
-                            let mut exit_mac = [0u8; 32];
-                            for hop_idx in 0..chain.len() {
-                                let client_secret = EphemeralSecret::random_from_rng(OsRng);
-                                let hop_secret = EphemeralSecret::random_from_rng(OsRng);
-                                let pub_hop = x25519_dalek::PublicKey::from(&hop_secret);
-                                let shared = client_secret.diffie_hellman(&pub_hop);
-                                let (fwd, bwd, mac) = derive_hop_keys(shared.as_bytes(), hop_idx as u8);
-                                if hop_idx == chain.len() - 1 {
-                                    exit_mac = mac;
+                            match build_telescopic_circuit(&mut upstream_stream, circuit_id, &chain).await {
+                                Ok((circuit, exit_mac)) => {
+                                    info!(
+                                        circuit_id = circuit_id,
+                                        hops = chain.len(),
+                                        "Activating 3-hop layered ChaCha20/HMAC-SHA256 onion encryption on tunnel"
+                                    );
+                                    let _ = stream_onion_circuit(
+                                        &mut client,
+                                        &mut upstream_stream,
+                                        circuit,
+                                        exit_mac,
+                                        jitter.clone(),
+                                        Some(kill_switch.clone()),
+                                    )
+                                    .await;
                                 }
-                                circuit.add_hop(fwd, bwd, mac);
+                                Err(e) => {
+                                    error!("Failed to negotiate telescopic onion circuit: {}", e);
+                                    if config.strict_killswitch {
+                                        kill_switch.trip("Telescopic circuit negotiation failure");
+                                    }
+                                }
                             }
-
-                            info!(
-                                circuit_id = circuit_id,
-                                hops = chain.len(),
-                                "Activating 3-hop layered ChaCha20/Poly1305 onion encryption on tunnel"
-                            );
-
-                            let _ = stream_onion_circuit(
-                                &mut client,
-                                &mut upstream_stream,
-                                circuit,
-                                exit_mac,
-                                jitter.clone(),
-                            )
-                            .await;
                         } else {
                             let _ =
-                                morph_bidirectional(&mut client, &mut upstream_stream, jitter.clone())
-                                    .await;
+                                crate::morphing::morph_bidirectional_guarded(
+                                    &mut client,
+                                    &mut upstream_stream,
+                                    jitter.clone(),
+                                    Some(kill_switch.clone()),
+                                )
+                                .await;
                         }
                     }
-                }
             });
         }
     }
@@ -294,6 +320,7 @@ impl GatewayServer {
             let hp = host_port.to_string();
             let nid = node_id.to_string();
             let jitter = self.jitter.clone();
+            let kill_switch = self.kill_switch.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -331,10 +358,11 @@ impl GatewayServer {
                                                 "Reverse Relay: Forwarding traffic to {}:{}",
                                                 target_host, target_port
                                             );
-                                            let _ = morph_bidirectional(
+                                            let _ = morph_bidirectional_guarded(
                                                 &mut stream,
                                                 &mut target_stream,
                                                 jitter.clone(),
+                                                Some(kill_switch.clone()),
                                             )
                                             .await;
                                         }
@@ -365,15 +393,16 @@ impl GatewayServer {
 
 /// Streams bidirectional client TCP traffic over an authenticated 3-hop OnionCircuit.
 /// Outbound traffic is chunked into <= 999 byte slices, encapsulated into 1024-byte OnionCells,
-/// wrapped in 3 layers of ChaCha20 encryption with a 16-byte Poly1305 MAC, and sent upstream.
-/// Inbound traffic is read in 1024-byte cells, unwrapped across all 3 layers, verified with Poly1305,
-/// and forwarded to the local client.
+/// wrapped in 3 layers of ChaCha20 encryption with a 16-byte HMAC-SHA256 MAC, and sent upstream.
+/// Inbound traffic is read in 1024-byte cells, unwrapped across all 3 layers, verified with HMAC-SHA256,
+/// and forwarded to the local client. Tripping the kill switch immediately aborts active streams.
 pub async fn stream_onion_circuit(
     client: &mut TcpStream,
     upstream: &mut TcpStream,
     circuit: OnionCircuit,
     exit_mac_key: [u8; 32],
     jitter: Option<JitterEngine>,
+    kill_switch: Option<KillSwitchController>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -399,13 +428,19 @@ pub async fn stream_onion_circuit(
 
             let cell = {
                 let guard = circuit_fwd.lock().await;
-                OnionCell::new(
+                match OnionCell::new(
                     guard.circuit_id,
                     CellCommand::Data,
                     stream_id,
                     &buf[..n],
                     &exit_mac_fwd,
-                )
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        error!("OnionCell construction failed: {}", e);
+                        break;
+                    }
+                }
             };
 
             let wire_buffer = {
@@ -441,7 +476,7 @@ pub async fn stream_onion_circuit(
             match cell_res {
                 Ok(cell) => {
                     if !cell.is_mac_valid(&exit_mac_bwd) {
-                        warn!("Dropped return onion cell: Poly1305 MAC tag mismatch");
+                        warn!("Dropped return onion cell: HMAC-SHA256 MAC tag mismatch");
                         continue;
                     }
 
@@ -465,9 +500,226 @@ pub async fn stream_onion_circuit(
         let _ = client_write.shutdown().await;
     };
 
-    tokio::select! {
-        _ = fwd => {},
-        _ = bwd => {},
+    if let Some(ks) = kill_switch {
+        let mut rx = ks.subscribe();
+        tokio::select! {
+            _ = fwd => {},
+            _ = bwd => {},
+            _ = async {
+                while rx.changed().await.is_ok() {
+                    if *rx.borrow() {
+                        break;
+                    }
+                }
+            } => {
+                tracing::error!("[AnonGuard KillSwitch] TRIPPED! Enforcing immediate fail-closed circuit termination.");
+            }
+        }
+    } else {
+        tokio::select! {
+            _ = fwd => {},
+            _ = bwd => {},
+        }
+    }
+
+    Ok(())
+}
+
+/// Negotiates an authentic multi-hop telescopic onion circuit over the wire.
+/// Sends a CREATE cell with ephemeral public key X1 to Hop 0, processes CREATED with Y1,
+/// and sequentially extends the circuit through in-band encrypted EXTEND cells.
+pub async fn build_telescopic_circuit(
+    stream: &mut TcpStream,
+    circuit_id: u32,
+    chain: &[crate::mesh::node::ProxyNode],
+) -> Result<(OnionCircuit, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut circuit = OnionCircuit::new(circuit_id);
+
+    // 1. Hop 0 (Guard) in-band CREATE/CREATED handshake
+    let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
+    let client_pub_0 = x25519_dalek::PublicKey::from(&client_secret_0);
+    let create_cell = build_create_cell(circuit_id, &client_pub_0)
+        .map_err(|e| format!("Failed to build CREATE cell: {}", e))?;
+    stream.write_all(&create_cell.serialize()).await?;
+
+    let mut created_buf = [0u8; ONION_CELL_SIZE];
+    stream.read_exact(&mut created_buf).await?;
+    let created_cell = OnionCell::parse(&created_buf)
+        .map_err(|e| format!("Failed to parse CREATED cell: {}", e))?;
+    let (fwd0, bwd0, mac0) = process_created_cell(&created_cell, client_secret_0, 0)
+        .map_err(|e| format!("Failed to process Hop 0 CREATED cell: {}", e))?;
+    circuit.add_hop(fwd0, bwd0, mac0);
+    let mut exit_mac = mac0;
+
+    // 2. Telescopic circuit extension for subsequent hops
+    for hop_idx in 1..chain.len() {
+        let prev_mac = circuit
+            .get_hop_mac_key(hop_idx - 1)
+            .ok_or("Missing previous hop MAC key")?;
+
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub = x25519_dalek::PublicKey::from(&client_secret);
+
+        let extend_payload =
+            encode_extend_payload(&chain[hop_idx].host, chain[hop_idx].port, &client_pub)
+                .map_err(|e| format!("Failed to encode EXTEND payload: {}", e))?;
+        let extend_cell = OnionCell::new(
+            circuit_id,
+            CellCommand::Extend,
+            0,
+            &extend_payload,
+            &prev_mac,
+        )
+        .map_err(|e| format!("Failed to build EXTEND cell: {}", e))?;
+
+        let wire_buffer = circuit.wrap_forward(&extend_cell);
+        stream.write_all(&wire_buffer).await?;
+
+        let mut return_wire = [0u8; ONION_CELL_SIZE];
+        stream.read_exact(&mut return_wire).await?;
+        let resp_cell = circuit
+            .unwrap_backward(&mut return_wire)
+            .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {}", hop_idx, e))?;
+
+        let (fwd, bwd, mac) =
+            process_created_cell(&resp_cell, client_secret, hop_idx as u8)
+                .map_err(|e| format!("Failed to authenticate Hop {}: {}", hop_idx, e))?;
+        if hop_idx == chain.len() - 1 {
+            exit_mac = mac;
+        }
+        circuit.add_hop(fwd, bwd, mac);
+    }
+
+    Ok((circuit, exit_mac))
+}
+
+/// Handles incoming Onion Cell connections on a relay node, completing X25519 handshake
+/// and forwarding cells in-band.
+pub async fn handle_onion_relay_connection(
+    mut client: TcpStream,
+    kill_switch: Option<KillSwitchController>,
+    jitter: Option<JitterEngine>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // 1. Read initial CREATE cell from client
+    let mut initial_buf = [0u8; ONION_CELL_SIZE];
+    client.read_exact(&mut initial_buf).await?;
+    let create_cell = OnionCell::parse(&initial_buf)
+        .map_err(|e| format!("Failed to parse incoming CREATE cell: {}", e))?;
+
+    let (mut relay_hop, created_cell) = handle_create_cell(&create_cell, 0)
+        .map_err(|e| format!("Failed to handle CREATE cell: {}", e))?;
+    client.write_all(&created_cell.serialize()).await?;
+    info!(circuit_id = create_cell.circuit_id, "Relay established initial onion circuit hop");
+
+    // 2. Relay packet processing loop
+    let mut downstream: Option<TcpStream> = None;
+    let mut rx_kill = kill_switch.as_ref().map(|ks| ks.subscribe());
+
+    loop {
+        if let Some(ref ks) = kill_switch {
+            if ks.is_tripped() {
+                break;
+            }
+        }
+
+        let mut client_buf = [0u8; ONION_CELL_SIZE];
+        let mut ds_buf = [0u8; ONION_CELL_SIZE];
+
+        let kill_wait = async {
+            if let Some(ref mut rx) = rx_kill {
+                while rx.changed().await.is_ok() {
+                    if *rx.borrow() {
+                        return;
+                    }
+                }
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
+        if let Some(ref mut ds) = downstream {
+            tokio::select! {
+                _ = kill_wait => break,
+                res = client.read_exact(&mut client_buf) => {
+                    if res.is_err() { break; }
+                    match relay_hop.peel_forward(&mut client_buf) {
+                        Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
+                            if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
+                                let target = format!("{}:{}", next_h, next_p);
+                                if let Ok(mut next_s) = TcpStream::connect(&target).await {
+                                    if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
+                                        if next_s.write_all(&c_cell.serialize()).await.is_ok() {
+                                            let mut resp = [0u8; ONION_CELL_SIZE];
+                                            if next_s.read_exact(&mut resp).await.is_ok() {
+                                                relay_hop.wrap_backward(&mut resp);
+                                                let _ = client.write_all(&resp).await;
+                                                downstream = Some(next_s);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(PeelResult::ForwardDownstream(forward_buf)) => {
+                            if let Some(ref j) = jitter {
+                                j.apply_delay().await;
+                            }
+                            if ds.write_all(&*forward_buf).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                res = ds.read_exact(&mut ds_buf) => {
+                    if res.is_err() { break; }
+                    relay_hop.wrap_backward(&mut ds_buf);
+                    if let Some(ref j) = jitter {
+                        j.apply_delay().await;
+                    }
+                    if client.write_all(&ds_buf).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            tokio::select! {
+                _ = kill_wait => break,
+                res = client.read_exact(&mut client_buf) => {
+                    if res.is_err() { break; }
+                    match relay_hop.peel_forward(&mut client_buf) {
+                        Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
+                            if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
+                                let target = format!("{}:{}", next_h, next_p);
+                                match TcpStream::connect(&target).await {
+                                    Ok(mut next_s) => {
+                                        if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
+                                            if next_s.write_all(&c_cell.serialize()).await.is_ok() {
+                                                let mut resp = [0u8; ONION_CELL_SIZE];
+                                                if next_s.read_exact(&mut resp).await.is_ok() {
+                                                    relay_hop.wrap_backward(&mut resp);
+                                                    let _ = client.write_all(&resp).await;
+                                                    downstream = Some(next_s);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Relay failed to connect to next hop {}: {}", target, e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

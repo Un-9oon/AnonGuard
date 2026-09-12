@@ -15,9 +15,76 @@ pub struct RelayDescriptor {
     pub host: String,
     pub port: u16,
     pub onion_key_x25519: [u8; 32],
+    pub identity_key_ed25519: [u8; 32],
     pub is_exit: bool,
     pub pow_nonce: u64,
     pub registered_at: u64,
+    pub signature: Vec<u8>,
+}
+
+impl RelayDescriptor {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        node_id: String,
+        host: String,
+        port: u16,
+        onion_key_x25519: [u8; 32],
+        identity_key_ed25519: [u8; 32],
+        is_exit: bool,
+        pow_nonce: u64,
+        registered_at: u64,
+    ) -> Self {
+        Self {
+            node_id,
+            host,
+            port,
+            onion_key_x25519,
+            identity_key_ed25519,
+            is_exit,
+            pow_nonce,
+            registered_at,
+            signature: Vec::new(),
+        }
+    }
+
+    /// Computes canonical bytes to sign for this descriptor.
+    pub fn compute_signing_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"AnonGuard-RelayDescriptor-v1");
+        bytes.extend_from_slice(self.node_id.as_bytes());
+        bytes.extend_from_slice(self.host.as_bytes());
+        bytes.extend_from_slice(&self.port.to_be_bytes());
+        bytes.extend_from_slice(&self.onion_key_x25519);
+        bytes.extend_from_slice(&self.identity_key_ed25519);
+        bytes.push(if self.is_exit { 1 } else { 0 });
+        bytes.extend_from_slice(&self.pow_nonce.to_be_bytes());
+        bytes.extend_from_slice(&self.registered_at.to_be_bytes());
+        bytes
+    }
+
+    /// Signs this descriptor using the relay's private Ed25519 signing key.
+    pub fn sign_with_key(&mut self, key: &SigningKey) {
+        self.identity_key_ed25519 = key.verifying_key().to_bytes();
+        let signing_bytes = self.compute_signing_bytes();
+        let sig = key.sign(&signing_bytes);
+        self.signature = sig.to_bytes().to_vec();
+    }
+
+    /// Verifies the cryptographic Ed25519 signature binding this descriptor to its identity key.
+    pub fn verify_identity(&self) -> bool {
+        if self.signature.is_empty() {
+            return false;
+        }
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&self.identity_key_ed25519) else {
+            return false;
+        };
+        let Ok(sig_bytes): Result<&[u8; 64], _> = self.signature.as_slice().try_into() else {
+            return false;
+        };
+        let signature = Signature::from_bytes(sig_bytes);
+        let signing_bytes = self.compute_signing_bytes();
+        verifying_key.verify(&signing_bytes, &signature).is_ok()
+    }
 }
 
 /// A cryptographic signature by an independent Directory Authority over the consensus digest.
@@ -61,6 +128,7 @@ impl ConsensusDocument {
             hasher.update(r.host.as_bytes());
             hasher.update(r.port.to_be_bytes());
             hasher.update(r.onion_key_x25519);
+            hasher.update(r.identity_key_ed25519);
             hasher.update([if r.is_exit { 1 } else { 0 }]);
         }
 
@@ -136,27 +204,37 @@ mod tests {
         trusted_authorities.insert("auth-reykjavik".to_string(), auth2_priv.verifying_key());
         trusted_authorities.insert("auth-tokyo".to_string(), auth3_priv.verifying_key());
 
-        // 2. Build consensus document with 2 active relays
-        let relays = vec![
-            RelayDescriptor {
-                node_id: "relay-alpha".to_string(),
-                host: "198.51.100.10".to_string(),
-                port: 9001,
-                onion_key_x25519: [1u8; 32],
-                is_exit: false,
-                pow_nonce: 12345,
-                registered_at: 1000,
-            },
-            RelayDescriptor {
-                node_id: "relay-beta".to_string(),
-                host: "203.0.113.20".to_string(),
-                port: 9002,
-                onion_key_x25519: [2u8; 32],
-                is_exit: true,
-                pow_nonce: 67890,
-                registered_at: 1000,
-            },
-        ];
+        // 2. Build consensus document with 2 active signed relays
+        let relay1_key = SigningKey::generate(&mut csprng);
+        let relay2_key = SigningKey::generate(&mut csprng);
+
+        let mut r1 = RelayDescriptor::new(
+            "relay-alpha".to_string(),
+            "198.51.100.10".to_string(),
+            9001,
+            [1u8; 32],
+            [0u8; 32],
+            false,
+            12345,
+            1000,
+        );
+        r1.sign_with_key(&relay1_key);
+        assert!(r1.verify_identity());
+
+        let mut r2 = RelayDescriptor::new(
+            "relay-beta".to_string(),
+            "203.0.113.20".to_string(),
+            9002,
+            [2u8; 32],
+            [0u8; 32],
+            true,
+            67890,
+            1000,
+        );
+        r2.sign_with_key(&relay2_key);
+        assert!(r2.verify_identity());
+
+        let relays = vec![r1, r2];
 
         let mut consensus = ConsensusDocument::new(1000, 4600, relays);
 

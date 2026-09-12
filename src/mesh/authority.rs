@@ -37,8 +37,12 @@ impl DirectoryAuthority {
         self.signing_key.verifying_key()
     }
 
-    /// Registers a relay after verifying its Proof-of-Work.
+    /// Registers a relay after verifying its Proof-of-Work and Ed25519 identity signature.
     pub async fn register_relay(&self, descriptor: RelayDescriptor) -> Result<(), String> {
+        if !descriptor.verify_identity() {
+            return Err("Invalid or missing Ed25519 cryptographic identity signature".to_string());
+        }
+
         let now = current_timestamp_secs();
         let is_valid_pow = verify_pow(
             &descriptor.node_id,
@@ -53,6 +57,18 @@ impl DirectoryAuthority {
         }
 
         let mut relays = self.active_relays.write().await;
+        if let Some(existing) = relays.get(&descriptor.node_id) {
+            if existing.identity_key_ed25519 != descriptor.identity_key_ed25519 {
+                return Err(format!(
+                    "Relay impersonation prevented: node_id '{}' already claimed by another Ed25519 key",
+                    descriptor.node_id
+                ));
+            }
+            if descriptor.registered_at <= existing.registered_at {
+                return Err("Replay attack prevented: registration timestamp is not newer".to_string());
+            }
+        }
+
         info!(
             "Authority [{}]: Registered verified relay {} ({}:{})",
             self.authority_id, descriptor.node_id, descriptor.host, descriptor.port
@@ -109,12 +125,24 @@ impl DirectoryAuthority {
                             } else if let Some(json_part) = text.strip_prefix("REGISTER_RELAY ") {
                                 match serde_json::from_str::<RelayDescriptor>(json_part) {
                                     Ok(desc) => {
+                                        let mut relays = active_relays.write().await;
                                         let now = current_timestamp_secs();
-                                        if verify_pow(&desc.node_id, desc.registered_at, desc.pow_nonce, 12, now) {
-                                            active_relays.write().await.insert(desc.node_id.clone(), desc);
-                                            let _ = session.write_frame(b"OK_REGISTERED").await;
-                                        } else {
+                                        if !desc.verify_identity() {
+                                            let _ = session.write_frame(b"ERROR_SIGNATURE_INVALID").await;
+                                        } else if !verify_pow(&desc.node_id, desc.registered_at, desc.pow_nonce, DEFAULT_POW_DIFFICULTY, now) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
+                                        } else if let Some(existing) = relays.get(&desc.node_id) {
+                                            if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
+                                                let _ = session.write_frame(b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED").await;
+                                            } else if desc.registered_at <= existing.registered_at {
+                                                let _ = session.write_frame(b"ERROR_REPLAY_DETECTED").await;
+                                            } else {
+                                                relays.insert(desc.node_id.clone(), desc);
+                                                let _ = session.write_frame(b"OK_REGISTERED").await;
+                                            }
+                                        } else {
+                                            relays.insert(desc.node_id.clone(), desc);
+                                            let _ = session.write_frame(b"OK_REGISTERED").await;
                                         }
                                     }
                                     Err(_) => {
@@ -130,5 +158,70 @@ impl DirectoryAuthority {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::sybil::solve_pow;
+
+    #[tokio::test]
+    async fn test_authority_registration_signature_and_anti_hijack() {
+        let auth = DirectoryAuthority::new("auth-1".to_string(), "127.0.0.1:0".to_string());
+        let mut rng = OsRng;
+        let relay_key1 = SigningKey::generate(&mut rng);
+        let relay_key2 = SigningKey::generate(&mut rng);
+
+        let now = current_timestamp_secs();
+        let nonce = solve_pow("relay-1", now, DEFAULT_POW_DIFFICULTY);
+
+        let mut desc = RelayDescriptor::new(
+            "relay-1".to_string(),
+            "1.2.3.4".to_string(),
+            9001,
+            [42u8; 32],
+            [0u8; 32],
+            false,
+            nonce,
+            now,
+        );
+
+        // 1. Without signature, registration must fail
+        assert!(auth.register_relay(desc.clone()).await.is_err());
+
+        // 2. With valid signature from relay_key1, registration succeeds
+        desc.sign_with_key(&relay_key1);
+        assert!(auth.register_relay(desc.clone()).await.is_ok());
+
+        // 3. Hijacker attempts to overwrite "relay-1" with relay_key2 -> must fail
+        let mut hijack_desc = RelayDescriptor::new(
+            "relay-1".to_string(),
+            "6.6.6.6".to_string(),
+            9001,
+            [99u8; 32],
+            [0u8; 32],
+            true,
+            solve_pow("relay-1", now + 1, DEFAULT_POW_DIFFICULTY),
+            now + 1,
+        );
+        hijack_desc.sign_with_key(&relay_key2);
+        let hijack_res = auth.register_relay(hijack_desc).await;
+        assert!(hijack_res.is_err());
+        assert!(hijack_res.unwrap_err().contains("already claimed"));
+
+        // 4. Legitimate update from relay_key1 with newer timestamp succeeds
+        let mut legit_update = RelayDescriptor::new(
+            "relay-1".to_string(),
+            "1.2.3.4".to_string(),
+            9005,
+            [43u8; 32],
+            [0u8; 32],
+            true,
+            solve_pow("relay-1", now + 5, DEFAULT_POW_DIFFICULTY),
+            now + 5,
+        );
+        legit_update.sign_with_key(&relay_key1);
+        assert!(auth.register_relay(legit_update).await.is_ok());
     }
 }

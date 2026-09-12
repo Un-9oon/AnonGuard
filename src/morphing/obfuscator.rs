@@ -34,9 +34,52 @@ where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
-    // If no jitter is configured, fallback to high-speed zero-copy standard bidirectional transfer.
+    morph_bidirectional_guarded(a, b, jitter, None).await
+}
+
+/// Continuous stream morphing engine with active fail-closed KillSwitch cancellation.
+pub async fn morph_bidirectional_guarded<A, B>(
+    a: &mut A,
+    b: &mut B,
+    jitter: Option<JitterEngine>,
+    kill_switch: Option<crate::kernel::KillSwitchController>,
+) -> Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
+    if let Some(ref ks) = kill_switch {
+        if ks.is_tripped() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Kill switch tripped: refusing stream",
+            ));
+        }
+    }
+
+    // If no jitter is configured, run copy with killswitch monitor
     if jitter.is_none() {
-        return tokio::io::copy_bidirectional(a, b).await;
+        if let Some(ks) = kill_switch {
+            let mut rx = ks.subscribe();
+            return tokio::select! {
+                res = tokio::io::copy_bidirectional(a, b) => res,
+                _ = async {
+                    while rx.changed().await.is_ok() {
+                        if *rx.borrow() {
+                            break;
+                        }
+                    }
+                } => {
+                    tracing::error!("[AnonGuard KillSwitch] TRIPPED! Enforcing zero-leak stream termination.");
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "Kill switch tripped mid-stream: stream aborted",
+                    ))
+                }
+            };
+        } else {
+            return tokio::io::copy_bidirectional(a, b).await;
+        }
     }
 
     let j = jitter.unwrap();
@@ -130,6 +173,26 @@ where
         transferred
     };
 
-    let (a_to_b, b_to_a) = tokio::join!(a_to_b_task, b_to_a_task);
-    Ok((a_to_b, b_to_a))
+    if let Some(ks) = kill_switch {
+        let mut rx = ks.subscribe();
+        tokio::select! {
+            (a_to_b, b_to_a) = async { tokio::join!(a_to_b_task, b_to_a_task) } => Ok((a_to_b, b_to_a)),
+            _ = async {
+                while rx.changed().await.is_ok() {
+                    if *rx.borrow() {
+                        break;
+                    }
+                }
+            } => {
+                tracing::error!("[AnonGuard KillSwitch] TRIPPED! Enforcing zero-leak stream termination.");
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "Kill switch tripped mid-stream: stream aborted",
+                ))
+            }
+        }
+    } else {
+        let (a_to_b, b_to_a) = tokio::join!(a_to_b_task, b_to_a_task);
+        Ok((a_to_b, b_to_a))
+    }
 }

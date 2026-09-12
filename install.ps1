@@ -10,7 +10,7 @@ param()
 Clear-Host
 
 Write-Host "==================================================================" -ForegroundColor Cyan
-Write-Host "   AnonGuard Military-Grade Anonymity Gateway - Windows Setup" -ForegroundColor Green
+Write-Host "   AnonGuard Authenticated Anonymity Gateway - Windows Setup" -ForegroundColor Green
 Write-Host "==================================================================" -ForegroundColor Cyan
 Write-Host ""
 

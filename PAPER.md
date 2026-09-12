@@ -1,4 +1,4 @@
-# AnonGuard: A Military-Grade Cross-Layer Anonymity Architecture Defeating AI-Driven Fingerprinting and Traffic Analysis
+# AnonGuard: An Authenticated Cross-Layer Anonymity Architecture Mitigating AI-Driven Fingerprinting and Traffic Analysis
 
 **Authors:** AnonGuard Research Initiative  
 **Classification:** Research Specification & Academic Whitepaper  
@@ -9,12 +9,12 @@
 ## Abstract
 Modern threat-intelligence platforms, nation-state surveillance networks, and AI-enhanced Web Application Firewalls (WAFs) employ multi-layer attribution techniques that defeat conventional single-layer privacy tools. Traditional proxies and VPNs fail against dual-stack IPv6 fallback leaks, local DNS resolution exposure, transport-level fail-open behavior, and TLS ClientHello fingerprinting (JA3/JA4). Furthermore, passive network adversaries deploy convolutional neural networks and random forest classifiers on packet flow sequences (website fingerprinting) to de-anonymize encrypted traffic even across onion routers.
 
-We present **AnonGuard**, an autonomous, defense-grade anonymity architecture. AnonGuard integrates:
-1. **Layered Onion Cryptography**: A constant 1024-byte cell protocol utilizing per-hop X25519 Diffie-Hellman key agreement and ChaCha20-Poly1305 forward peeling & reverse wrapping, ensuring no relay observes both origin and destination.
-2. **Distributed Multi-Authority Consensus**: An $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures, eliminating single points of failure.
+We present **AnonGuard**, an autonomous, defense-in-depth anonymity architecture. AnonGuard integrates:
+1. **Authenticated Layered Onion Cryptography**: A constant 1024-byte cell protocol utilizing in-band telescopic X25519 Diffie-Hellman key agreement, ChaCha20 stream encryption, and constant-time keyed HMAC-SHA256 MAC authentication per hop, eliminating polynomial MAC key-reuse vulnerabilities and ensuring no relay observes both origin and destination.
+2. **Distributed Multi-Authority Consensus**: An $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures, with cryptographic identity key binding preventing relay impersonation.
 3. **Sybil Resistance Engine**: Computational Proof-of-Work (PoW) registration challenges coupled with strict BGP `/16` CIDR subnet prefix isolation across circuit paths.
-4. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing**: Inter-packet delays and chunk sizes mapped to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, driving mutual information down to $0.00$ bits and defeating deep learning flow classifiers in $O(1)$ constant time.
-5. **Provably Fail-Closed State Machine**: Hardware/kernel-level kill switch guaranteeing zero transitional data leakage.
+4. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing**: Inter-packet delays and chunk sizes mapped to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, driving mutual information down to $0.00$ bits and disrupting deep learning flow classifiers in $O(1)$ constant time.
+5. **Provably Fail-Closed State Machine**: Active async broadcast kill switch guaranteeing zero transitional or in-flight data leakage.
 
 Empirical evaluation against state-of-the-art Website Fingerprinting neural networks demonstrates a collapse of Top-3 classification accuracy from 65.0% down to 39.0% and Mutual Information to $0.00$ bits, with negligible latency overhead.
 
@@ -156,4 +156,4 @@ We evaluated AnonGuard across two complementary methodologies:
 
 ## 7. Conclusion
 
-AnonGuard provides the first complete, military-grade anonymity pipeline uniting multi-hop onion routing, distributed quorum consensus, Sybil defense, and quantum-mechanical traffic morphing. The architecture is fully implemented, verified with zero compiler warnings, and open for academic scrutiny.
+AnonGuard provides a rigorous, defense-in-depth anonymity pipeline uniting authenticated multi-hop onion routing, distributed quorum consensus, Sybil defense, and quantum-mechanical traffic morphing. The architecture is fully implemented, verified with zero compiler warnings, and open for academic scrutiny.

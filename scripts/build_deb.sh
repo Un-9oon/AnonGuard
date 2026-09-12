@@ -59,10 +59,10 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
-Description: Military-grade decentralized anonymity network with Quantum Chaos morphing and 3-hop layered onion routing.
- AnonGuard defeats AI-driven traffic correlation, website fingerprinting,
+Description: Authenticated decentralized anonymity gateway with Quantum Chaos morphing and 3-hop layered onion routing.
+ AnonGuard mitigates AI-driven traffic correlation, website fingerprinting,
  and flow-correlation attacks using Wigner Surmise level repulsion,
- 3-hop cryptographic onion circuits, and fail-closed kill switches.
+ 3-hop telescopic onion circuits, and fail-closed kill switches.
 EOF
 chmod 644 "${STAGING_DIR}/DEBIAN/control"
 

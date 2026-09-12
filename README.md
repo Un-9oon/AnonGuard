@@ -1,28 +1,28 @@
 # AnonGuard
 
-> **A Military-Grade, Research-Backed Decentralized Anonymity Network built in Rust.**  
-> Designed to defeat state-level traffic analysis, AI-driven flow correlation, and website fingerprinting attacks.
+> **An Authenticated, Research-Backed Decentralized Anonymity Network built in Rust.**  
+> Engineered to counter AI-driven flow correlation, website fingerprinting, and metadata leaks through telescopic onion routing, traffic morphing, and fail-closed leak prevention.
 
 [![Build](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml)
 [![Language](https://img.shields.io/badge/language-Rust-orange)](#)
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#)
 [![Research](https://img.shields.io/badge/research-Oxford%20PhD-purple)](#)
 [![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](#)
-[![Tests](https://img.shields.io/badge/tests-21%20passing-brightgreen)](#)
+[![Tests](https://img.shields.io/badge/tests-22%20passing-brightgreen)](#)
 
 ---
 
 ## What is AnonGuard?
 
-AnonGuard is an advanced **defense-grade anonymity gateway** combining cutting-edge theoretical physics and robust cryptographic routing:
+AnonGuard is an open-source, defense-in-depth anonymity gateway combining statistical physics with authenticated cryptographic routing:
 
-1. **Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, per-hop X25519 Diffie-Hellman key exchange, ChaCha20 stream peeling, and **16-byte Poly1305 Message Authentication Codes (MAC)** verified in constant-time at every hop to prevent bit-flipping and cell tagging attacks. No relay ever sees both source and destination.
-2. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** to produce eigenvalue level repulsion $P(s \to 0) = 0$, mathematically disrupting Deep Learning feature representations in constant $O(1)$ time.
-3. **Distributed Multi-Authority Consensus** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures.
-4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges across all tracker endpoints alongside BGP `/16` CIDR subnet diversity isolation across circuit hops.
-5. **Authenticated Cryptographic Framing** — Ephemeral X25519 + ChaCha20 stream framing completely replacing plaintext HTTP for all node registrations and directory operations.
+1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, and **16-byte HMAC-SHA256 Message Authentication Codes (MAC)** verified in constant-time at every hop to eliminate polynomial tag forgery and bit-flipping attacks. No intermediate relay ever sees both source and destination.
+2. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** to produce eigenvalue level repulsion $P(s \to 0) = 0$, disrupting deep learning packet-timing classifiers in constant $O(1)$ time ($\approx 1 \text{ ns}$ per packet).
+3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
+4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
+5. **Fail-Closed Runtime Protection & Zero-Leak Kill Switch** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization.
 
-AnonGuard compiles cleanly with **zero Clippy warnings**, passes **all 20 integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
+AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
 
 ---
 
@@ -134,12 +134,14 @@ python3 eval/real_pcap_collector.py --interface lo --proxy-port 9050
 
 ## Core Security Pillars
 
-### 1. 🧅 Military-Grade Layered Onion Routing
-Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds a **cryptographic 3-hop circuit**:
-- **Guard Node:** Strips Layer 1. Knows the client IP, but has no knowledge of downstream hops or payload.
+### 1. 🧅 Authenticated Multi-Hop Onion Circuit Routing
+Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds an authentic **cryptographic 3-hop telescopic circuit**:
+- **Guard Node:** Strips Layer 1. Knows the client IP, but has no knowledge of downstream hops or cleartext payload.
 - **Middle Relay:** Strips Layer 2. Knows only the previous hop and next hop.
 - **Exit Node:** Strips Layer 3. Knows the destination target, but has zero knowledge of the originating client.
-- Return packets are wrapped by each relay in reverse, and peeled by the client.
+- **In-Band Telescopic Handshake:** Ephemeral X25519 `CREATE`/`CREATED` and encrypted `EXTEND`/`EXTENDED` cell exchanges prevent on-path eavesdroppers from discovering downstream path topologies.
+- **Cryptographic Integrity:** Fixed 1024-byte cells protected with keyed HMAC-SHA256 MACs verified in constant time prevent tagging, bit-flipping, and replay attacks.
+- Return packets are wrapped by each relay in reverse, and unwrapped sequentially by the client.
 
 ### 2. 🔬 Quantum Chaos Morphing (Wigner Surmise)
 AnonGuard maps packet sizes and inter-arrival delays to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE):
@@ -149,12 +151,28 @@ $$P(s) = \frac{\pi}{2} s \cdot \exp\!\left(-\frac{\pi}{4} s^2\right)$$
 Because **level repulsion** guarantees $P(s \to 0) = 0$, packet timings never cluster predictably. The inverse transform sampling runs in **$O(1)$ constant time** ($\approx 1 \text{ ns}$ per packet), requiring zero supercomputing resources.
 
 ### 3. 🛡️ Sybil Attack Resistance
-To prevent a state actor or botnet from flooding the directory with 10,000 rogue nodes:
+To prevent a botnet or hostile entity from flooding the directory with rogue nodes:
 - Every relay registration must solve an asymmetric **Proof-of-Work (PoW)** challenge $\text{SHA256}(\text{NodeID} \,\|\, \text{Timestamp} \,\|\, \text{Nonce}) < \text{Target}$.
 - Circuit path selection enforces strict **BGP `/16` CIDR Subnet Diversity**, ensuring that Guard, Middle, and Exit nodes never share the same `/16` network prefix or autonomous system.
 
-### 4. 🌐 Distributed Multi-Authority Consensus
-AnonGuard eliminates single points of failure. The directory consensus is maintained by independent Directory Authorities using **Ed25519 threshold signatures**. Clients only trust consensus documents verified by an $M$-of-$N$ quorum.
+### 4. 🌐 Distributed Multi-Authority Consensus & Key Binding
+AnonGuard eliminates single points of failure. The directory consensus is maintained by independent Directory Authorities using **Ed25519 threshold signatures**. Clients only trust consensus documents verified by an $M$-of-$N$ quorum. Relays must sign registrations with their Ed25519 identity key, eliminating unauthorized last-write-wins overwriting.
+
+---
+
+## 🔒 Threat Model & Security Boundaries
+
+### What AnonGuard Protects Against:
+1. **Passive Network Observers & Eavesdroppers:** On-path observers cannot read payload data or correlate client IP addresses with exit destinations.
+2. **Intermediate Relay Collusion:** As long as at least one intermediate relay in the circuit is honest and non-colluding, full path deanonymization is prevented.
+3. **Deep Learning Website Fingerprinting:** Q-RMT eigenvalue level repulsion prevents CNN/RF classifiers from recognizing specific traffic signatures.
+4. **Local Network DNS & IPv6 Leaks:** Remote DNS resolution over SOCKS5h and runtime IPv6 blackholing prevent common OS dual-stack exposure.
+5. **Mid-Session Policy Disruption:** An active broadcast kill switch terminates in-flight streams immediately if a tunnel or security policy trips.
+
+### What AnonGuard Does NOT Protect Against:
+1. **Global Active Traffic-Timing Adversary:** If an adversary observes both ingress to the Guard and egress from the Exit simultaneously with synchronized millisecond-precision flow analysis, statistical timing confirmation remains theoretically possible.
+2. **Endpoint Compromise:** Malware, browser exploits, or keyloggers on the client system operate outside network-level encryption boundaries.
+3. **Malicious Exit Relay Content Tampering:** Unencrypted HTTP traffic passing through an untrusted exit node can be modified by the exit operator. Always use TLS (HTTPS) on end-to-end connections.
 
 ---
 
