@@ -13,8 +13,15 @@ pub use circuit::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use rand::rngs::OsRng;
     use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+
+    fn gen_relay_key() -> (Ed25519SigningKey, [u8; 32]) {
+        let sk = Ed25519SigningKey::generate(&mut OsRng);
+        let pk = sk.verifying_key().to_bytes();
+        (sk, pk)
+    }
 
     #[test]
     fn test_telescopic_circuit_create_and_extend_exchange() {
@@ -26,11 +33,19 @@ mod tests {
         let client_pub_0 = X25519PublicKey::from(&client_secret_0);
         let create_cell_0 = build_create_cell(circuit_id, &client_pub_0).unwrap();
 
-        // Relay Guard handles CREATE cell
-        let (mut relay_guard, created_cell_0) = handle_create_cell(&create_cell_0).unwrap();
+        // Relay Guard handles CREATE cell with its identity key
+        let (guard_sk, guard_pk) = gen_relay_key();
+        let (mut relay_guard, created_cell_0) =
+            handle_create_cell(&create_cell_0, &guard_sk).unwrap();
 
-        // Client processes CREATED cell
-        let (fwd0, bwd0, mac0) = process_created_cell(&created_cell_0, client_secret_0).unwrap();
+        // Client processes CREATED cell — verifies identity signature against pinned pubkey
+        let (fwd0, bwd0, mac0) = process_created_cell(
+            &created_cell_0,
+            client_secret_0,
+            client_pub_0.as_bytes(),
+            &guard_pk,
+        )
+        .unwrap();
         client_circuit.add_hop(fwd0, bwd0, mac0);
         assert_eq!(client_circuit.hop_count(), 1);
 
@@ -65,7 +80,9 @@ mod tests {
 
         // Guard forwards CREATE to Relay Middle
         let create_cell_1 = build_create_cell(circuit_id, &middle_pub_for_relay).unwrap();
-        let (mut relay_middle, created_cell_1) = handle_create_cell(&create_cell_1).unwrap();
+        let (middle_sk, middle_pk) = gen_relay_key();
+        let (mut relay_middle, created_cell_1) =
+            handle_create_cell(&create_cell_1, &middle_sk).unwrap();
 
         // Guard wraps Relay Middle's CREATED cell backward towards client
         let mut return_wire_1 = created_cell_1.serialize();
@@ -76,8 +93,13 @@ mod tests {
         assert_eq!(client_unwrapped_1.command, CellCommand::Created);
 
         // Client processes CREATED cell to complete Hop 1
-        let (fwd1, bwd1, mac1) =
-            process_created_cell(&client_unwrapped_1, client_secret_1).unwrap();
+        let (fwd1, bwd1, mac1) = process_created_cell(
+            &client_unwrapped_1,
+            client_secret_1,
+            middle_pub_for_relay.as_bytes(),
+            &middle_pk,
+        )
+        .unwrap();
         client_circuit.add_hop(fwd1, bwd1, mac1);
         assert_eq!(client_circuit.hop_count(), 2);
 
@@ -119,7 +141,9 @@ mod tests {
 
         // Middle forwards CREATE to Relay Exit
         let create_cell_2 = build_create_cell(circuit_id, &exit_pub_for_relay).unwrap();
-        let (mut relay_exit, created_cell_2) = handle_create_cell(&create_cell_2).unwrap();
+        let (exit_sk, exit_pk) = gen_relay_key();
+        let (mut relay_exit, created_cell_2) =
+            handle_create_cell(&create_cell_2, &exit_sk).unwrap();
 
         // Middle wraps backward towards Guard
         let mut return_wire_2 = created_cell_2.serialize();
@@ -131,8 +155,13 @@ mod tests {
         let client_unwrapped_2 = client_circuit.unwrap_backward(&mut return_wire_2).unwrap();
         assert_eq!(client_unwrapped_2.command, CellCommand::Created);
 
-        let (fwd2, bwd2, mac2) =
-            process_created_cell(&client_unwrapped_2, client_secret_2).unwrap();
+        let (fwd2, bwd2, mac2) = process_created_cell(
+            &client_unwrapped_2,
+            client_secret_2,
+            exit_pub_for_relay.as_bytes(),
+            &exit_pk,
+        )
+        .unwrap();
         client_circuit.add_hop(fwd2, bwd2, mac2);
         assert_eq!(client_circuit.hop_count(), 3);
 
@@ -165,6 +194,70 @@ mod tests {
             }
             PeelResult::ForwardDownstream(_) => panic!("Exit must consume authenticated data"),
         }
+    }
+
+    /// Security regression: client MUST reject a CREATED cell when the relay-presented identity
+    /// key does not match the consensus-pinned key. This simulates an active MITM attack.
+    #[test]
+    fn test_identity_binding_mitm_rejection() {
+        // Relay key (legitimate)
+        let (relay_sk, correct_pk) = gen_relay_key();
+        // A different key that an attacker might use, or a misconfiguration
+        let (_wrong_sk, wrong_pk) = gen_relay_key();
+        assert_ne!(correct_pk, wrong_pk);
+
+        let circuit_id = 0xdeadbeef;
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub = X25519PublicKey::from(&client_secret);
+
+        let create_cell = build_create_cell(circuit_id, &client_pub).unwrap();
+        let (_relay_hop, created_cell) = handle_create_cell(&create_cell, &relay_sk).unwrap();
+
+        // Attempt to process CREATED cell with the WRONG pinned identity key
+        let result = process_created_cell(
+            &created_cell,
+            client_secret,
+            client_pub.as_bytes(),
+            &wrong_pk, // attacker's key or misconfiguration
+        );
+
+        assert!(
+            result.is_err(),
+            "process_created_cell must reject when identity key does not match pinned key"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("identity key does not match") || err.contains("MITM"),
+            "Error must mention identity key mismatch or MITM, got: {err}"
+        );
+    }
+
+    /// Security regression: client MUST reject a CREATED cell when the Ed25519 signature is invalid,
+    /// even if the pinned key matches (tampered signature).
+    #[test]
+    fn test_identity_binding_tampered_signature_rejected() {
+        let (relay_sk, relay_pk) = gen_relay_key();
+        let circuit_id = 0xcafebabe;
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub = X25519PublicKey::from(&client_secret);
+
+        let create_cell = build_create_cell(circuit_id, &client_pub).unwrap();
+        let (_relay_hop, mut created_cell) = handle_create_cell(&create_cell, &relay_sk).unwrap();
+
+        // Tamper the signature bytes (bytes 64..128 of the payload)
+        created_cell.payload[64] ^= 0xFF;
+
+        let result = process_created_cell(
+            &created_cell,
+            client_secret,
+            client_pub.as_bytes(),
+            &relay_pk,
+        );
+
+        assert!(
+            result.is_err(),
+            "process_created_cell must reject when Ed25519 signature is tampered"
+        );
     }
 
     #[test]

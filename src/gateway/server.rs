@@ -15,6 +15,7 @@ use crate::onion::circuit::{
     build_create_cell, decode_extend_payload, encode_extend_payload, handle_create_cell,
     process_created_cell, OnionCircuit, PeelResult,
 };
+use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
 
@@ -227,11 +228,16 @@ impl GatewayServer {
                     } else {
                         info!("Relay Mode: Processing incoming in-band Onion Cell connection");
                         let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
+                        // Generate or load the relay's long-term Ed25519 identity key.
+                        // In production this should be persisted to disk; here we use an
+                        // ephemeral key per-process (stable within one daemon lifetime).
+                        let relay_identity_key = Ed25519SigningKey::generate(&mut OsRng);
                         let _ = handle_onion_relay_connection(
                             client,
                             Some(kill_switch.clone()),
                             jitter.clone(),
                             Some(exit_policy),
+                            &relay_identity_key,
                         )
                         .await;
                     }
@@ -343,10 +349,13 @@ impl GatewayServer {
                         circuit_id ^= 0x10000000;
                     }
 
+                    let pinned_identity_keys = pool.get_identity_keys(&chain).await;
+
                     match build_telescopic_circuit(
                         &mut guard_stream,
                         circuit_id,
                         &chain,
+                        &pinned_identity_keys,
                         &target_host,
                         target_port,
                     )
@@ -782,10 +791,16 @@ pub async fn stream_onion_circuit(
 /// Negotiates an authentic multi-hop telescopic onion circuit over the wire.
 /// Sends a CREATE cell with ephemeral public key X1 to Hop 0, processes CREATED with Y1,
 /// and sequentially extends the circuit through in-band encrypted EXTEND cells.
+///
+/// # Security
+/// `pinned_identity_keys[i]` MUST be the `identity_key_ed25519` from the consensus-verified
+/// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
+/// the corresponding private key via Ed25519 signature (MITM protection).
 pub async fn build_telescopic_circuit(
     stream: &mut TcpStream,
     circuit_id: u32,
     chain: &[crate::mesh::node::ProxyNode],
+    pinned_identity_keys: &[[u8; 32]],
     target_host: &str,
     target_port: u16,
 ) -> Result<(OnionCircuit, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
@@ -796,6 +811,7 @@ pub async fn build_telescopic_circuit(
     // 1. Hop 0 (Guard) in-band CREATE/CREATED handshake
     let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
     let client_pub_0 = x25519_dalek::PublicKey::from(&client_secret_0);
+    let client_pub_0_bytes = *client_pub_0.as_bytes();
     let create_cell = build_create_cell(circuit_id, &client_pub_0)
         .map_err(|e| format!("Failed to build CREATE cell: {}", e))?;
     stream.write_all(&create_cell.serialize()).await?;
@@ -804,8 +820,12 @@ pub async fn build_telescopic_circuit(
     stream.read_exact(&mut created_buf).await?;
     let created_cell = OnionCell::parse(&created_buf)
         .map_err(|e| format!("Failed to parse CREATED cell: {}", e))?;
-    let (fwd0, bwd0, mac0) = process_created_cell(&created_cell, client_secret_0)
-        .map_err(|e| format!("Failed to process Hop 0 CREATED cell: {}", e))?;
+    let pinned_key_0 = pinned_identity_keys
+        .get(0)
+        .ok_or("No pinned identity key for Hop 0 — refusing unauthenticated handshake")?;
+    let (fwd0, bwd0, mac0) =
+        process_created_cell(&created_cell, client_secret_0, &client_pub_0_bytes, pinned_key_0)
+            .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
     circuit.add_hop(fwd0, bwd0, mac0);
     let mut exit_mac = mac0;
 
@@ -817,6 +837,7 @@ pub async fn build_telescopic_circuit(
 
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_pub = x25519_dalek::PublicKey::from(&client_secret);
+        let client_pub_bytes = *client_pub.as_bytes();
 
         let extend_payload =
             encode_extend_payload(&chain[hop_idx].host, chain[hop_idx].port, &client_pub)
@@ -840,8 +861,12 @@ pub async fn build_telescopic_circuit(
             .unwrap_backward(&mut return_wire)
             .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {}", hop_idx, e))?;
 
-        let (fwd, bwd, mac) = process_created_cell(&resp_cell, client_secret)
-            .map_err(|e| format!("Failed to authenticate Hop {}: {}", hop_idx, e))?;
+        let pinned_key = pinned_identity_keys
+            .get(hop_idx)
+            .ok_or_else(|| format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake"))?;
+        let (fwd, bwd, mac) =
+            process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key)
+                .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {e}"))?;
         if hop_idx == chain.len() - 1 {
             exit_mac = mac;
         }
@@ -884,13 +909,18 @@ pub async fn build_telescopic_circuit(
     Ok((circuit, exit_mac))
 }
 
-/// Handles incoming Onion Cell connections on a relay node, completing X25519 handshake
-/// and forwarding cells in-band.
+/// Handles incoming Onion Cell connections on a relay node, completing the identity-bound
+/// X25519/Ed25519 handshake and forwarding cells in-band.
+///
+/// The `relay_identity_key` is the relay's long-term Ed25519 signing key. In production this
+/// should be loaded from a persisted key file; callers must ensure it is the same key registered
+/// in the directory consensus so clients can pin and verify it.
 pub async fn handle_onion_relay_connection(
     mut client: TcpStream,
     kill_switch: Option<KillSwitchController>,
     jitter: Option<JitterEngine>,
     exit_policy: Option<crate::kernel::ExitPolicy>,
+    relay_identity_key: &Ed25519SigningKey,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -902,12 +932,14 @@ pub async fn handle_onion_relay_connection(
     let create_cell = OnionCell::parse(&initial_buf)
         .map_err(|e| format!("Failed to parse incoming CREATE cell: {}", e))?;
 
-    let (mut relay_hop, created_cell) = handle_create_cell(&create_cell)
+    let (mut relay_hop, created_cell) = handle_create_cell(&create_cell, relay_identity_key)
         .map_err(|e| format!("Failed to handle CREATE cell: {}", e))?;
     client.write_all(&created_cell.serialize()).await?;
+    let id_bytes = relay_identity_key.verifying_key().to_bytes();
     info!(
         circuit_id = create_cell.circuit_id,
-        "Relay established initial onion circuit hop"
+        identity_key_prefix = ?&id_bytes[..4],
+        "Relay established identity-bound onion circuit hop"
     );
 
     // 2. Relay packet processing loop

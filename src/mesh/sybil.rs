@@ -4,7 +4,7 @@
 //! and enforces BGP/CIDR subnet diversity across 3-hop circuits.
 
 use sha2::{Digest, Sha256};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_POW_DIFFICULTY: u32 = 20; // 20 leading zero bits (default production difficulty)
@@ -15,6 +15,7 @@ pub enum SybilError {
     InvalidProofOfWork,
     ExpiredTimestamp(u64),
     SubnetCollision([u8; 2]),
+    Ipv6SubnetCollision([u8; 4]),
     DuplicateNode(String),
 }
 
@@ -34,6 +35,11 @@ impl std::fmt::Display for SybilError {
                 f,
                 "Sybil detection: Circuit nodes collide on /16 subnet prefix {}.{}",
                 prefix[0], prefix[1]
+            ),
+            Self::Ipv6SubnetCollision(prefix) => write!(
+                f,
+                "Sybil detection: Circuit nodes collide on IPv6 /32 subnet prefix {:02x}{:02x}:{:02x}{:02x}::/32",
+                prefix[0], prefix[1], prefix[2], prefix[3]
             ),
             Self::DuplicateNode(host) => write!(
                 f,
@@ -119,10 +125,25 @@ pub fn extract_ipv4_subnet_16(host: &str) -> Option<[u8; 2]> {
     }
 }
 
-/// Enforces that all nodes in an onion circuit originate from distinct /16 CIDR subnets
-/// and distinct host addresses, preventing single-ISP or single-datacenter Sybil attacks.
+/// Extracts the /32 IPv6 subnet prefix (first 4 bytes) if host is an IPv6 address.
+/// /32 represents a typical ISP or large data center allocation block.
+pub fn extract_ipv6_subnet_32(host: &str) -> Option<[u8; 4]> {
+    // Remove brackets if present (e.g. "[2001:db8::1]")
+    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip_str.parse::<Ipv6Addr>() {
+        let octets = ip.octets();
+        Some([octets[0], octets[1], octets[2], octets[3]])
+    } else {
+        None
+    }
+}
+
+/// Enforces that all nodes in an onion circuit originate from distinct /16 CIDR subnets (IPv4)
+/// or distinct /32 CIDR subnets (IPv6) and distinct host addresses, preventing single-ISP or
+/// single-datacenter Sybil attacks.
 pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
-    let mut seen_subnets: Vec<[u8; 2]> = Vec::new();
+    let mut seen_ipv4_subnets: Vec<[u8; 2]> = Vec::new();
+    let mut seen_ipv6_subnets: Vec<[u8; 4]> = Vec::new();
     let mut seen_hosts: Vec<&str> = Vec::new();
 
     for &host in hosts {
@@ -132,12 +153,19 @@ pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
         }
         seen_hosts.push(host);
 
-        // Check for /16 subnet prefix collision
+        // Check for IPv4 /16 subnet prefix collision
         if let Some(subnet) = extract_ipv4_subnet_16(host) {
-            if seen_subnets.contains(&subnet) {
+            if seen_ipv4_subnets.contains(&subnet) {
                 return Err(SybilError::SubnetCollision(subnet));
             }
-            seen_subnets.push(subnet);
+            seen_ipv4_subnets.push(subnet);
+        }
+        // Check for IPv6 /32 subnet prefix collision
+        else if let Some(subnet) = extract_ipv6_subnet_32(host) {
+            if seen_ipv6_subnets.contains(&subnet) {
+                return Err(SybilError::Ipv6SubnetCollision(subnet));
+            }
+            seen_ipv6_subnets.push(subnet);
         }
     }
 
@@ -185,5 +213,19 @@ mod tests {
         let duplicate_circuit = ["198.51.10.1", "203.0.113.5", "198.51.10.1"];
         let err2 = validate_circuit_diversity(&duplicate_circuit).unwrap_err();
         assert_eq!(err2, SybilError::DuplicateNode("198.51.10.1".to_string()));
+
+        // Valid diverse IPv6 circuit across 3 distinct /32 subnets
+        let diverse_ipv6_circuit = ["2001:0db8::1", "2001:0db9::2", "2001:0dba::3"];
+        assert!(validate_circuit_diversity(&diverse_ipv6_circuit).is_ok());
+
+        // Colliding IPv6 circuit sharing 2001:0db8::/32
+        let colliding_ipv6_circuit = ["2001:0db8:85a3::1", "2001:0db8:1234::2", "2001:0db9::3"];
+        let err_ipv6 = validate_circuit_diversity(&colliding_ipv6_circuit).unwrap_err();
+        assert_eq!(err_ipv6, SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8]));
+        
+        // Ensure bracketed IPv6 works
+        let colliding_bracketed = ["[2001:0db8::1]", "2001:db8:ffff::2", "2001:0db9::3"];
+        let err_bracket = validate_circuit_diversity(&colliding_bracketed).unwrap_err();
+        assert_eq!(err_bracket, SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8]));
     }
 }

@@ -1,7 +1,11 @@
 //! Layered Onion Circuit Routing, Multi-hop Key Agreement, and HMAC-SHA256 Authenticated Peeling.
+//!
+//! Security: Every hop handshake is identity-bound via Ed25519 signature over the ephemeral
+//! X25519 public keys, linking DH to the relay's long-term identity key pinned in the consensus.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
@@ -186,6 +190,7 @@ impl RelayCircuitHop {
 }
 
 /// Builds a CREATE cell carrying the client's ephemeral X25519 public key.
+/// Layout: [32-byte client_eph_x25519_pub]
 pub fn build_create_cell(
     circuit_id: u32,
     client_pub: &X25519PublicKey,
@@ -201,8 +206,22 @@ pub fn build_create_cell(
     )
 }
 
-/// Relay processes a CREATE cell, performs X25519 Diffie-Hellman, and returns the established hop state and CREATED cell.
-pub fn handle_create_cell(create_cell: &OnionCell) -> Result<(RelayCircuitHop, OnionCell), String> {
+/// Relay processes a CREATE cell, performs X25519 Diffie-Hellman, and returns the established hop
+/// state and CREATED cell.
+///
+/// # Identity Binding
+/// The relay signs `"AnonGuard-handshake-v1" || relay_eph_pub || client_eph_pub` with its
+/// long-term Ed25519 identity key. The client MUST verify this signature against the pinned
+/// `identity_key_ed25519` from the signed consensus before accepting any derived hop keys.
+///
+/// CREATED cell payload layout:
+///   [0..32]   relay ephemeral X25519 public key
+///   [32..64]  relay Ed25519 identity public key
+///   [64..128] Ed25519 signature (64 bytes)
+pub fn handle_create_cell(
+    create_cell: &OnionCell,
+    relay_identity_key: &SigningKey,
+) -> Result<(RelayCircuitHop, OnionCell), String> {
     if create_cell.command != CellCommand::Create {
         return Err(format!(
             "Expected CREATE cell, got {:?}",
@@ -224,12 +243,26 @@ pub fn handle_create_cell(create_cell: &OnionCell) -> Result<(RelayCircuitHop, O
     let shared = relay_secret.diffie_hellman(&client_pub);
     let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
+    // Identity-bind the handshake: sign relay_eph_pub || client_eph_pub under the long-term key.
+    let identity_pub = relay_identity_key.verifying_key();
+    let mut preimage = Vec::with_capacity(6 + 32 + 32);
+    preimage.extend_from_slice(b"AnonGuard-handshake-v1");
+    preimage.extend_from_slice(relay_pub.as_bytes());
+    preimage.extend_from_slice(client_pub_bytes.as_ref());
+    let handshake_sig: Signature = relay_identity_key.sign(&preimage);
+
+    // Build CREATED payload: relay_eph_pub(32) || identity_pub(32) || sig(64) = 128 bytes
+    let mut created_payload = [0u8; 128];
+    created_payload[0..32].copy_from_slice(relay_pub.as_bytes());
+    created_payload[32..64].copy_from_slice(identity_pub.as_bytes());
+    created_payload[64..128].copy_from_slice(&handshake_sig.to_bytes());
+
     let created_cell = OnionCell::new(
         create_cell.circuit_id,
         0,
         CellCommand::Created,
         0,
-        relay_pub.as_bytes(),
+        &created_payload,
         &mac_key,
     )?;
 
@@ -238,10 +271,22 @@ pub fn handle_create_cell(create_cell: &OnionCell) -> Result<(RelayCircuitHop, O
     Ok((relay_hop, created_cell))
 }
 
-/// Client processes a CREATED or EXTENDED cell from a relay, deriving the hop keys and confirming HMAC-SHA256 authentication.
+/// Client processes a CREATED or EXTENDED cell from a relay, verifying the relay's Ed25519
+/// identity-bound handshake signature before accepting any derived hop keys.
+///
+/// # Security
+/// `pinned_identity_key` MUST be sourced from a verified consensus document (M-of-N authority
+/// quorum). Passing an arbitrary or relay-supplied key defeats the MITM protection.
+///
+/// Expected payload layout:
+///   [0..32]   relay ephemeral X25519 public key
+///   [32..64]  relay Ed25519 identity public key (must match `pinned_identity_key`)
+///   [64..128] Ed25519 signature over `"AnonGuard-handshake-v1" || relay_eph_pub || client_eph_pub`
 pub fn process_created_cell(
     created_cell: &OnionCell,
     client_secret: EphemeralSecret,
+    client_pub_bytes: &[u8; 32],
+    pinned_identity_key: &[u8; 32],
 ) -> Result<HandshakeKeys, String> {
     if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended
     {
@@ -250,18 +295,56 @@ pub fn process_created_cell(
             created_cell.command
         ));
     }
-    if created_cell.length < 32 {
-        return Err("CREATED/EXTENDED cell payload too short for X25519 public key".to_string());
+    if created_cell.length < 128 {
+        return Err(
+            "CREATED/EXTENDED cell payload too short for identity-bound handshake (need 128 bytes)"
+                .to_string(),
+        );
     }
 
-    let relay_pub_bytes: [u8; 32] = created_cell.payload[..32]
+    let relay_eph_pub_bytes: [u8; 32] = created_cell.payload[0..32]
         .try_into()
-        .map_err(|_| "Failed to extract relay public key".to_string())?;
-    let relay_pub = X25519PublicKey::from(relay_pub_bytes);
+        .map_err(|_| "Failed to extract relay ephemeral public key".to_string())?;
+    let relay_identity_pub_bytes: [u8; 32] = created_cell.payload[32..64]
+        .try_into()
+        .map_err(|_| "Failed to extract relay identity public key".to_string())?;
+    let sig_bytes: [u8; 64] = created_cell.payload[64..128]
+        .try_into()
+        .map_err(|_| "Failed to extract handshake signature".to_string())?;
 
-    let shared = client_secret.diffie_hellman(&relay_pub);
+    // 1. Verify the relay-supplied identity key matches the consensus-pinned key.
+    //    Use constant-time comparison to prevent oracle side-channels.
+    use subtle::ConstantTimeEq;
+    if relay_identity_pub_bytes
+        .ct_eq(pinned_identity_key)
+        .unwrap_u8()
+        != 1
+    {
+        return Err(
+            "Relay identity key does not match pinned consensus key — possible MITM".to_string(),
+        );
+    }
+
+    // 2. Verify the Ed25519 handshake signature.
+    let verifying_key = VerifyingKey::from_bytes(&relay_identity_pub_bytes)
+        .map_err(|e| format!("Invalid relay Ed25519 identity key: {e}"))?;
+    let signature = Signature::from_bytes(&sig_bytes);
+
+    let mut preimage = Vec::with_capacity(6 + 32 + 32);
+    preimage.extend_from_slice(b"AnonGuard-handshake-v1");
+    preimage.extend_from_slice(&relay_eph_pub_bytes);
+    preimage.extend_from_slice(client_pub_bytes);
+
+    verifying_key
+        .verify(&preimage, &signature)
+        .map_err(|_| "Handshake Ed25519 signature verification failed — possible MITM".to_string())?;
+
+    // 3. Derive hop keys from X25519 shared secret.
+    let relay_eph_pub = X25519PublicKey::from(relay_eph_pub_bytes);
+    let shared = client_secret.diffie_hellman(&relay_eph_pub);
     let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
+    // 4. Verify HMAC-SHA256 cell MAC (encrypt-then-MAC, keyed from the derived mac_key).
     if !created_cell.is_mac_valid(&mac_key) {
         return Err("Cell HMAC-SHA256 authentication verification failed".to_string());
     }

@@ -2,6 +2,7 @@
 
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -15,6 +16,9 @@ use crate::mesh::node::ProxyNode;
 pub struct ProxyPool {
     nodes: Arc<RwLock<Vec<ProxyNode>>>,
     cursor: Arc<AtomicUsize>,
+    /// Maps "host:port" -> Ed25519 identity key from the directory consensus.
+    /// Only populated when nodes are loaded via `load_from_consensus`.
+    identity_keys: Arc<RwLock<HashMap<String, [u8; 32]>>>,
 }
 
 impl ProxyPool {
@@ -22,6 +26,7 @@ impl ProxyPool {
         Self {
             nodes: Arc::new(RwLock::new(Vec::new())),
             cursor: Arc::new(AtomicUsize::new(0)),
+            identity_keys: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -55,6 +60,9 @@ impl ProxyPool {
     /// Loads authenticated relays from a Directory Authority Consensus Document,
     /// strictly enforcing Directory Authority signature quorum, timestamp validity,
     /// and individual relay Ed25519 identity bindings.
+    ///
+    /// Also records the `identity_key_ed25519` for each relay so the onion circuit
+    /// builder can verify the handshake against the pinned consensus key.
     pub async fn load_from_consensus(
         &self,
         doc: &crate::mesh::consensus::ConsensusDocument,
@@ -67,6 +75,7 @@ impl ProxyPool {
         }
 
         let mut loaded = 0;
+        let mut id_keys = self.identity_keys.write().await;
         for relay in &doc.relays {
             if !relay.verify_identity() {
                 continue; // Skip relays with invalid or missing cryptographic identity signatures
@@ -77,10 +86,27 @@ impl ProxyPool {
                 format!("socks5://{}:{}", relay.host, relay.port)
             };
             if self.add_proxy(&scheme).await.is_ok() {
+                // Store identity key keyed by "host:port" for circuit handshake binding
+                let key_id = format!("{}:{}", relay.host, relay.port);
+                id_keys.insert(key_id, relay.identity_key_ed25519);
                 loaded += 1;
             }
         }
         Ok(loaded)
+    }
+
+    /// Returns the pinned Ed25519 identity keys for each node in a chain, in order.
+    /// Nodes loaded from text files (not consensus) will return `[0u8; 32]` (zeroed),
+    /// which `build_telescopic_circuit` will reject — enforcing consensus-sourced routing.
+    pub async fn get_identity_keys(&self, chain: &[ProxyNode]) -> Vec<[u8; 32]> {
+        let id_keys = self.identity_keys.read().await;
+        chain
+            .iter()
+            .map(|n| {
+                let key_id = format!("{}:{}", n.host, n.port);
+                id_keys.get(&key_id).copied().unwrap_or([0u8; 32])
+            })
+            .collect()
     }
 
     /// Retrieves the next alive proxy using round-robin rotation.
