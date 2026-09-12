@@ -18,11 +18,21 @@ use crate::onion::circuit::{
 use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Arc;
+use tokio::sync::{RwLock, Semaphore};
+
+pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+pub const MAX_CONCURRENT_PER_IP: u32 = 64;
+
 pub struct GatewayServer {
     config: GuardConfig,
     pool: ProxyPool,
     kill_switch: KillSwitchController,
     jitter: Option<JitterEngine>,
+    connection_semaphore: Arc<Semaphore>,
+    ip_connections: Arc<RwLock<HashMap<IpAddr, u32>>>,
 }
 
 impl GatewayServer {
@@ -58,15 +68,19 @@ impl GatewayServer {
             pool,
             kill_switch,
             jitter,
+            connection_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_CONNECTIONS)),
+            ip_connections: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Starts the asynchronous listener loop.
+    /// Starts the asynchronous listener loop with global and per-IP connection bounds.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!(
             listen_addr = %self.config.listen_addr,
-            "[AnonGuard Gateway] Active and guarded. Listening for client connections..."
+            "[AnonGuard Gateway] Active and guarded. Listening for client connections (DoS limits: max {} concurrent, max {}/IP)...",
+            DEFAULT_MAX_CONCURRENT_CONNECTIONS,
+            MAX_CONCURRENT_PER_IP
         );
 
         loop {
@@ -78,12 +92,74 @@ impl GatewayServer {
             }
 
             let (client_stream, client_addr) = listener.accept().await?;
+            let client_ip = client_addr.ip();
+
+            // 1. Global connection ceiling (prevent file descriptor/memory exhaustion)
+            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(
+                        client = %client_addr,
+                        "[AnonGuard DoS Defense] Dropped connection: global concurrent limit ({}) reached",
+                        DEFAULT_MAX_CONCURRENT_CONNECTIONS
+                    );
+                    continue;
+                }
+            };
+
+            // 2. Per-IP connection ceiling (prevent single-client connection flooding)
+            {
+                let mut ip_map = self.ip_connections.write().await;
+                let count = ip_map.entry(client_ip).or_insert(0);
+                if *count >= MAX_CONCURRENT_PER_IP {
+                    warn!(
+                        client = %client_addr,
+                        current = *count,
+                        limit = MAX_CONCURRENT_PER_IP,
+                        "[AnonGuard DoS Defense] Dropped connection: per-IP connection cap exceeded"
+                    );
+                    continue;
+                }
+                *count += 1;
+            }
+
             let pool = self.pool.clone();
             let kill_switch = self.kill_switch.clone();
             let jitter = self.jitter.clone();
             let config = self.config.clone();
+            let ip_tracker = self.ip_connections.clone();
 
             tokio::spawn(async move {
+                let _permit = permit;
+
+                // RAII guard to decrement per-IP active connection count on disconnect
+                struct IpGuard {
+                    ip: IpAddr,
+                    tracker: Arc<RwLock<HashMap<IpAddr, u32>>>,
+                }
+                impl Drop for IpGuard {
+                    fn drop(&mut self) {
+                        let ip = self.ip;
+                        let tracker = self.tracker.clone();
+                        tokio::spawn(async move {
+                            let mut map = tracker.write().await;
+                            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                                map.entry(ip)
+                            {
+                                if *entry.get() <= 1 {
+                                    entry.remove();
+                                } else {
+                                    *entry.get_mut() -= 1;
+                                }
+                            }
+                        });
+                    }
+                }
+                let _ip_guard = IpGuard {
+                    ip: client_ip,
+                    tracker: ip_tracker,
+                };
+
                 if kill_switch.is_tripped() {
                     return;
                 }
@@ -189,12 +265,13 @@ impl GatewayServer {
                     let mut guard_stream = if entry_node.raw_url.starts_with("reverse://") {
                         let node_id = entry_node.host.clone();
                         let auth_token = entry_node.username.as_deref().unwrap_or("");
-                        let tracker_url = config
-                            .tracker_url
-                            .as_ref()
-                            .expect("tracker_url required for reverse")
-                            .trim_start_matches("http://")
-                            .to_string();
+                        let tracker_url = match config.tracker_url.as_ref() {
+                            Some(u) => u.trim_start_matches("http://").to_string(),
+                            None => {
+                                error!("Circuit initiation error: tracker_url required for reverse node connection");
+                                return;
+                            }
+                        };
                         match TcpStream::connect(&tracker_url).await {
                             Ok(mut s) => {
                                 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -289,12 +366,13 @@ impl GatewayServer {
                             if node.raw_url.starts_with("reverse://") {
                                 let node_id = node.host.clone();
                                 let auth_token = node.username.as_deref().unwrap_or("");
-                                let tracker_url = config
-                                    .tracker_url
-                                    .as_ref()
-                                    .expect("tracker_url required for reverse")
-                                    .trim_start_matches("http://")
-                                    .to_string();
+                                let tracker_url = match config.tracker_url.as_ref() {
+                                    Some(u) => u.trim_start_matches("http://").to_string(),
+                                    None => {
+                                        error!("Plain SOCKS5 chain error: tracker_url required for reverse node connection");
+                                        return;
+                                    }
+                                };
                                 match TcpStream::connect(&tracker_url).await {
                                     Ok(mut s) => {
                                         use tokio::io::{

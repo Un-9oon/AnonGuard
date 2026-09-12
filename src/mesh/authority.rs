@@ -15,12 +15,15 @@ use crate::mesh::consensus::{ConsensusDocument, RelayDescriptor};
 use crate::mesh::sybil::{current_timestamp_secs, verify_pow, DEFAULT_POW_DIFFICULTY};
 use crate::mesh::transport::SecureTransportSession;
 
+pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
+
 pub struct DirectoryAuthority {
     pub authority_id: String,
     signing_key: SigningKey,
     listen_addr: String,
     active_relays: Arc<RwLock<HashMap<String, RelayDescriptor>>>,
     pub pow_difficulty: u32,
+    connection_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl DirectoryAuthority {
@@ -36,6 +39,9 @@ impl DirectoryAuthority {
             listen_addr,
             active_relays: Arc::new(RwLock::new(HashMap::new())),
             pow_difficulty,
+            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_AUTHORITY_CONNECTIONS,
+            )),
         }
     }
 
@@ -111,12 +117,23 @@ impl DirectoryAuthority {
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(
+                        "Directory Authority [{}] DoS defense: max concurrent limit ({}) reached, dropped connection from {}",
+                        self.authority_id, DEFAULT_MAX_AUTHORITY_CONNECTIONS, addr
+                    );
+                    continue;
+                }
+            };
             let active_relays = self.active_relays.clone();
             let auth_id = self.authority_id.clone();
             let signing_key = self.signing_key.clone();
             let pow_difficulty = self.pow_difficulty;
 
             tokio::spawn(async move {
+                let _permit = permit;
                 match SecureTransportSession::server_handshake(stream, Some(&signing_key)).await {
                     Ok(mut session) => {
                         while let Ok(frame) = session.read_frame().await {

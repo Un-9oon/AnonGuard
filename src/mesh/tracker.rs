@@ -14,10 +14,13 @@ pub struct ReverseNodeEntry {
 
 type Directory = Arc<RwLock<HashMap<String, ReverseNodeEntry>>>;
 
+pub const DEFAULT_MAX_TRACKER_CONNECTIONS: usize = 512;
+
 pub struct TrackerServer {
     listen_addr: String,
     directory: Directory,
     pub pow_difficulty: u32,
+    connection_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl TrackerServer {
@@ -30,18 +33,35 @@ impl TrackerServer {
             listen_addr,
             directory: Arc::new(RwLock::new(HashMap::new())),
             pow_difficulty,
+            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_TRACKER_CONNECTIONS,
+            )),
         }
     }
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
-        info!("Rendezvous Tracker listening on {}", self.listen_addr);
+        info!(
+            "Rendezvous Tracker listening on {} (max {} concurrent connections)",
+            self.listen_addr, DEFAULT_MAX_TRACKER_CONNECTIONS
+        );
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(
+                        "Tracker DoS defense: max concurrent limit ({}) reached, dropped connection from {}",
+                        DEFAULT_MAX_TRACKER_CONNECTIONS, addr
+                    );
+                    continue;
+                }
+            };
             let dir = self.directory.clone();
             let pow_difficulty = self.pow_difficulty;
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = handle_connection(stream, dir, pow_difficulty).await {
                     warn!("Tracker connection from {} failed: {}", addr, e);
                 }

@@ -3,7 +3,7 @@
 //! Protects volunteer exit relay operators from Server-Side Request Forgery (SSRF),
 //! internal network scanning, local service exploitation, and common abuse vectors (SMTP spam).
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Debug, Clone)]
 pub struct ExitPolicy {
@@ -79,26 +79,11 @@ impl ExitPolicy {
             ));
         }
 
-        let addrs = tokio::net::lookup_host((host, port)).await?;
-        let mut target_addr = None;
+        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        let ips: Vec<IpAddr> = addrs.iter().map(|a| a.ip()).collect();
+        self.validate_resolved_ips(host, &ips)?;
 
-        for addr in addrs {
-            if !self.is_ip_permitted(addr.ip()) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!(
-                        "Exit relay policy blocked resolved IP {} for target {} (anti-SSRF / anti-DNS rebinding)",
-                        addr.ip(),
-                        host
-                    ),
-                ));
-            }
-            if target_addr.is_none() {
-                target_addr = Some(addr);
-            }
-        }
-
-        let addr = target_addr.ok_or_else(|| {
+        let addr = addrs.into_iter().next().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("No IP address resolved for target {}:{}", host, port),
@@ -106,6 +91,22 @@ impl ExitPolicy {
         })?;
 
         tokio::net::TcpStream::connect(addr).await
+    }
+
+    /// Validates a list of resolved IP addresses for a host against the SSRF and DNS-rebinding policy.
+    pub fn validate_resolved_ips(&self, host: &str, ips: &[IpAddr]) -> Result<(), std::io::Error> {
+        for &ip in ips {
+            if !self.is_ip_permitted(ip) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Exit relay policy blocked resolved IP {} for target {} (anti-SSRF / anti-DNS rebinding)",
+                        ip, host
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Validates if an IP address belongs to allowed public internet space.
@@ -279,7 +280,46 @@ mod tests {
             std::io::ErrorKind::PermissionDenied
         );
 
-        // 3. Permitted private network mode succeeds when enabled
+        // 3. True DNS Rebinding Test: Hostname that passes string validation but resolves to private IP
+        // String check: "legitimate-bank-api.com" is NOT in string blocklist
+        assert!(policy.is_permitted("legitimate-bank-api.com", 443));
+        // Resolved IP validation: When DNS returns RFC 1918 / Loopback / Cloud Metadata, it is strictly blocked
+        let rebind_ips = [
+            "10.0.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+            "169.254.169.254".parse().unwrap(),
+            "192.168.1.50".parse().unwrap(),
+            "::1".parse().unwrap(),
+        ];
+        for ip in rebind_ips {
+            let res = policy.validate_resolved_ips("legitimate-bank-api.com", &[ip]);
+            assert!(res.is_err(), "Resolved IP {} should be blocked", ip);
+            assert_eq!(
+                res.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+
+        // 4. Valid public IP resolution succeeds
+        let public_ips = ["8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()];
+        assert!(policy
+            .validate_resolved_ips("legitimate-bank-api.com", &public_ips)
+            .is_ok());
+
+        // 5. Live DNS Rebinding test using 127.0.0.1.nip.io (resolves to 127.0.0.1 via DNS, not on string blocklist)
+        assert!(
+            policy.is_permitted("127.0.0.1.nip.io", 80),
+            "nip.io domain passes string check"
+        );
+        let nip_res = policy.resolve_and_connect("127.0.0.1.nip.io", 80).await;
+        assert!(nip_res.is_err());
+        assert_eq!(
+            nip_res.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "127.0.0.1.nip.io must be blocked upon resolving to loopback"
+        );
+
+        // 6. Permitted private network mode succeeds when enabled
         let private_policy = ExitPolicy::new(true);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
