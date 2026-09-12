@@ -57,13 +57,17 @@ impl LorenzAttractor {
     /// Computes the next packet shard size based on the chaotic X axis.
     /// Maps the chaotic X output (typically -20 to 20) to a shard size (e.g. 50 to 1500 bytes).
     pub fn sample_shard_size(&self, max_buffer_len: usize) -> usize {
+        if max_buffer_len <= 50 {
+            return max_buffer_len;
+        }
+
         let (x, _) = self.step();
 
         // Normalize X from roughly [-20.0, 20.0] to [0.0, 1.0]
         let normalized_x = ((x + 20.0) / 40.0).clamp(0.0, 1.0);
 
         let min_size = 50;
-        let max_size = 1500.min(max_buffer_len.max(50));
+        let max_size = 1500.min(max_buffer_len);
 
         let size = min_size as f64 + (normalized_x * (max_size - min_size) as f64);
         size as usize

@@ -135,6 +135,86 @@ impl GuardedSocket<ActiveGuarded> {
     }
 }
 
+impl<S: State> GuardedSocket<S> {
+    /// Extracts the inner TcpStream if present.
+    pub fn into_inner(mut self) -> Option<TcpStream> {
+        self.stream.take()
+    }
+
+    /// Checks if the kill switch associated with this socket is tripped.
+    pub fn is_kill_switch_tripped(&self) -> bool {
+        self.kill_switch.load(Ordering::SeqCst)
+    }
+}
+
+impl tokio::io::AsyncRead for GuardedSocket<ActiveGuarded> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.kill_switch.load(Ordering::SeqCst) {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Kill switch tripped: zero-leak drop enforced",
+            )));
+        }
+        if let Some(ref mut stream) = self.stream {
+            std::pin::Pin::new(stream).poll_read(cx, buf)
+        } else {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Socket dropped fail-closed",
+            )))
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for GuardedSocket<ActiveGuarded> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if self.kill_switch.load(Ordering::SeqCst) {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Kill switch tripped: zero-leak drop enforced",
+            )));
+        }
+        if let Some(ref mut stream) = self.stream {
+            std::pin::Pin::new(stream).poll_write(cx, buf)
+        } else {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Socket dropped fail-closed",
+            )))
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(ref mut stream) = self.stream {
+            std::pin::Pin::new(stream).poll_flush(cx)
+        } else {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if let Some(ref mut stream) = self.stream {
+            std::pin::Pin::new(stream).poll_shutdown(cx)
+        } else {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+}
+
 impl<S: State> Drop for GuardedSocket<S> {
     fn drop(&mut self) {
         // Ensure stream is cleanly shut down on drop if not already transitioned

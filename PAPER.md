@@ -63,11 +63,14 @@ AnonGuard operates across four integrated subsystems:
 │    - Fallback: Lorenz Chaotic Attractor Morphing            │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. Protocol Normalizer & Fail-Closed Kill Switch            │
-│    - Chrome 120+ / Firefox 124+ JA4 TLS Profile Emulation   │
-│    - Deterministic HTTP Header Scrubbing                    │
+│    - Client-Side Chrome 120+ / Firefox 124+ JA4 Profile Spec│
+│    - Deterministic HTTP Header Scrubbing Library Utility    │
 │    - Fail-Closed Process & OS nftables Kill Switch          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Design Principle — Zero-Trust Transport Integrity:**
+> To maintain strict end-to-end cryptographic confidentiality without dangerous local CA injection (MitM proxying), the daemon operates strictly at OSI Layers 4 and 5 (TCP byte-stream and SOCKS5). Application-layer fingerprinting countermeasures (`TlsProfile` and `HeaderNormalizer`) are provided as library utilities for client-side user agents, synthetic crawlers, and headless browser drivers operating through the daemon.
 
 ---
 

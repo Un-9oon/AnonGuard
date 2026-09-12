@@ -100,7 +100,12 @@ where
                     while !data.is_empty() {
                         let shard_len = match &j1 {
                             JitterEngine::Poisson(_) => {
-                                rand::thread_rng().gen_range(50..=std::cmp::min(data.len(), 1500))
+                                if data.len() <= 50 {
+                                    data.len()
+                                } else {
+                                    rand::thread_rng()
+                                        .gen_range(50..=std::cmp::min(data.len(), 1500))
+                                }
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
                             JitterEngine::Quantum(q) => {
@@ -128,6 +133,7 @@ where
                 Err(_) => break,
             }
         }
+        let _ = b_write.shutdown().await;
         transferred
     };
 
@@ -142,7 +148,12 @@ where
                     while !data.is_empty() {
                         let shard_len = match &j2 {
                             JitterEngine::Poisson(_) => {
-                                rand::thread_rng().gen_range(50..=std::cmp::min(data.len(), 1500))
+                                if data.len() <= 50 {
+                                    data.len()
+                                } else {
+                                    rand::thread_rng()
+                                        .gen_range(50..=std::cmp::min(data.len(), 1500))
+                                }
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
                             JitterEngine::Quantum(q) => {
@@ -170,6 +181,7 @@ where
                 Err(_) => break,
             }
         }
+        let _ = a_write.shutdown().await;
         transferred
     };
 

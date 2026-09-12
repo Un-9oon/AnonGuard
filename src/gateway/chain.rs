@@ -81,9 +81,12 @@ pub async fn socks5_connect_through(
     Ok(stream)
 }
 
-/// Parses an incoming SOCKS5 request from a client, returning the requested target host and port.
-/// Responds with a generic success to the client so the client starts sending payload data.
-pub async fn intercept_socks5_request(stream: &mut TcpStream) -> std::io::Result<(String, u16)> {
+/// Reads and parses an incoming SOCKS5 handshake from a client, returning the requested target host and port.
+/// Does NOT send the CONNECT reply so the server can verify upstream circuit connectivity first.
+pub async fn read_socks5_request<S>(stream: &mut S) -> std::io::Result<(String, u16)>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + ?Sized,
+{
     // 1. Initial auth negotiation
     let mut auth_req = [0u8; 2];
     stream.read_exact(&mut auth_req).await?;
@@ -148,13 +151,35 @@ pub async fn intercept_socks5_request(stream: &mut TcpStream) -> std::io::Result
     stream.read_exact(&mut port_buf).await?;
     let port = ((port_buf[0] as u16) << 8) | (port_buf[1] as u16);
 
-    // 3. Respond success to client immediately (we will build the chain async)
-    // We bind to 0.0.0.0:0 in the response
-    let success_resp = [
-        0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // 0.0.0.0
-        0x00, 0x00, // port 0
-    ];
-    stream.write_all(&success_resp).await?;
-
     Ok((host, port))
+}
+
+/// Sends a SOCKS5 CONNECT reply to the client with the specified status code (RFC 1928).
+/// Common codes:
+/// - 0x00: Success
+/// - 0x01: General SOCKS server failure
+/// - 0x02: Connection not allowed by ruleset (e.g. exit policy block / SSRF)
+/// - 0x03: Network unreachable
+/// - 0x04: Host unreachable
+/// - 0x05: Connection refused
+pub async fn send_socks5_reply<S>(stream: &mut S, rep: u8) -> std::io::Result<()>
+where
+    S: AsyncWriteExt + Unpin + ?Sized,
+{
+    let resp = [
+        0x05, rep, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, // Bound addr: 0.0.0.0
+        0x00, 0x00, // Bound port: 0
+    ];
+    stream.write_all(&resp).await
+}
+
+/// Parses an incoming SOCKS5 request from a client, returning the requested target host and port.
+/// Responds with a generic success (0x00) immediately for convenience.
+pub async fn intercept_socks5_request<S>(stream: &mut S) -> std::io::Result<(String, u16)>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + ?Sized,
+{
+    let target = read_socks5_request(stream).await?;
+    send_socks5_reply(stream, 0x00).await?;
+    Ok(target)
 }

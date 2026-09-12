@@ -98,11 +98,14 @@ On any Debian/Ubuntu system, build your own signed `.deb` package in seconds:
 │    - Fallback: Lorenz Chaotic Attractor Morphing            │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. Protocol Normalizer & Kernel Kill Switch                 │
-│    - Chrome 120+ / Firefox 124+ JA4 TLS Profile Emulation   │
-│    - Deterministic HTTP Header Scrubbing                    │
+│    - Client-Side Chrome 120+ / Firefox 124+ JA4 Profile Spec│
+│    - Deterministic HTTP Header Scrubbing Library Utility    │
 │    - Fail-Closed Kernel Kill Switch (Zero Transitional Leak)│
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Architectural Layering Note (L4/L5 Transport vs. L7 Application):**
+> AnonGuard operates as an authentic L4/L5 network privacy daemon (RFC 1928 SOCKS5 and in-band onion cells). To preserve zero-trust end-to-end TLS cryptography and avoid the severe security vulnerabilities of local root CA interception (MitM), the daemon does not terminate or forge TLS connections. The included `TlsProfile` (`anonguard::crypto::TlsProfile`) and `HeaderNormalizer` (`anonguard::crypto::HeaderNormalizer`) modules provide reference specifications and normalization rules for client-side user-agents, scrapers, and headless browser drivers operating through the daemon.
 
 ---
 
@@ -227,12 +230,14 @@ cargo fmt --check
 All unit and integration tests verify:
 - 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
 - Fixed 1024-byte OnionCell serialization, HMAC-SHA256 MACs, and monotonic sequence anti-replay validation
+- SOCKS5 handshake negotiation, error status codes (`0x00`, `0x01`, `0x02`, `0x04`, `0x05`), and RFC 1928 compliance
 - Multi-authority consensus voting, Ed25519 quorum validation, and key pinning
 - Proof-of-Work mining and verification with configurable difficulty
 - BGP `/16` subnet collision detection
 - Anti-SSRF exit policy with DNS rebinding prevention on real sockets
-- State machine fail-closed transitions and active in-flight stream cancellation
-- JA4 browser TLS emulation & HTTP header scrubbing
+- State machine fail-closed transitions, active in-flight stream cancellation, and `GuardedSocket` async stream safety
+- Non-crashing sub-50 byte Poisson jitter & Lorenz chaos stream morphing
+- Client-side JA4 browser TLS emulation & HTTP header scrubbing library specifications
 
 ---
 

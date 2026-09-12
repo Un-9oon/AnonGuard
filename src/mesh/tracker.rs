@@ -75,9 +75,14 @@ async fn handle_connection(
     directory: Directory,
     pow_difficulty: u32,
 ) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
     let mut reader = BufReader::new(stream);
     let mut first_line = String::new();
-    reader.read_line(&mut first_line).await?;
+    (&mut reader).take(4096).read_line(&mut first_line).await?;
+
+    if first_line.is_empty() {
+        return Ok(());
+    }
 
     let cmd = first_line.trim().to_string();
 
@@ -355,5 +360,19 @@ mod tests {
         let mut ok_resp = [0u8; 64];
         let nok = auth_client.read(&mut ok_resp).await.unwrap();
         assert!(String::from_utf8_lossy(&ok_resp[..nok]).contains("OK"));
+
+        // 7. Test oversized line input (>4096 bytes) is safely capped
+        let listener7 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr7 = listener7.local_addr().unwrap();
+        let dir_clone7 = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener7.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone7, test_difficulty).await;
+        });
+
+        let mut spammer = TcpStream::connect(addr7).await.unwrap();
+        let huge_garbage = vec![b'A'; 8192];
+        spammer.write_all(&huge_garbage).await.unwrap();
+        drop(spammer);
     }
 }

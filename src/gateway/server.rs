@@ -179,8 +179,7 @@ impl GatewayServer {
                         }
 
                         let (target_host, target_port) =
-                            match crate::gateway::chain::intercept_socks5_request(&mut client).await
-                            {
+                            match crate::gateway::chain::read_socks5_request(&mut client).await {
                                 Ok(res) => res,
                                 Err(e) => {
                                     error!(
@@ -201,6 +200,8 @@ impl GatewayServer {
                                     "Relay Mode: Forwarding traffic to {}:{}",
                                     target_host, target_port
                                 );
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
+                                    .await;
                                 let _ = morph_bidirectional_guarded(
                                     &mut client,
                                     &mut target_stream,
@@ -214,6 +215,13 @@ impl GatewayServer {
                                     "Relay Mode: Target {}:{} blocked or unreachable: {}",
                                     target_host, target_port, e
                                 );
+                                let rep = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                    0x02 // Connection not allowed by ruleset (SSRF/private IP blocked)
+                                } else {
+                                    0x04 // Host unreachable
+                                };
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, rep)
+                                    .await;
                             }
                         }
                     } else {
@@ -232,7 +240,7 @@ impl GatewayServer {
 
                 // 1. Intercept SOCKS5 from local client to find target
                 let (target_host, target_port) =
-                    match crate::gateway::chain::intercept_socks5_request(&mut client).await {
+                    match crate::gateway::chain::read_socks5_request(&mut client).await {
                         Ok(res) => res,
                         Err(e) => {
                             error!("Failed to intercept client SOCKS5 handshake: {}", e);
@@ -254,6 +262,7 @@ impl GatewayServer {
                 };
                 if chain.is_empty() {
                     warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
+                    let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01).await;
                     return;
                 }
 
@@ -269,12 +278,16 @@ impl GatewayServer {
                             Some(u) => u.trim_start_matches("http://").to_string(),
                             None => {
                                 error!("Circuit initiation error: tracker_url required for reverse node connection");
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01)
+                                    .await;
                                 return;
                             }
                         };
                         match TcpStream::connect(&tracker_url).await {
                             Ok(mut s) => {
-                                use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                                use tokio::io::{
+                                    AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
+                                };
                                 let payload = if !auth_token.is_empty() {
                                     format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
                                 } else {
@@ -283,7 +296,8 @@ impl GatewayServer {
                                 let _ = s.write_all(payload.as_bytes()).await;
                                 let mut reader = BufReader::new(s);
                                 let mut resp = String::new();
-                                if reader.read_line(&mut resp).await.is_ok() && resp.trim() == "OK"
+                                if (&mut reader).take(1024).read_line(&mut resp).await.is_ok()
+                                    && resp.trim() == "OK"
                                 {
                                     reader.into_inner()
                                 } else {
@@ -292,12 +306,17 @@ impl GatewayServer {
                                         resp
                                     );
                                     pool.rotate_on_block(&entry_node.raw_url).await;
+                                    let _ =
+                                        crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
+                                            .await;
                                     return;
                                 }
                             }
                             Err(e) => {
                                 error!("Failed to connect to tracker {}: {}", tracker_url, e);
                                 pool.rotate_on_block(&entry_node.raw_url).await;
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
+                                    .await;
                                 return;
                             }
                         }
@@ -308,6 +327,8 @@ impl GatewayServer {
                             Err(e) => {
                                 error!("Failed to connect to entry Guard node {}: {}", addr, e);
                                 pool.rotate_on_block(&entry_node.raw_url).await;
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
+                                    .await;
                                 if config.strict_killswitch {
                                     kill_switch.trip("Entry Guard node connection failure");
                                 }
@@ -338,6 +359,8 @@ impl GatewayServer {
                                 target = %format!("{}:{}", target_host, target_port),
                                 "Activating authentic 3-hop layered ChaCha20/HMAC-SHA256 onion circuit to destination"
                             );
+                            let _ =
+                                crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
                             let _ = stream_onion_circuit(
                                 &mut client,
                                 &mut guard_stream,
@@ -350,6 +373,8 @@ impl GatewayServer {
                         }
                         Err(e) => {
                             error!("Failed to negotiate telescopic onion circuit: {}", e);
+                            let _ =
+                                crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
                             if config.strict_killswitch {
                                 kill_switch.trip("Telescopic circuit negotiation failure");
                             }
@@ -370,13 +395,18 @@ impl GatewayServer {
                                     Some(u) => u.trim_start_matches("http://").to_string(),
                                     None => {
                                         error!("Plain SOCKS5 chain error: tracker_url required for reverse node connection");
+                                        let _ = crate::gateway::chain::send_socks5_reply(
+                                            &mut client,
+                                            0x01,
+                                        )
+                                        .await;
                                         return;
                                     }
                                 };
                                 match TcpStream::connect(&tracker_url).await {
                                     Ok(mut s) => {
                                         use tokio::io::{
-                                            AsyncBufReadExt, AsyncWriteExt, BufReader,
+                                            AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
                                         };
                                         let payload = if !auth_token.is_empty() {
                                             format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
@@ -386,13 +416,22 @@ impl GatewayServer {
                                         let _ = s.write_all(payload.as_bytes()).await;
                                         let mut reader = BufReader::new(s);
                                         let mut resp = String::new();
-                                        if reader.read_line(&mut resp).await.is_ok()
+                                        if (&mut reader)
+                                            .take(1024)
+                                            .read_line(&mut resp)
+                                            .await
+                                            .is_ok()
                                             && resp.trim() == "OK"
                                         {
                                             current_stream = Some(reader.into_inner());
                                         } else {
                                             error!("Tracker rejected CONNECT_REVERSE: {}", resp);
                                             pool.rotate_on_block(&node.raw_url).await;
+                                            let _ = crate::gateway::chain::send_socks5_reply(
+                                                &mut client,
+                                                0x04,
+                                            )
+                                            .await;
                                             return;
                                         }
                                     }
@@ -402,6 +441,11 @@ impl GatewayServer {
                                             tracker_url, e
                                         );
                                         pool.rotate_on_block(&node.raw_url).await;
+                                        let _ = crate::gateway::chain::send_socks5_reply(
+                                            &mut client,
+                                            0x04,
+                                        )
+                                        .await;
                                         return;
                                     }
                                 }
@@ -412,6 +456,11 @@ impl GatewayServer {
                                     Err(e) => {
                                         error!("Failed to connect to entry node {}: {}", addr, e);
                                         pool.rotate_on_block(&node.raw_url).await;
+                                        let _ = crate::gateway::chain::send_socks5_reply(
+                                            &mut client,
+                                            0x04,
+                                        )
+                                        .await;
                                         if config.strict_killswitch {
                                             kill_switch.trip("Entry node connection failure");
                                         }
@@ -450,6 +499,9 @@ impl GatewayServer {
                                         node.host, e
                                     );
                                     pool.rotate_on_block(&node.raw_url).await;
+                                    let _ =
+                                        crate::gateway::chain::send_socks5_reply(&mut client, 0x05)
+                                            .await;
                                     if config.strict_killswitch {
                                         kill_switch.trip("Tunnel negotiation failure");
                                     }
@@ -466,6 +518,7 @@ impl GatewayServer {
                             target_host,
                             target_port
                         );
+                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
                         let _ = crate::morphing::morph_bidirectional_guarded(
                             &mut client,
                             &mut upstream_stream,
@@ -473,6 +526,8 @@ impl GatewayServer {
                             Some(kill_switch.clone()),
                         )
                         .await;
+                    } else {
+                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
                     }
                 }
             });
