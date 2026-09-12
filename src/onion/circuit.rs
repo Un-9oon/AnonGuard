@@ -7,7 +7,7 @@
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
-use chacha20poly1305::{aead::{AeadInPlace, KeyInit}, ChaCha20Poly1305, Tag};
+use chacha20poly1305::{aead::{AeadInPlace, KeyInit}, ChaCha20Poly1305};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -104,10 +104,7 @@ impl OnionCircuit {
         self.hops.len()
     }
 
-    pub fn get_hop_mac_key(&self, _index: usize) -> Option<[u8; 32]> {
-        // Obsolete function, returning zeroed key for backward compat in test shapes
-        Some([0u8; 32])
-    }
+
 
     /// Forward Onion Encryption:
     /// Wraps a cell from innermost layer (Exit) to outermost layer (Guard).

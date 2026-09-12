@@ -16,11 +16,11 @@
 
 AnonGuard is an open-source, defense-in-depth anonymity gateway combining statistical physics with authenticated cryptographic routing:
 
-1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, monotonic sequence counters for anti-replay, and **16-byte HMAC-SHA256 Message Authentication Codes (MAC)** verified in constant-time at every hop to eliminate tag forgery, bit-flipping, and replay attacks. No intermediate relay ever sees both source and destination.
+1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, monotonic sequence counters for anti-replay, and **ChaCha20-Poly1305 AEAD** authentication applied to the addressed hop to eliminate tag forgery, bit-flipping, and replay attacks. No intermediate relay ever sees both source and destination.
 2. **Statistical Random Matrix Theory (RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** eigenvalue spacing distribution $P(s \to 0) = 0$ via fast inverse-transform sampling from a classical CSPRNG to produce level repulsion, disrupting deep learning packet-timing classifiers in constant $O(1)$ time ($\approx 1 \text{ ns}$ per packet, requiring no quantum hardware).
 3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
-2. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
-3. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization. *(Note: Optional kernel-level `nftables` output filtering is strictly Linux-only via `--enable-firewall-killswitch`).*
+4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
+5. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization. *(Note: Optional kernel-level `nftables` output filtering is strictly Linux-only via `--enable-firewall-killswitch`).*
 
 AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all 29 integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
 
@@ -128,10 +128,10 @@ python3 eval/real_pcap_collector.py --interface lo --proxy-port 9050
 | **Unprotected TCP / SOCKS5** | 37.0% | 62.0% | 50.0% | 0.81 bits | None (Trivial Correlation) |
 | **Standard Tor (Fixed Cells)** | 32.0% | 65.0% | 46.0% | 0.88 bits | Vulnerable to Timing Attacks |
 | **Lorenz Chaotic Attractor** | 25.0% | 61.0% | 43.0% | 0.68 bits | Moderate Nonlinear Obfuscation |
-| **AnonGuard Q-RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Information-Theoretic Ceiling** |
+| **AnonGuard Q-RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Empirical Resistance (Simulated)** |
 
 > **Theoretical Baseline:** Uniform random guessing across 10 classes is **10.0%**.  
-> AnonGuard Q-RMT drives mutual information down to **0.00 bits**, mathematically obliterating the latent space of deep neural networks.
+> AnonGuard Q-RMT drives mutual information down to **0.00 bits** in local simulations, strongly disrupting the latent space of deep neural networks.
 
 ---
 
@@ -143,7 +143,7 @@ Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds an authenti
 - **Middle Relay:** Strips Layer 2. Knows only the previous hop and next hop.
 - **Exit Node:** Strips Layer 3. Knows the destination target, but has zero knowledge of the originating client.
 - **In-Band Telescopic Handshake:** Ephemeral X25519 `CREATE`/`CREATED` and encrypted `EXTEND`/`EXTENDED` cell exchanges prevent on-path eavesdroppers from discovering downstream path topologies.
-- **Cryptographic Integrity:** Fixed 1024-byte cells protected with keyed HMAC-SHA256 MACs verified in constant time prevent tagging, bit-flipping, and replay attacks.
+- **Cryptographic Integrity:** Fixed 1024-byte cells protected with explicit nonces and **ChaCha20-Poly1305 AEAD** applied to the addressed hop to eliminate tag forgery, bit-flipping, and replay attacks.
 - Return packets are wrapped by each relay in reverse, and unwrapped sequentially by the client.
 
 ### 2. 🔬 Statistical RMT Traffic Morphing (Wigner Surmise)
@@ -229,7 +229,7 @@ cargo fmt --check
 
 All unit and integration tests verify:
 - 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
-- Fixed 1024-byte OnionCell serialization, HMAC-SHA256 MACs, and monotonic sequence anti-replay validation
+- Fixed 1024-byte OnionCell serialization, explicit nonces, ChaCha20-Poly1305 AEAD, and monotonic sequence anti-replay validation
 - SOCKS5 handshake negotiation, error status codes (`0x00`, `0x01`, `0x02`, `0x04`, `0x05`), and RFC 1928 compliance
 - Multi-authority consensus voting, Ed25519 quorum validation, and key pinning
 - Proof-of-Work mining and verification with configurable difficulty

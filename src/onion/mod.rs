@@ -265,9 +265,6 @@ mod tests {
 
         // Attempting to send stale/replayed sequence 1 must be rejected by anti-replay counter
         // (Since client_circuit sequence_no advanced, we just manually craft a sequence 1 cell)
-        let mut replay_cell = OnionCell::new(1, 1, CellCommand::Data, 1, b"REPLAY_ATTACK").unwrap();
-        replay_cell.sequence_no = 1; // It's actually replaced inside wrap_forward but let's override wrap_forward
-        
         // Replay the previous raw packet
         let err = relay.peel_forward(&mut raw1);
         assert!(err.is_err());

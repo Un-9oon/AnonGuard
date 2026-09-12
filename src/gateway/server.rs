@@ -361,12 +361,12 @@ impl GatewayServer {
                     )
                     .await
                     {
-                        Ok((circuit, exit_mac)) => {
+                        Ok(circuit) => {
                             info!(
                                 circuit_id = circuit_id,
                                 hops = chain.len(),
                                 target = %format!("{}:{}", target_host, target_port),
-                                "Activating authentic 3-hop layered ChaCha20/HMAC-SHA256 onion circuit to destination"
+                                "Activating authentic 3-hop layered ChaCha20-Poly1305 AEAD onion circuit to destination"
                             );
                             let _ =
                                 crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
@@ -374,7 +374,6 @@ impl GatewayServer {
                                 &mut client,
                                 &mut guard_stream,
                                 circuit,
-                                exit_mac,
                                 jitter.clone(),
                                 Some(kill_switch.clone()),
                             )
@@ -646,7 +645,6 @@ pub async fn stream_onion_circuit(
     client: &mut TcpStream,
     upstream: &mut TcpStream,
     circuit: OnionCircuit,
-    exit_mac_key: [u8; 32],
     jitter: Option<JitterEngine>,
     kill_switch: Option<KillSwitchController>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -660,7 +658,6 @@ pub async fn stream_onion_circuit(
 
     let circuit_fwd = circuit.clone();
     let jitter_fwd = jitter.clone();
-    let exit_mac_fwd = exit_mac_key;
 
     let fwd = async move {
         let mut buf = [0u8; PAYLOAD_SIZE];
@@ -709,7 +706,6 @@ pub async fn stream_onion_circuit(
     };
 
     let circuit_bwd = circuit.clone();
-    let exit_mac_bwd = exit_mac_key;
     let bwd = async move {
         let mut wire_buffer = [0u8; ONION_CELL_SIZE];
         loop {
@@ -797,7 +793,7 @@ pub async fn build_telescopic_circuit(
     pinned_identity_keys: &[[u8; 32]],
     target_host: &str,
     target_port: u16,
-) -> Result<(OnionCircuit, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<OnionCircuit, Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut circuit = OnionCircuit::new(circuit_id);
@@ -815,20 +811,15 @@ pub async fn build_telescopic_circuit(
     let created_cell = OnionCell::parse(&created_buf)
         .map_err(|e| format!("Failed to parse CREATED cell: {}", e))?;
     let pinned_key_0 = pinned_identity_keys
-        .get(0)
+        .first()
         .ok_or("No pinned identity key for Hop 0 — refusing unauthenticated handshake")?;
     let (fwd0, bwd0, mac0) =
         process_created_cell(&created_cell, client_secret_0, &client_pub_0_bytes, pinned_key_0)
             .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
     circuit.add_hop(fwd0, bwd0, mac0);
-    let mut exit_mac = mac0;
-
     // 2. Telescopic circuit extension for subsequent hops
+    #[allow(clippy::needless_range_loop)]
     for hop_idx in 1..chain.len() {
-        let prev_mac = circuit
-            .get_hop_mac_key(hop_idx - 1)
-            .ok_or("Missing previous hop MAC key")?;
-
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_pub = x25519_dalek::PublicKey::from(&client_secret);
         let client_pub_bytes = *client_pub.as_bytes();
@@ -860,9 +851,7 @@ pub async fn build_telescopic_circuit(
         let (fwd, bwd, mac) =
             process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key)
                 .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {e}"))?;
-        if hop_idx == chain.len() - 1 {
-            exit_mac = mac;
-        }
+
         circuit.add_hop(fwd, bwd, mac);
     }
 
@@ -895,7 +884,7 @@ pub async fn build_telescopic_circuit(
         .into());
     }
 
-    Ok((circuit, exit_mac))
+    Ok(circuit)
 }
 
 /// Handles incoming Onion Cell connections on a relay node, completing the identity-bound
@@ -980,7 +969,7 @@ pub async fn handle_onion_relay_connection(
                             Ok(0) => {
                                 let seq = relay_hop.next_send_seq;
                                 relay_hop.next_send_seq += 1;
-                                if let Ok(mut destroy_cell) = OnionCell::new(
+                                if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
                                     seq,
                                     CellCommand::Destroy,
@@ -997,7 +986,7 @@ pub async fn handle_onion_relay_connection(
                             Err(_) => {
                                 let seq = relay_hop.next_send_seq;
                                 relay_hop.next_send_seq += 1;
-                                if let Ok(mut destroy_cell) = OnionCell::new(
+                                if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
                                     seq,
                                     CellCommand::Destroy,
@@ -1013,7 +1002,7 @@ pub async fn handle_onion_relay_connection(
                         };
                         let seq = relay_hop.next_send_seq;
                         relay_hop.next_send_seq += 1;
-                        let Ok(mut return_cell) = OnionCell::new(
+                        let Ok(return_cell) = OnionCell::new(
                             relay_hop.circuit_id,
                             seq,
                             CellCommand::Data,
@@ -1115,7 +1104,7 @@ pub async fn handle_onion_relay_connection(
                                     Ok(target_s) => {
                                         let seq = relay_hop.next_send_seq;
                                         relay_hop.next_send_seq += 1;
-                                        if let Ok(mut resp_cell) = OnionCell::new(
+                                        if let Ok(resp_cell) = OnionCell::new(
                                             relay_hop.circuit_id,
                                             seq,
                                             CellCommand::Relay,

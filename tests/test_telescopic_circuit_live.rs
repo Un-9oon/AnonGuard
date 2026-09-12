@@ -93,7 +93,7 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let mut guard_stream = TcpStream::connect(guard_addr).await.unwrap();
     let circuit_id = 0x1a2b3c4d;
 
-    let (mut circuit, exit_mac) = build_telescopic_circuit(
+    let mut circuit = build_telescopic_circuit(
         &mut guard_stream,
         circuit_id,
         &chain,
