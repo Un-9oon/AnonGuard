@@ -89,19 +89,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );
 
-    let mut config = GuardConfig::default();
-    config.listen_addr = args.listen.clone();
-    config.enable_jitter = args.jitter;
-    config.jitter_lambda = args.jitter_lambda;
-    config.enable_chaos = args.chaos;
-    config.chaos_sigma = args.chaos_sigma;
-    config.chaos_rho = args.chaos_rho;
-    config.chaos_beta = args.chaos_beta;
-    config.enable_quantum = args.quantum;
-    config.quantum_ensemble = args.quantum_ensemble;
-    config.relay_mode = args.relay;
-    config.reverse_relay_mode = args.reverse_relay;
-    config.tracker_url = args.fetch_from.clone();
+    let config = GuardConfig {
+        listen_addr: args.listen.clone(),
+        enable_jitter: args.jitter,
+        jitter_lambda: args.jitter_lambda,
+        enable_chaos: args.chaos,
+        chaos_sigma: args.chaos_sigma,
+        chaos_rho: args.chaos_rho,
+        chaos_beta: args.chaos_beta,
+        enable_quantum: args.quantum,
+        quantum_ensemble: args.quantum_ensemble.clone(),
+        relay_mode: args.relay,
+        reverse_relay_mode: args.reverse_relay,
+        tracker_url: args.fetch_from.clone(),
+        ..GuardConfig::default()
+    };
 
     if args.tracker {
         let tracker = anonguard::mesh::TrackerServer::new(args.listen);

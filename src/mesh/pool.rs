@@ -40,7 +40,7 @@ impl ProxyPool {
         let reader = BufReader::new(file);
         let mut loaded = 0;
 
-        for l in reader.lines().flatten() {
+        for l in reader.lines().map_while(Result::ok) {
             let trimmed = l.trim();
             if !trimmed.is_empty()
                 && !trimmed.starts_with('#')

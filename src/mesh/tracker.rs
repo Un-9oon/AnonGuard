@@ -71,14 +71,7 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
             };
 
             if let Some(pool) = pool_opt {
-                let mut popped_stream = None;
-                // Try to get a valid stream
-                let mut locked_pool = pool.lock().await;
-                while let Some(s) = locked_pool.pop() {
-                    popped_stream = Some(s);
-                    break;
-                }
-                drop(locked_pool);
+                let popped_stream = pool.lock().await.pop();
 
                 if let Some(mut target_stream) = popped_stream {
                     info!("Bridging connection to Node: {}", node_id);

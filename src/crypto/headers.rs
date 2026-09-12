@@ -41,7 +41,7 @@ impl HeaderNormalizer {
     }
 
     /// Sorts headers according to authentic Google Chrome binary order.
-    pub fn order_headers_chrome(headers: &mut Vec<(String, String)>) {
+    pub fn order_headers_chrome(headers: &mut [(String, String)]) {
         let order_map: std::collections::HashMap<&'static str, usize> = CHROME_HEADER_ORDER
             .iter()
             .enumerate()

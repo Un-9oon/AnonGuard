@@ -63,8 +63,7 @@ impl QuantumRmtEngine {
         let mut rng = rand::thread_rng();
         // Prevent strictly 0.0 to avoid ln(0) infinity
         let u: f64 = rng.gen_range(1e-9..1.0);
-        let s = (-(4.0 / PI) * u.ln()).sqrt();
-        s
+        (-(4.0 / PI) * u.ln()).sqrt()
     }
 
     /// Samples spacing `s` from the GUE Wigner Surmise:
