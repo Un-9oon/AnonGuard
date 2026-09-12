@@ -102,6 +102,59 @@ impl ProxyPool {
         healthy.into_iter().take(path_len).collect()
     }
 
+    /// Retrieves a random chain of proxies that strictly enforces BGP /16 subnet diversity
+    /// to defeat Sybil attacks and correlation by colluding single-provider nodes.
+    pub async fn get_diverse_onion_chain(
+        &self,
+        min_hops: usize,
+        max_hops: usize,
+        enforce_diversity: bool,
+    ) -> Vec<ProxyNode> {
+        let list = self.nodes.read().await;
+        let mut healthy: Vec<ProxyNode> = list.iter().filter(|n| n.is_alive).cloned().collect();
+
+        if healthy.is_empty() {
+            healthy = list.clone();
+        }
+
+        if healthy.is_empty() {
+            return Vec::new();
+        }
+
+        let mut rng = rand::thread_rng();
+        let max_possible = healthy.len().min(max_hops);
+        let min_possible = min_hops.min(max_possible);
+
+        let path_len = if min_possible < max_possible {
+            rng.gen_range(min_possible..=max_possible)
+        } else {
+            min_possible.max(1).min(healthy.len())
+        };
+
+        healthy.shuffle(&mut rng);
+
+        if !enforce_diversity {
+            return healthy.into_iter().take(path_len).collect();
+        }
+
+        let mut selected: Vec<ProxyNode> = Vec::new();
+        for candidate in healthy {
+            if selected.len() >= path_len {
+                break;
+            }
+
+            let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
+            test_hosts.push(&candidate.host);
+
+            if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
+                selected.push(candidate);
+            }
+        }
+
+        // If strict diversity filtered too aggressively, fall back to whatever diverse nodes we gathered
+        selected
+    }
+
     /// Rotates away from a blocked proxy and returns a fresh healthy node.
     pub async fn rotate_on_block(&self, blocked_url: &str) -> Option<ProxyNode> {
         let mut list = self.nodes.write().await;

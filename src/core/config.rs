@@ -36,6 +36,15 @@ pub struct GuardConfig {
     pub relay_mode: bool,
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
+    /// Enable 3-hop layered onion encryption (Sphinx/Tor-style cell peeling)
+    pub enable_onion_routing: bool,
+    /// Enforce BGP /16 subnet diversity across circuit hops (Sybil resistance)
+    pub enforce_subnet_diversity: bool,
+    /// Run as a Directory Authority consensus node
+    pub authority_mode: bool,
+    pub authority_id: String,
+    /// List of trusted Directory Authority endpoints for consensus verification
+    pub directory_authorities: Vec<String>,
     /// Gateway listen address
     pub listen_addr: String,
 }
@@ -62,6 +71,11 @@ impl Default for GuardConfig {
             relay_mode: false,
             reverse_relay_mode: false,
             tracker_url: None,
+            enable_onion_routing: false,
+            enforce_subnet_diversity: true,
+            authority_mode: false,
+            authority_id: "authority-default".to_string(),
+            directory_authorities: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
         }
     }

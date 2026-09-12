@@ -61,9 +61,29 @@ struct Args {
     #[arg(short, long, default_value_t = false)]
     relay: bool,
 
-    /// Run as a Directory Authority Tracker
+    /// Run as a Directory Authority Tracker (legacy mode)
     #[arg(long, default_value_t = false)]
     tracker: bool,
+
+    /// Run as a Cryptographic Directory Authority Node (M-of-N consensus)
+    #[arg(long, default_value_t = false)]
+    authority: bool,
+
+    /// Directory Authority Identifier (e.g. auth-zurich)
+    #[arg(long, default_value = "auth-primary")]
+    authority_id: String,
+
+    /// Comma-separated list of Directory Authority endpoints
+    #[arg(long)]
+    authorities: Option<String>,
+
+    /// Enable 3-hop Layered Onion Encryption (Sphinx / Tor-style cell peeling)
+    #[arg(long, default_value_t = false)]
+    onion: bool,
+
+    /// Enforce BGP /16 Subnet Diversity across circuit hops (Sybil resistance)
+    #[arg(long, default_value_t = true)]
+    enforce_subnet_diversity: bool,
 
     /// Run as a Reverse Relay Node (Volunteer mode behind NAT)
     #[arg(long, default_value_t = false)]
@@ -89,6 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );
 
+    let directory_authorities = if let Some(ref auths) = args.authorities {
+        auths.split(',').map(|s| s.trim().to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
         enable_jitter: args.jitter,
@@ -99,11 +125,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         chaos_beta: args.chaos_beta,
         enable_quantum: args.quantum,
         quantum_ensemble: args.quantum_ensemble.clone(),
+        enable_onion_routing: args.onion,
+        enforce_subnet_diversity: args.enforce_subnet_diversity,
+        authority_mode: args.authority,
+        authority_id: args.authority_id.clone(),
+        directory_authorities,
         relay_mode: args.relay,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
         ..GuardConfig::default()
     };
+
+    if args.authority {
+        let authority = anonguard::mesh::DirectoryAuthority::new(args.authority_id, args.listen);
+        authority.run().await?;
+        return Ok(());
+    }
 
     if args.tracker {
         let tracker = anonguard::mesh::TrackerServer::new(args.listen);

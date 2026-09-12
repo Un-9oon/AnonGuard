@@ -112,10 +112,18 @@ impl GatewayServer {
                         }
                     }
                 } else {
-                    // Client Mode: Select dynamic random proxy chain
-                    let chain = pool
-                        .get_random_chain(config.min_chain_length, config.max_chain_length)
-                        .await;
+                    // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
+                    let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
+                        pool.get_diverse_onion_chain(
+                            config.min_chain_length.max(3),
+                            config.max_chain_length.max(3),
+                            config.enforce_subnet_diversity,
+                        )
+                        .await
+                    } else {
+                        pool.get_random_chain(config.min_chain_length, config.max_chain_length)
+                            .await
+                    };
                     if chain.is_empty() {
                         warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
                         return;

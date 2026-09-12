@@ -8,6 +8,7 @@ pub mod gateway;
 pub mod kernel;
 pub mod mesh;
 pub mod morphing;
+pub mod onion;
 
 pub use crate::core::{
     ActiveGuarded, DroppedFailClosed, GuardConfig, GuardError, GuardedSocket, State,
