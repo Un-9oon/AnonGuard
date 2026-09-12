@@ -26,6 +26,49 @@ AnonGuard compiles cleanly with **zero Clippy warnings**, passes **all 20 integr
 
 ---
 
+## 📦 Quick Installation & Pre-Built Packages
+
+Pre-compiled packages for all operating systems are available directly on the **[GitHub Releases](https://github.com/Un-9oon/AnonGuard/releases)** page.
+
+### 🐧 Debian / Ubuntu / Kali / Mint (`.deb`)
+Download the `.deb` package and install it with `dpkg` or `apt`:
+```bash
+# Install package
+sudo dpkg -i anonguard_0.1.0_amd64.deb
+
+# Enable and start background daemon (runs on boot)
+sudo systemctl enable --now anonguard
+
+# Check status
+systemctl status anonguard
+```
+*Binary is installed to `/usr/bin/anonguard-daemon` and config to `/etc/anonguard/config.toml`.*
+
+### 🪟 Windows (`.zip` setup)
+1. Download `anonguard-windows-amd64.zip` from [Releases](https://github.com/Un-9oon/AnonGuard/releases).
+2. Extract the archive.
+3. Open PowerShell or Command Prompt in the extracted folder:
+```powershell
+.\anonguard-daemon.exe --listen 127.0.0.1:9050 --onion --quantum
+```
+4. Point your browser's SOCKS5 proxy to `127.0.0.1:9050`.
+
+### 🍎 macOS (Apple Silicon M1/M2/M3 & Intel)
+Download the universal binary archive:
+```bash
+tar -xzf anonguard-macos-universal.tar.gz
+./anonguard-daemon --listen 127.0.0.1:9050 --onion --quantum
+```
+
+### 🛠️ Build `.deb` Locally From Source
+On any Debian/Ubuntu system, build your own signed `.deb` package in seconds:
+```bash
+./scripts/build_deb.sh
+# Generated at: dist/anonguard_0.1.0_amd64.deb
+```
+
+---
+
 ## System Architecture
 
 ```

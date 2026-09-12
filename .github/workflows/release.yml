@@ -1,0 +1,129 @@
+name: Release & Multi-Platform Packaging
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build Linux Binary & Debian Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Debian Package
+        run: |
+          chmod +x scripts/build_deb.sh
+          ./scripts/build_deb.sh
+
+      - name: Create Linux Tarball
+        run: |
+          mkdir -p target/package_linux
+          cp target/release/anonguard-daemon target/package_linux/
+          cp contrib/anonguard.default.conf target/package_linux/config.toml
+          cp README.md target/package_linux/
+          tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: dist/*
+
+  build-windows:
+    name: Build Windows Executable Bundle
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Release Binary
+        run: cargo build --release
+
+      - name: Package Windows Zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force
+          New-Item -ItemType Directory -Path target/package_windows -Force
+          Copy-Item target/release/anonguard-daemon.exe target/package_windows/
+          Copy-Item contrib/anonguard.default.conf target/package_windows/config.toml
+          Copy-Item README.md target/package_windows/
+          Compress-Archive -Path target/package_windows/* -DestinationPath dist/anonguard-windows-amd64.zip
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: dist/*
+
+  build-macos:
+    name: Build macOS Universal Binary
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: |
+          rustup target add aarch64-apple-darwin
+          rustup target add x86_64-apple-darwin
+
+      - name: Build Apple Silicon (ARM64) and Intel (x86_64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+
+      - name: Create Universal Binary with Lipo
+        run: |
+          mkdir -p dist target/package_macos
+          lipo -create -output target/package_macos/anonguard-daemon \
+            target/aarch64-apple-darwin/release/anonguard-daemon \
+            target/x86_64-apple-darwin/release/anonguard-daemon
+          chmod +x target/package_macos/anonguard-daemon
+          cp contrib/anonguard.default.conf target/package_macos/config.toml
+          cp README.md target/package_macos/
+          tar -czvf dist/anonguard-macos-universal.tar.gz -C target/package_macos .
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Display Release Files
+        run: ls -lh release_assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release_assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
