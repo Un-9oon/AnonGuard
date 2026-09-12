@@ -245,14 +245,24 @@ impl GatewayServer {
                 }
 
                 // 1. Intercept SOCKS5 from local client to find target
-                let (target_host, target_port) =
-                    match crate::gateway::chain::read_socks5_request(&mut client).await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            error!("Failed to intercept client SOCKS5 handshake: {}", e);
-                            return;
-                        }
-                    };
+                let timeout_duration = tokio::time::Duration::from_secs(10);
+                let (target_host, target_port) = match tokio::time::timeout(
+                    timeout_duration,
+                    crate::gateway::chain::read_socks5_request(&mut client),
+                )
+                .await
+                {
+                    Ok(Ok(res)) => res,
+                    Ok(Err(e)) => {
+                        error!("Failed to intercept client SOCKS5 handshake: {}", e);
+                        return;
+                    }
+                    Err(_) => {
+                        warn!("SOCKS5 handshake timed out after {}s (Slowloris defense)", timeout_duration.as_secs());
+                        return;
+                    }
+                };
+
 
                 // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                 let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
@@ -906,7 +916,11 @@ pub async fn handle_onion_relay_connection(
 
     // 1. Read initial CREATE cell from client
     let mut initial_buf = [0u8; ONION_CELL_SIZE];
-    client.read_exact(&mut initial_buf).await?;
+    match tokio::time::timeout(tokio::time::Duration::from_secs(10), client.read_exact(&mut initial_buf)).await {
+        Ok(Ok(_)) => {},
+        Ok(Err(e)) => return Err(format!("Failed to read initial CREATE cell: {}", e).into()),
+        Err(_) => return Err("Timeout waiting for initial CREATE cell (Slowloris defense)".into()),
+    }
     let create_cell = OnionCell::parse(&initial_buf)
         .map_err(|e| format!("Failed to parse incoming CREATE cell: {}", e))?;
 

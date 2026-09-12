@@ -151,7 +151,7 @@ We evaluated AnonGuard across two complementary methodologies:
 | **Unprotected TCP / SOCKS5** | 37.0% | 62.0% | 50.0% | 0.81 bits | None (Trivial Attribution) |
 | **Standard Tor (Fixed Cells)** | 32.0% | 65.0% | 46.0% | 0.88 bits | High Vulnerability to Timing Analysis |
 | **Lorenz Chaotic Attractor** | 25.0% | 61.0% | 43.0% | 0.68 bits | Moderate Nonlinear Obfuscation |
-| **AnonGuard RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Information-Theoretic Ceiling** |
+| **AnonGuard RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Empirical Resistance (Simulated); live-traffic validation pending** |
 
 ### Key Findings:
 1. **Entropy Collapse:** RMT morphing drives the Shannon Mutual Information between packet timing features and website labels down to **$0.00$ bits**.

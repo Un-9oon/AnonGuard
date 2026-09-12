@@ -85,8 +85,8 @@ impl OnionCell {
         buf[8] = self.command as u8;
         buf[9..11].copy_from_slice(&self.stream_id.to_be_bytes());
         buf[11..13].copy_from_slice(&self.length.to_be_bytes());
-        buf[13..29].copy_from_slice(&self.mac);
-        buf[29..ONION_CELL_SIZE].copy_from_slice(&self.payload);
+        buf[13..1008].copy_from_slice(&self.payload);
+        buf[1008..1024].copy_from_slice(&self.mac);
         buf
     }
 
@@ -97,10 +97,10 @@ impl OnionCell {
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
         let stream_id = u16::from_be_bytes(buf[9..11].try_into().unwrap());
         let length = u16::from_be_bytes(buf[11..13].try_into().unwrap());
-        let mut mac = [0u8; 16];
-        mac.copy_from_slice(&buf[13..29]);
         let mut payload = [0u8; PAYLOAD_SIZE];
-        payload.copy_from_slice(&buf[29..ONION_CELL_SIZE]);
+        payload.copy_from_slice(&buf[13..1008]);
+        let mut mac = [0u8; 16];
+        mac.copy_from_slice(&buf[1008..1024]);
 
         Ok(Self {
             circuit_id,

@@ -14,6 +14,10 @@ crate-type = ["cdylib", "rlib"]
 name = "anonguard-daemon"
 path = "src/main.rs"
 
+[[bench]]
+name = "crypto_bench"
+harness = false
+
 [dependencies]
 # Async Runtime & Networking
 tokio = { version = "1.38", features = ["full"] }
@@ -22,14 +26,14 @@ bytes = "1.6"
 url = "2.5"
 
 # Cryptography & Hashing
-sha2 = "0.10"
+sha2 = "=0.10.9"
 rand = "0.8"
-x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 chacha20 = "0.9"
 poly1305 = "0.8"
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "=0.10.1"
 subtle = "2.6"
-ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 
 # Error handling
 thiserror = "1.0"
@@ -50,4 +54,5 @@ default = []
 python = ["dep:pyo3"]
 
 [dev-dependencies]
+criterion = "0.8.2"
 tokio-test = "0.4"

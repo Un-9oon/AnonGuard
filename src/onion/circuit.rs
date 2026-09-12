@@ -109,6 +109,9 @@ impl OnionCircuit {
     /// Forward Onion Encryption:
     /// Wraps a cell from innermost layer (Exit) to outermost layer (Guard).
     pub fn wrap_forward(&mut self, cell: &mut OnionCell) -> [u8; ONION_CELL_SIZE] {
+        if self.sequence_no == u32::MAX {
+            panic!("Circuit sequence number exhausted. Tearing down circuit to prevent nonce reuse.");
+        }
         cell.sequence_no = self.sequence_no;
         self.sequence_no += 1;
         let nonce = build_nonce(cell.circuit_id, cell.sequence_no);
@@ -118,16 +121,10 @@ impl OnionCircuit {
         if let Some(target_hop) = self.hops.last() {
             let cipher = ChaCha20Poly1305::new(&target_hop.forward_key.into());
             let (header, body) = raw.split_at_mut(8);
+            let (pt, mac_buf) = body.split_at_mut(1000);
             
-            let mut pt = Vec::with_capacity(1016 - 16);
-            pt.extend_from_slice(&body[0..5]);
-            pt.extend_from_slice(&body[21..]);
-
-            let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, &mut pt).unwrap();
-            
-            body[0..5].copy_from_slice(&pt[0..5]);
-            body[21..].copy_from_slice(&pt[5..]);
-            body[5..21].copy_from_slice(&tag);
+            let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, pt).unwrap();
+            mac_buf.copy_from_slice(&tag);
         }
 
         let hop_count = self.hops.len();
@@ -158,19 +155,13 @@ impl OnionCircuit {
         if let Some(target_hop) = self.hops.last() {
             let cipher = ChaCha20Poly1305::new(&target_hop.backward_key.into());
             let (header, body) = raw.split_at_mut(8);
-            
-            let mut ct = Vec::with_capacity(1016 - 16);
-            ct.extend_from_slice(&body[0..5]);
-            ct.extend_from_slice(&body[21..]);
+            let (ct, mac_buf) = body.split_at_mut(1000);
             
             let mut tag = [0u8; 16];
-            tag.copy_from_slice(&body[5..21]);
+            tag.copy_from_slice(mac_buf);
 
-            cipher.decrypt_in_place_detached(&nonce.into(), header, &mut ct, &tag.into())
+            cipher.decrypt_in_place_detached(&nonce.into(), header, ct, &tag.into())
                   .map_err(|_| "Client backward AEAD decryption failed")?;
-
-            body[0..5].copy_from_slice(&ct[0..5]);
-            body[21..].copy_from_slice(&ct[5..]);
         }
 
         OnionCell::parse(raw)
@@ -226,18 +217,17 @@ impl RelayCircuitHop {
         let cipher = ChaCha20Poly1305::new(&self.crypt.forward_key.into());
         let (header, body) = raw.split_at_mut(8);
             
-        let mut ct = Vec::with_capacity(1016 - 16);
-        ct.extend_from_slice(&body[0..5]);
-        ct.extend_from_slice(&body[21..]);
-        
+        let (ct, mac_buf) = body.split_at_mut(1000);
         let mut tag = [0u8; 16];
-        tag.copy_from_slice(&body[5..21]);
+        tag.copy_from_slice(mac_buf);
+        
+        let mut pt_scratch = [0u8; 1000];
+        pt_scratch.copy_from_slice(ct);
 
-        let aead_result = cipher.decrypt_in_place_detached(&nonce.into(), header, &mut ct, &tag.into());
+        let aead_result = cipher.decrypt_in_place_detached(&nonce.into(), header, &mut pt_scratch, &tag.into());
         
         if aead_result.is_ok() {
-            body[0..5].copy_from_slice(&ct[0..5]);
-            body[21..].copy_from_slice(&ct[5..]);
+            ct.copy_from_slice(&pt_scratch);
             
             let mut full_cell = [0u8; ONION_CELL_SIZE];
             full_cell[..8].copy_from_slice(header);
@@ -272,6 +262,9 @@ impl RelayCircuitHop {
 
     /// Originates a backward cell from this relay using AEAD.
     pub fn wrap_backward_aead(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) {
+        if self.next_send_seq == u32::MAX {
+            panic!("Relay sequence number exhausted. Tearing down circuit to prevent nonce reuse.");
+        }
         let seq = self.next_send_seq;
         self.next_send_seq += 1;
         raw[4..8].copy_from_slice(&seq.to_be_bytes());
@@ -280,16 +273,10 @@ impl RelayCircuitHop {
         
         let cipher = ChaCha20Poly1305::new(&self.crypt.backward_key.into());
         let (header, body) = raw.split_at_mut(8);
+        let (pt, mac_buf) = body.split_at_mut(1000);
         
-        let mut pt = Vec::with_capacity(1016 - 16);
-        pt.extend_from_slice(&body[0..5]);
-        pt.extend_from_slice(&body[21..]);
-
-        let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, &mut pt).unwrap();
-        
-        body[0..5].copy_from_slice(&pt[0..5]);
-        body[21..].copy_from_slice(&pt[5..]);
-        body[5..21].copy_from_slice(&tag);
+        let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, pt).unwrap();
+        mac_buf.copy_from_slice(&tag);
     }
 }
 

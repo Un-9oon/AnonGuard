@@ -1,3 +1,5 @@
+#![deny(dead_code, unused_variables)]
+
 //! Standalone CLI daemon for the AnonGuard engine.
 
 use clap::Parser;

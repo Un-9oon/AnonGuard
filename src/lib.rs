@@ -1,3 +1,5 @@
+#![deny(dead_code, unused_variables)]
+
 //! # AnonGuard Core Engine
 //!
 //! A cross-layer anonymity and anti-attribution framework with zero-leak guarantees.
