@@ -51,6 +51,10 @@ pub struct GuardConfig {
     pub directory_authorities: Vec<String>,
     /// Gateway listen address
     pub listen_addr: String,
+    /// Apply OS/kernel-level nftables firewall kill switch (Linux with root/CAP_NET_ADMIN)
+    pub enable_firewall_killswitch: bool,
+    /// Registration PoW difficulty in leading zero bits
+    pub pow_difficulty: u32,
 }
 
 impl Default for GuardConfig {
@@ -83,6 +87,8 @@ impl Default for GuardConfig {
             authority_id: "authority-default".to_string(),
             directory_authorities: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
+            enable_firewall_killswitch: false,
+            pow_difficulty: 16,
         }
     }
 }

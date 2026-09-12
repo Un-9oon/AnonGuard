@@ -40,8 +40,15 @@ mod tests {
         let extend_payload_1 = encode_extend_payload("10.0.0.2", 9002, &client_pub_1).unwrap();
 
         // Client creates EXTEND cell addressed to Hop 0 (mac0)
-        let extend_cell_1 =
-            OnionCell::new(circuit_id, CellCommand::Extend, 0, &extend_payload_1, &mac0).unwrap();
+        let extend_cell_1 = OnionCell::new(
+            circuit_id,
+            1,
+            CellCommand::Extend,
+            0,
+            &extend_payload_1,
+            &mac0,
+        )
+        .unwrap();
 
         // Client wraps forward through current hops (Hop 0)
         let mut wire_buffer_1 = client_circuit.wrap_forward(&extend_cell_1);
@@ -80,8 +87,15 @@ mod tests {
         let extend_payload_2 = encode_extend_payload("10.0.0.3", 9003, &client_pub_2).unwrap();
 
         // Client creates EXTEND cell addressed to Hop 1 (mac1)
-        let extend_cell_2 =
-            OnionCell::new(circuit_id, CellCommand::Extend, 0, &extend_payload_2, &mac1).unwrap();
+        let extend_cell_2 = OnionCell::new(
+            circuit_id,
+            1,
+            CellCommand::Extend,
+            0,
+            &extend_payload_2,
+            &mac1,
+        )
+        .unwrap();
 
         // Client wraps forward across Hop 1 then Hop 0
         let mut wire_buffer_2 = client_circuit.wrap_forward(&extend_cell_2);
@@ -124,7 +138,8 @@ mod tests {
 
         // --- STEP 4: Authenticated Data Flow across Telescopically Negotiated 3-Hop Circuit ---
         let payload = b"TELESCOPIC_ONION_AUTHENTICATED_VERIFICATION";
-        let data_cell = OnionCell::new(circuit_id, CellCommand::Data, 1, payload, &mac2).unwrap();
+        let data_cell =
+            OnionCell::new(circuit_id, 1, CellCommand::Data, 1, payload, &mac2).unwrap();
         let mut client_send_buf = client_circuit.wrap_forward(&data_cell);
 
         // Relay 0 (Guard) peels Layer 0 -> forwards downstream
@@ -156,9 +171,10 @@ mod tests {
     fn test_cell_serialization_and_mac() {
         let mac_key = [7u8; 32];
         let payload = b"CLASSIFIED_MILITARY_PAYLOAD_HMAC_SHA256";
-        let cell = OnionCell::new(101, CellCommand::Data, 1, payload, &mac_key).unwrap();
+        let cell = OnionCell::new(101, 1, CellCommand::Data, 1, payload, &mac_key).unwrap();
 
         assert_eq!(cell.circuit_id, 101);
+        assert_eq!(cell.sequence_no, 1);
         assert_eq!(cell.command, CellCommand::Data);
         assert_eq!(cell.stream_id, 1);
         assert_eq!(cell.length, payload.len() as u16);
@@ -172,6 +188,7 @@ mod tests {
         let raw = cell.serialize();
         let parsed = OnionCell::parse(&raw).expect("Parsing valid cell failed");
         assert_eq!(parsed.circuit_id, 101);
+        assert_eq!(parsed.sequence_no, 1);
         assert!(parsed.is_mac_valid(&mac_key));
         assert_eq!(&parsed.payload[..payload.len()], payload);
     }
@@ -180,7 +197,7 @@ mod tests {
     fn test_oversized_payload_rejection() {
         let mac_key = [7u8; 32];
         let huge_payload = vec![0xAA; PAYLOAD_SIZE + 1];
-        let res = OnionCell::new(101, CellCommand::Data, 1, &huge_payload, &mac_key);
+        let res = OnionCell::new(101, 1, CellCommand::Data, 1, &huge_payload, &mac_key);
         assert!(
             res.is_err(),
             "Oversized payload must not be silently truncated"
@@ -191,15 +208,62 @@ mod tests {
     fn test_tampering_rejection() {
         let mac_key = [42u8; 32];
         let payload = b"UNTOUCHABLE_DATA";
-        let cell = OnionCell::new(55, CellCommand::Data, 1, payload, &mac_key).unwrap();
+        let cell = OnionCell::new(55, 1, CellCommand::Data, 1, payload, &mac_key).unwrap();
         let mut raw = cell.serialize();
 
         // Adversary flips a single bit in the payload
-        raw[25] ^= 0x01;
+        raw[29] ^= 0x01;
 
         let tampered = OnionCell::parse(&raw).unwrap();
         // HMAC-SHA256 MAC MUST reject tampered cell
         assert!(!tampered.is_mac_valid(&mac_key));
+    }
+
+    #[test]
+    fn test_anti_replay_cell_rejection() {
+        let forward_key = [1u8; 32];
+        let backward_key = [2u8; 32];
+        let mac_key = [99u8; 32];
+        let mut relay = RelayCircuitHop::new(1, forward_key, backward_key, mac_key);
+        let mut client = HopCryptState::new(&forward_key, &backward_key, &mac_key);
+
+        // Sequence 1: authentic and expected (sequence 1 >= expected 1)
+        let cell1 = OnionCell::new(1, 1, CellCommand::Data, 1, b"MESSAGE_1", &mac_key).unwrap();
+        let mut raw1 = cell1.serialize();
+        client.encrypt_forward(&mut raw1[4..]);
+        let p1 = relay.peel_forward(&mut raw1).unwrap();
+        assert!(matches!(
+            p1,
+            PeelResult::AddressedToThisRelay(CellCommand::Data, _)
+        ));
+
+        // Attempting to send stale/replayed sequence 1 must be rejected by anti-replay counter
+        let replay_cell =
+            OnionCell::new(1, 1, CellCommand::Data, 1, b"REPLAY_ATTACK", &mac_key).unwrap();
+        let mut replay_raw = replay_cell.serialize();
+        client.encrypt_forward(&mut replay_raw[4..]);
+        let err = relay.peel_forward(&mut replay_raw);
+        assert!(
+            err.is_err(),
+            "Replay of cell sequence 1 must be rejected by anti-replay counter"
+        );
+
+        // Stale sequence 0 must also be rejected
+        let stale_cell = OnionCell::new(1, 0, CellCommand::Data, 1, b"STALE", &mac_key).unwrap();
+        let mut stale_raw = stale_cell.serialize();
+        client.encrypt_forward(&mut stale_raw[4..]);
+        let err2 = relay.peel_forward(&mut stale_raw);
+        assert!(err2.is_err(), "Stale sequence must be rejected");
+
+        // Sequence 2: authentic and accepted (sequence 2 >= expected 2)
+        let cell2 = OnionCell::new(1, 2, CellCommand::Data, 1, b"MESSAGE_2", &mac_key).unwrap();
+        let mut raw2 = cell2.serialize();
+        client.encrypt_forward(&mut raw2[4..]);
+        let p2 = relay.peel_forward(&mut raw2).unwrap();
+        assert!(matches!(
+            p2,
+            PeelResult::AddressedToThisRelay(CellCommand::Data, _)
+        ));
     }
 
     #[test]
@@ -226,7 +290,7 @@ mod tests {
         let exit_mac_key = client_circuit.get_hop_mac_key(2).unwrap();
         let secret_payload = b"TOP_SECRET_E2E_AUTHENTICATED_CELL";
         let original_cell =
-            OnionCell::new(42, CellCommand::Data, 7, secret_payload, &exit_mac_key).unwrap();
+            OnionCell::new(42, 1, CellCommand::Data, 7, secret_payload, &exit_mac_key).unwrap();
 
         // 5. Client wraps the cell in 3 layers of encryption
         let mut wire_buffer = client_circuit.wrap_forward(&original_cell);
@@ -271,7 +335,7 @@ mod tests {
         // 9. Return Path (Backward Direction):
         let response_data = b"EXIT_AUTHENTICATED_RESPONSE";
         let exit_resp_cell =
-            OnionCell::new(42, CellCommand::Data, 7, response_data, &exit_mac_key).unwrap();
+            OnionCell::new(42, 1, CellCommand::Data, 7, response_data, &exit_mac_key).unwrap();
         let mut return_buffer = exit_resp_cell.serialize();
 
         // Exit wraps in Layer 3

@@ -39,7 +39,13 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let middle_addr = middle_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = middle_listener.accept().await.unwrap();
-        let _ = handle_onion_relay_connection(s, None, None, None).await;
+        let _ = handle_onion_relay_connection(
+            s,
+            None,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+        )
+        .await;
     });
 
     // 4. Spawn Hop 0 (Guard)
@@ -47,7 +53,13 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let guard_addr = guard_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = guard_listener.accept().await.unwrap();
-        let _ = handle_onion_relay_connection(s, None, None, None).await;
+        let _ = handle_onion_relay_connection(
+            s,
+            None,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+        )
+        .await;
     });
 
     // 5. Build ProxyNode chain for client
@@ -75,7 +87,8 @@ async fn test_live_inband_telescopic_circuit_e2e() {
 
     // 7. Client sends encrypted Data cell through the 3-hop circuit
     let req_data = b"GET /onion-test HTTP/1.1\r\n\r\n";
-    let data_cell = OnionCell::new(circuit_id, CellCommand::Data, 1, req_data, &exit_mac).unwrap();
+    let data_cell =
+        OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data, &exit_mac).unwrap();
     let wire_forward = circuit.wrap_forward(&data_cell);
     guard_stream.write_all(&wire_forward).await.unwrap();
 

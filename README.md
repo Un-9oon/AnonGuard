@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#)
 [![Research](https://img.shields.io/badge/research-Oxford%20PhD-purple)](#)
 [![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](#)
-[![Tests](https://img.shields.io/badge/tests-22%20passing-brightgreen)](#)
+[![Tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)](#)
 
 ---
 
@@ -16,13 +16,13 @@
 
 AnonGuard is an open-source, defense-in-depth anonymity gateway combining statistical physics with authenticated cryptographic routing:
 
-1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, and **16-byte HMAC-SHA256 Message Authentication Codes (MAC)** verified in constant-time at every hop to eliminate polynomial tag forgery and bit-flipping attacks. No intermediate relay ever sees both source and destination.
-2. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** to produce eigenvalue level repulsion $P(s \to 0) = 0$, disrupting deep learning packet-timing classifiers in constant $O(1)$ time ($\approx 1 \text{ ns}$ per packet).
+1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, monotonic sequence counters for anti-replay, and **16-byte HMAC-SHA256 Message Authentication Codes (MAC)** verified in constant-time at every hop to eliminate tag forgery, bit-flipping, and replay attacks. No intermediate relay ever sees both source and destination.
+2. **Statistical Random Matrix Theory (RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** eigenvalue spacing distribution $P(s \to 0) = 0$ via fast inverse-transform sampling from a classical CSPRNG to produce level repulsion, disrupting deep learning packet-timing classifiers in constant $O(1)$ time ($\approx 1 \text{ ns}$ per packet, requiring no quantum hardware).
 3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
-4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
-5. **Fail-Closed Runtime Protection & Zero-Leak Kill Switch** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization.
+4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
+5. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip, with optional kernel-level `nftables` output filtering on Linux (`--enable-firewall-killswitch`). Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization.
 
-AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
+AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all 29 integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
 
 ---
 
@@ -195,14 +195,20 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 |---|---|---|
 | `--listen <ADDR>` | `127.0.0.1:9050` | Gateway bind address |
 | `--onion` | `false` | Enable 3-hop layered onion circuit routing |
-| `--quantum` | `false` | Enable Quantum Chaos (Q-RMT) Morphing |
+| `--quantum` | `false` | Enable RMT Wigner-Surmise Traffic Morphing |
 | `--quantum-ensemble <goe\|gue>` | `goe` | Select Gaussian Orthogonal or Unitary ensemble |
 | `--authority` | `false` | Run as an Ed25519 Directory Authority node |
 | `--authority-id <ID>` | `auth-primary` | Directory authority identifier |
 | `--authorities <ADDRS>` | `""` | Comma-separated list of trusted authority endpoints |
+| `--authority-keys <KEYS>` | `""` | Key map for authority pinning (e.g. `auth1:HEX_KEY,auth2:HEX_KEY`) |
 | `--enforce-subnet-diversity` | `true` | Enforce `/16` CIDR subnet isolation in circuits |
 | `--chaos` | `false` | Enable Lorenz chaotic attractor jitter |
 | `--jitter` | `false` | Enable Poisson timing jitter |
+| `--relay` | `false` | Run as an AnonGuard relay node |
+| `--allow-open-socks5` | `false` | Permit unauthenticated plain SOCKS5 proxying on relay ports |
+| `--allow-private-exit` | `false` | Permit exit connections to private/loopback networks |
+| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules |
+| `--pow-difficulty <BITS>` | `16` | Registration PoW difficulty in leading zero bits |
 | `--reverse-relay` | `false` | Run volunteer relay behind NAT |
 
 ---
@@ -213,17 +219,18 @@ To run the complete cryptographic and integration test suite:
 
 ```bash
 cargo test
-cargo clippy
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-All **20 integration tests** verify:
-- 3-hop onion circuit peeling and backward wrapping
-- Fixed 1024-byte OnionCell serialization and digest verification
-- Multi-authority consensus voting and Ed25519 quorum validation
-- Proof-of-Work mining and verification
+All **29 unit and integration tests** verify:
+- 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
+- Fixed 1024-byte OnionCell serialization, HMAC-SHA256 MACs, and monotonic sequence anti-replay validation
+- Multi-authority consensus voting, Ed25519 quorum validation, and key pinning
+- Proof-of-Work mining and verification with configurable difficulty
 - BGP `/16` subnet collision detection
-- State machine fail-closed transitions
-- Kernel kill switch zero-leak guarantees
+- Anti-SSRF exit policy with DNS rebinding prevention on real sockets
+- State machine fail-closed transitions and active in-flight stream cancellation
 - JA4 browser TLS emulation & HTTP header scrubbing
 
 ---

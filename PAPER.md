@@ -57,15 +57,15 @@ AnonGuard operates across four integrated subsystems:
 │    - BGP /16 Subnet Prefix Isolation Enforcement            │
 │    - Authenticated Cryptographic Transport Framing          │
 ├─────────────────────────────────────────────────────────────┤
-│ 3. Quantum RMT Traffic Morphing Engine                      │
+│ 3. Statistical RMT Traffic Morphing Engine                  │
 │    - Wigner Surmise Inverse Transform Sampling (O(1))       │
-│    - GOE / GUE Quantum Eigenvalue Level Repulsion           │
+│    - GOE / GUE Eigenvalue Spacing Level Repulsion           │
 │    - Fallback: Lorenz Chaotic Attractor Morphing            │
 ├─────────────────────────────────────────────────────────────┤
-│ 4. Protocol Normalizer & Kernel Kill Switch                 │
+│ 4. Protocol Normalizer & Fail-Closed Kill Switch            │
 │    - Chrome 120+ / Firefox 124+ JA4 TLS Profile Emulation   │
 │    - Deterministic HTTP Header Scrubbing                    │
-│    - Fail-Closed Kernel Kill Switch (Zero Transitional Leak)│
+│    - Fail-Closed Process & OS nftables Kill Switch          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -73,33 +73,36 @@ AnonGuard operates across four integrated subsystems:
 
 ## 3. Cryptographic Layered Onion Routing Protocol
 
-To prevent intermediate relays from inspecting stream contents, AnonGuard enforces a constant-size cell framing protocol:
+To prevent intermediate relays from inspecting stream contents, AnonGuard enforces a constant-size cell framing protocol with integrated anti-replay sequence counters:
 
 ### Cell Specification
 - **Cell Size:** Strictly fixed at 1024 bytes ($C = 1024$).
-- **Header (25 bytes):** `CircuitID` (4B) $\|$ `Command` (1B) $\|$ `StreamID` (2B) $\|$ `Length` (2B) $\|$ `Poly1305 MAC` (16B).
-- **Payload (999 bytes):** Padded with deterministic pseudorandom noise.
+- **Header (29 bytes):** `CircuitID` (4B) $\|$ `SequenceNo` (4B) $\|$ `Command` (1B) $\|$ `StreamID` (2B) $\|$ `Length` (2B) $\|$ `HMAC-SHA256 MAC` (16B).
+- **Payload (995 bytes):** Padded with deterministic pseudorandom noise.
 
-### Key Agreement & Peeling
+### Key Agreement, Peeling & Anti-Replay Verification
 For each 3-hop circuit $(R_1, R_2, R_3)$:
 1. Client establishes ephemeral shared secrets $(S_1, S_2, S_3)$ via X25519 Diffie-Hellman.
-2. Symmetric forward, backward, and Poly1305 MAC keys are derived:
-   $$K_{f, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Forward-Key-v2"} \,\|\, i)$$
-   $$K_{b, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Backward-Key-v2"} \,\|\, i)$$
-   $$K_{m, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Poly1305-MAC-Key-v2"} \,\|\, i)$$
+2. Symmetric forward, backward, and HMAC-SHA256 MAC keys are derived:
+   $$K_{f, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Forward-Key-v2"})$$
+   $$K_{b, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Backward-Key-v2"})$$
+   $$K_{m, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-HMAC-SHA256-Key-v3"})$$
 3. **Forward Wrapping:** At the client:
    $$\text{WireCell} = E_{K_{f, 1}}\Big(E_{K_{f, 2}}\big(E_{K_{f, 3}}(\text{Cell})\big)\Big)$$
-4. **Relay Peeling & Non-Malleability Verification:**
-   Each relay applies its forward keystream: $D_{K_{f, i}}(\text{Buffer})$. The relay validates the 16-byte Poly1305 MAC using $K_{m, i}$ in constant-time ($O(1)$). If valid, the cell is authentic and addressed to this relay; otherwise, the peeled buffer is forwarded downstream. Cells with invalid MACs or bit-flip manipulations are rejected, defeating cell tagging attacks.
+4. **Relay Peeling & Anti-Replay Verification:**
+   Each relay applies its forward keystream: $D_{K_{f, i}}(\text{Buffer})$. The relay validates the 16-byte HMAC-SHA256 MAC over `(CircuitID, SequenceNo, Command, StreamID, Length, Payload)` using $K_{m, i}$ in constant-time ($O(1)$).
+   If the MAC is valid, the relay verifies the monotonic sequence counter:
+   $$\text{SequenceNo} \ge \text{ExpectedRecvSeq}$$
+   Stale or replayed sequence numbers are immediately dropped and disconnected, defeating replay attacks. If authentic, the cell is addressed to this relay; otherwise, the peeled buffer is forwarded downstream.
 
 ---
 
 ## 4. Sybil Resistance & Quorum Consensus
 
 ### Proof-of-Work Registration Challenge
-To prevent an adversary from cheaply registering 10,000 ephemeral nodes:
+To prevent an adversary from cheaply registering ephemeral nodes:
 $$\text{SHA256}(\text{NodeID} \,\|\, \text{Timestamp} \,\|\, \text{Nonce}) < \frac{2^{256}}{2^D}$$
-Where $D \ge 16$ leading zero bits. Nodes failing the challenge are immediately rejected.
+Where $D$ is the tunable difficulty (default $D = 16$, recommended $D \ge 20$ in production environments). Nodes failing the challenge within the validity window are rejected.
 
 ### BGP Subnet Diversity Enforcement
 When selecting circuit paths, the engine enforces strict subnet independence:
@@ -111,11 +114,11 @@ $N$ independent Directory Authorities collect validated relay descriptors and ex
 
 ---
 
-## 5. Mathematical Foundations of Quantum Chaos Morphing
+## 5. Mathematical Foundations of RMT Traffic Morphing
 
 Traditional padding defenses fail against Deep Learning because inter-arrival times (IATs) still leak burst envelopes. 
 
-AnonGuard implements the **Wigner Surmise** from Quantum Random Matrix Theory (RMT). The probability density function of eigenvalue spacing $s$ in a Gaussian Orthogonal Ensemble (GOE) is:
+AnonGuard implements the **Wigner Surmise** from Random Matrix Theory (RMT). The probability density function of eigenvalue spacing $s$ in a Gaussian Orthogonal Ensemble (GOE) is:
 
 $$P(s) = \frac{\pi}{2} s \exp\left(-\frac{\pi}{4} s^2\right)$$
 

@@ -61,6 +61,53 @@ impl ExitPolicy {
         true
     }
 
+    /// Resolves DNS and securely connects to the destination target.
+    /// Eliminates DNS rebinding SSRF attacks by verifying all resolved IP addresses
+    /// against the ExitPolicy blocklist before connecting directly to the validated IP.
+    pub async fn resolve_and_connect(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<tokio::net::TcpStream, std::io::Error> {
+        if !self.is_permitted(host, port) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "Exit relay policy blocked connection to restricted target {}:{} (anti-SSRF)",
+                    host, port
+                ),
+            ));
+        }
+
+        let addrs = tokio::net::lookup_host((host, port)).await?;
+        let mut target_addr = None;
+
+        for addr in addrs {
+            if !self.is_ip_permitted(addr.ip()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!(
+                        "Exit relay policy blocked resolved IP {} for target {} (anti-SSRF / anti-DNS rebinding)",
+                        addr.ip(),
+                        host
+                    ),
+                ));
+            }
+            if target_addr.is_none() {
+                target_addr = Some(addr);
+            }
+        }
+
+        let addr = target_addr.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("No IP address resolved for target {}:{}", host, port),
+            )
+        })?;
+
+        tokio::net::TcpStream::connect(addr).await
+    }
+
     /// Validates if an IP address belongs to allowed public internet space.
     pub fn is_ip_permitted(&self, ip: IpAddr) -> bool {
         if self.allow_private_networks {
@@ -210,5 +257,33 @@ mod tests {
         assert!(policy.is_permitted("142.250.190.46", 443)); // google.com
         assert!(policy.is_permitted("example.com", 80));
         assert!(policy.is_permitted("wikipedia.org", 443));
+    }
+
+    #[tokio::test]
+    async fn test_exit_policy_resolve_and_connect_rebinding() {
+        let policy = ExitPolicy::default();
+
+        // 1. Literal loopback connection attempt must fail with PermissionDenied
+        let res = policy.resolve_and_connect("127.0.0.1", 80).await;
+        assert!(res.is_err());
+        assert_eq!(
+            res.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        // 2. Localhost resolution attempt must fail with PermissionDenied
+        let res2 = policy.resolve_and_connect("localhost", 80).await;
+        assert!(res2.is_err());
+        assert_eq!(
+            res2.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        // 3. Permitted private network mode succeeds when enabled
+        let private_policy = ExitPolicy::new(true);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let conn = private_policy.resolve_and_connect("127.0.0.1", port).await;
+        assert!(conn.is_ok());
     }
 }

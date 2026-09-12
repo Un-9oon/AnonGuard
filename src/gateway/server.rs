@@ -527,6 +527,7 @@ pub async fn stream_onion_circuit(
     let fwd = async move {
         let mut buf = [0u8; PAYLOAD_SIZE];
         let stream_id = 1u16;
+        let mut client_seq = 2u32; // Seq 1 was RELAY cell
         loop {
             let n = match client_read.read(&mut buf).await {
                 Ok(0) => break,
@@ -536,8 +537,11 @@ pub async fn stream_onion_circuit(
 
             let cell = {
                 let guard = circuit_fwd.lock().await;
+                let seq = client_seq;
+                client_seq += 1;
                 match OnionCell::new(
                     guard.circuit_id,
+                    seq,
                     CellCommand::Data,
                     stream_id,
                     &buf[..n],
@@ -690,6 +694,7 @@ pub async fn build_telescopic_circuit(
                 .map_err(|e| format!("Failed to encode EXTEND payload: {}", e))?;
         let extend_cell = OnionCell::new(
             circuit_id,
+            hop_idx as u32,
             CellCommand::Extend,
             0,
             &extend_payload,
@@ -717,8 +722,15 @@ pub async fn build_telescopic_circuit(
     // 3. Instruct the exit hop to connect in-band to target_host:target_port
     let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
         .map_err(|e| format!("Failed to encode RELAY target payload: {}", e))?;
-    let relay_cell = OnionCell::new(circuit_id, CellCommand::Relay, 0, &relay_payload, &exit_mac)
-        .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
+    let relay_cell = OnionCell::new(
+        circuit_id,
+        1,
+        CellCommand::Relay,
+        0,
+        &relay_payload,
+        &exit_mac,
+    )
+    .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
 
     let wire_buffer = circuit.wrap_forward(&relay_cell);
     stream.write_all(&wire_buffer).await?;
@@ -816,8 +828,11 @@ pub async fn handle_onion_relay_connection(
                     res = ds.read(&mut raw_buf) => {
                         let n = match res {
                             Ok(0) => {
+                                let seq = relay_hop.next_send_seq;
+                                relay_hop.next_send_seq += 1;
                                 if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
+                                    seq,
                                     CellCommand::Destroy,
                                     1,
                                     &[],
@@ -831,8 +846,11 @@ pub async fn handle_onion_relay_connection(
                             }
                             Ok(n) => n,
                             Err(_) => {
+                                let seq = relay_hop.next_send_seq;
+                                relay_hop.next_send_seq += 1;
                                 if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
+                                    seq,
                                     CellCommand::Destroy,
                                     1,
                                     &[],
@@ -845,8 +863,11 @@ pub async fn handle_onion_relay_connection(
                                 break;
                             }
                         };
+                        let seq = relay_hop.next_send_seq;
+                        relay_hop.next_send_seq += 1;
                         let Ok(return_cell) = OnionCell::new(
                             relay_hop.circuit_id,
+                            seq,
                             CellCommand::Data,
                             1,
                             &raw_buf[..n],
@@ -874,8 +895,7 @@ pub async fn handle_onion_relay_connection(
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
                                 if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
-                                    let target = format!("{}:{}", next_h, next_p);
-                                    if let Ok(mut next_s) = TcpStream::connect(&target).await {
+                                    if let Ok(mut next_s) = policy.resolve_and_connect(&next_h, next_p).await {
                                         if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
                                             if next_s.write_all(&c_cell.serialize()).await.is_ok() {
                                                 let mut resp = [0u8; ONION_CELL_SIZE];
@@ -921,8 +941,7 @@ pub async fn handle_onion_relay_connection(
                     match relay_hop.peel_forward(&mut client_buf) {
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
                             if let Ok((next_h, next_p, next_pub)) = decode_extend_payload(&payload) {
-                                let target = format!("{}:{}", next_h, next_p);
-                                match TcpStream::connect(&target).await {
+                                match policy.resolve_and_connect(&next_h, next_p).await {
                                     Ok(mut next_s) => {
                                         if let Ok(c_cell) = build_create_cell(relay_hop.circuit_id, &next_pub) {
                                             if next_s.write_all(&c_cell.serialize()).await.is_ok() {
@@ -937,7 +956,7 @@ pub async fn handle_onion_relay_connection(
                                         }
                                     }
                                     Err(e) => {
-                                        error!("Relay failed to connect to next hop {}: {}", target, e);
+                                        error!("Relay blocked or failed to connect to next hop {}:{}: {}", next_h, next_p, e);
                                         break;
                                     }
                                 }
@@ -945,18 +964,13 @@ pub async fn handle_onion_relay_connection(
                         }
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
                             if let Ok((target_h, target_p)) = crate::onion::circuit::decode_relay_target(&payload) {
-                                if !policy.is_permitted(&target_h, target_p) {
-                                    error!(
-                                        "Exit relay policy blocked connection to restricted target {}:{} (anti-SSRF)",
-                                        target_h, target_p
-                                    );
-                                    break;
-                                }
-                                let target = format!("{}:{}", target_h, target_p);
-                                match TcpStream::connect(&target).await {
+                                match policy.resolve_and_connect(&target_h, target_p).await {
                                     Ok(target_s) => {
+                                        let seq = relay_hop.next_send_seq;
+                                        relay_hop.next_send_seq += 1;
                                         if let Ok(resp_cell) = OnionCell::new(
                                             relay_hop.circuit_id,
+                                            seq,
                                             CellCommand::Relay,
                                             0,
                                             b"CONNECTED",
@@ -965,14 +979,14 @@ pub async fn handle_onion_relay_connection(
                                             let mut resp = resp_cell.serialize();
                                             relay_hop.wrap_backward(&mut resp);
                                             if client.write_all(&resp).await.is_ok() {
-                                                info!("Exit relay successfully bridged circuit {} to target {}", relay_hop.circuit_id, target);
+                                                info!("Exit relay successfully bridged circuit {} to target {}:{}", relay_hop.circuit_id, target_h, target_p);
                                                 downstream = Some(target_s);
                                                 is_exit = true;
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        error!("Exit relay failed to connect to destination target {}: {}", target, e);
+                                        error!("Exit relay blocked or failed to connect to destination target {}:{}: {}", target_h, target_p, e);
                                         break;
                                     }
                                 }

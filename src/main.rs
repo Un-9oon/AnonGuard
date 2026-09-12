@@ -2,7 +2,7 @@
 
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{info, warn};
 
 use anonguard::core::GuardConfig;
 use anonguard::gateway::GatewayServer;
@@ -109,6 +109,14 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_private_exit: bool,
 
+    /// Apply OS/kernel-level nftables firewall kill switch (Linux with root/CAP_NET_ADMIN)
+    #[arg(long, default_value_t = false)]
+    enable_firewall_killswitch: bool,
+
+    /// Registration PoW difficulty in leading zero bits (default 16, recommended 20+ for production)
+    #[arg(long, default_value_t = 16)]
+    pow_difficulty: u32,
+
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
     #[arg(long)]
     fetch_from: Option<String>,
@@ -135,6 +143,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         listen_addr = %args.listen,
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );
+
+    if args.enable_firewall_killswitch {
+        let (proxy_ip, proxy_port) = match args.listen.split_once(':') {
+            Some((ip, p)) => (ip, p.parse::<u16>().unwrap_or(9050)),
+            None => ("127.0.0.1", 9050),
+        };
+        let netns = anonguard::kernel::NetnsConfig::new("anonguard", proxy_ip, proxy_port);
+        match netns.apply_nftables_rules() {
+            Ok(_) => {
+                info!("Successfully applied OS/kernel-level nftables firewall killswitch");
+            }
+            Err(e) => {
+                warn!("Failed to apply kernel nftables rules (requires root / CAP_NET_ADMIN): {}. Falling back to process-level killswitch.", e);
+            }
+        }
+    }
 
     let directory_authorities = if let Some(ref auths) = args.authorities {
         auths.split(',').map(|s| s.trim().to_string()).collect()
@@ -178,6 +202,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         allow_private_exit: args.allow_private_exit,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
+        enable_firewall_killswitch: args.enable_firewall_killswitch,
+        pow_difficulty: args.pow_difficulty,
         ..GuardConfig::default()
     };
 

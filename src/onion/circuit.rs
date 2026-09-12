@@ -120,10 +120,12 @@ impl OnionCircuit {
     }
 }
 
-/// Represents the relay's view of an onion circuit.
+/// Represents the relay's view of an onion circuit with anti-replay state.
 pub struct RelayCircuitHop {
     pub circuit_id: u32,
     pub crypt: HopCryptState,
+    pub expected_recv_seq: u32,
+    pub next_send_seq: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -144,16 +146,28 @@ impl RelayCircuitHop {
         Self {
             circuit_id,
             crypt: HopCryptState::new(&forward_key, &backward_key, &mac_key),
+            expected_recv_seq: 1, // Handshake cells use sequence 0
+            next_send_seq: 1,
         }
     }
 
-    /// Peels one layer of forward onion encryption and verifies the HMAC-SHA256 MAC.
+    /// Peels one layer of forward onion encryption, verifies the HMAC-SHA256 MAC,
+    /// and enforces anti-replay sequence number progression.
     pub fn peel_forward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<PeelResult, String> {
         self.crypt.encrypt_forward(&mut raw[4..]);
 
         if let Ok(cell) = OnionCell::parse(raw) {
             // Cryptographic HMAC-SHA256 MAC verification
             if cell.is_mac_valid(&self.crypt.mac_key) {
+                // Anti-replay check: prevent replay, duplication, or reordering of cells
+                if cell.sequence_no < self.expected_recv_seq {
+                    return Err(format!(
+                        "Anti-replay rejection on circuit {}: received stale sequence {} (expected >= {})",
+                        self.circuit_id, cell.sequence_no, self.expected_recv_seq
+                    ));
+                }
+                self.expected_recv_seq = cell.sequence_no + 1;
+
                 let len = (cell.length as usize).min(cell.payload.len());
                 return Ok(PeelResult::AddressedToThisRelay(
                     cell.command,
@@ -179,6 +193,7 @@ pub fn build_create_cell(
     let initial_mac_key = [0u8; 32];
     OnionCell::new(
         circuit_id,
+        0,
         CellCommand::Create,
         0,
         client_pub.as_bytes(),
@@ -211,6 +226,7 @@ pub fn handle_create_cell(create_cell: &OnionCell) -> Result<(RelayCircuitHop, O
 
     let created_cell = OnionCell::new(
         create_cell.circuit_id,
+        0,
         CellCommand::Created,
         0,
         relay_pub.as_bytes(),
