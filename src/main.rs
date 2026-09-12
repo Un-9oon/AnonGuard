@@ -49,11 +49,11 @@ struct Args {
     #[arg(long, default_value_t = 2.666666)]
     chaos_beta: f64,
 
-    /// Enable Quantum Random Matrix Theory (Q-RMT) Morphing
-    #[arg(long, default_value_t = false)]
+    /// Enable Statistical Random Matrix Theory (RMT) Traffic Morphing (Wigner Surmise)
+    #[arg(long, alias = "rmt", default_value_t = false)]
     quantum: bool,
 
-    /// Quantum Ensemble type: "goe" (Orthogonal) or "gue" (Unitary)
+    /// Statistical RMT Ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary)
     #[arg(long, default_value = "goe")]
     quantum_ensemble: String,
 
@@ -113,8 +113,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     enable_firewall_killswitch: bool,
 
-    /// Registration PoW difficulty in leading zero bits (default 16, recommended 20+ for production)
-    #[arg(long, default_value_t = 16)]
+    /// Registration PoW difficulty in leading zero bits (default 20, recommended 20+ for production)
+    #[arg(long, default_value_t = 20)]
     pow_difficulty: u32,
 
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
@@ -207,16 +207,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..GuardConfig::default()
     };
 
+    let firewall_enabled = args.enable_firewall_killswitch;
+
     if args.authority {
-        let authority = anonguard::mesh::DirectoryAuthority::new(args.authority_id, args.listen);
-        authority.run().await?;
-        return Ok(());
+        let authority = anonguard::mesh::DirectoryAuthority::with_difficulty(
+            args.authority_id,
+            args.listen,
+            args.pow_difficulty,
+        );
+        let res = tokio::select! {
+            r = authority.run() => r,
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal (Ctrl+C)");
+                Ok(())
+            }
+        };
+        if firewall_enabled {
+            let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
+        }
+        return res;
     }
 
     if args.tracker {
-        let tracker = anonguard::mesh::TrackerServer::new(args.listen);
-        tracker.run().await?;
-        return Ok(());
+        let tracker =
+            anonguard::mesh::TrackerServer::with_difficulty(args.listen, args.pow_difficulty);
+        let res = tokio::select! {
+            r = tracker.run() => r,
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal (Ctrl+C)");
+                Ok(())
+            }
+        };
+        if firewall_enabled {
+            let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
+        }
+        return res;
     }
 
     let pool = ProxyPool::new();
@@ -423,25 +448,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let kill_switch = KillSwitchController::new();
     let gateway = GatewayServer::new(config, pool, kill_switch);
 
-    if args.reverse_relay {
-        if let Some(tracker_url) = args.announce {
-            // Generate a random Node ID
-            let node_id = format!(
-                "Node_{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-                    % 10000
-            );
-            gateway.run_reverse_relay(&tracker_url, &node_id).await?;
-            return Ok(());
-        } else {
-            tracing::error!("--announce <tracker_url> is required for --reverse-relay");
-            return Ok(());
+    let run_res = tokio::select! {
+        res = async {
+            if args.reverse_relay {
+                if let Some(tracker_url) = args.announce {
+                    // Generate a random Node ID
+                    let node_id = format!(
+                        "Node_{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_millis()
+                            % 10000
+                    );
+                    gateway.run_reverse_relay(&tracker_url, &node_id).await
+                } else {
+                    tracing::error!("--announce <tracker_url> is required for --reverse-relay");
+                    Ok(())
+                }
+            } else {
+                gateway.run().await
+            }
+        } => res,
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received shutdown signal (Ctrl+C), terminating gracefully...");
+            Ok(())
+        }
+    };
+
+    if firewall_enabled {
+        info!("Flushing OS/kernel-level nftables firewall kill switch...");
+        match anonguard::kernel::NetnsConfig::flush_nftables_rules() {
+            Ok(_) => info!("Successfully flushed nftables rules and lifted network lock"),
+            Err(e) => warn!(
+                "Failed to flush nftables rules on exit (run 'nft delete table inet anonguard_filter' manually): {}",
+                e
+            ),
         }
     }
 
-    gateway.run().await?;
-    Ok(())
+    run_res
 }

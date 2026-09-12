@@ -92,9 +92,9 @@ On any Debian/Ubuntu system, build your own signed `.deb` package in seconds:
 │    - BGP /16 Subnet Prefix Isolation Enforcement            │
 │    - Authenticated Cryptographic Node Framing               │
 ├─────────────────────────────────────────────────────────────┤
-│ 3. Quantum RMT Traffic Morphing Engine                      │
+│ 3. Statistical RMT Traffic Morphing Engine                  │
 │    - Wigner Surmise Inverse Transform Sampling (O(1))       │
-│    - GOE / GUE Quantum Eigenvalue Level Repulsion           │
+│    - GOE / GUE Statistical Eigenvalue Level Repulsion       │
 │    - Fallback: Lorenz Chaotic Attractor Morphing            │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. Protocol Normalizer & Kernel Kill Switch                 │
@@ -143,7 +143,7 @@ Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds an authenti
 - **Cryptographic Integrity:** Fixed 1024-byte cells protected with keyed HMAC-SHA256 MACs verified in constant time prevent tagging, bit-flipping, and replay attacks.
 - Return packets are wrapped by each relay in reverse, and unwrapped sequentially by the client.
 
-### 2. 🔬 Quantum Chaos Morphing (Wigner Surmise)
+### 2. 🔬 Statistical RMT Traffic Morphing (Wigner Surmise)
 AnonGuard maps packet sizes and inter-arrival delays to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE):
 
 $$P(s) = \frac{\pi}{2} s \cdot \exp\!\left(-\frac{\pi}{4} s^2\right)$$
@@ -152,7 +152,7 @@ Because **level repulsion** guarantees $P(s \to 0) = 0$, packet timings never cl
 
 ### 3. 🛡️ Sybil Attack Resistance
 To prevent a botnet or hostile entity from flooding the directory with rogue nodes:
-- Every relay registration must solve an asymmetric **Proof-of-Work (PoW)** challenge $\text{SHA256}(\text{NodeID} \,\|\, \text{Timestamp} \,\|\, \text{Nonce}) < \text{Target}$.
+- Every relay registration must solve an asymmetric **Proof-of-Work (PoW)** challenge $\text{SHA256}(\text{NodeID} \,\|\, \text{Timestamp} \,\|\, \text{Nonce}) < \text{Target}$ (default 20 bits).
 - Circuit path selection enforces strict **BGP `/16` CIDR Subnet Diversity**, ensuring that Guard, Middle, and Exit nodes never share the same `/16` network prefix or autonomous system.
 
 ### 4. 🌐 Distributed Multi-Authority Consensus & Key Binding
@@ -165,9 +165,10 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 ### What AnonGuard Protects Against:
 1. **Passive Network Observers & Eavesdroppers:** On-path observers cannot read payload data or correlate client IP addresses with exit destinations.
 2. **Intermediate Relay Collusion:** As long as at least one intermediate relay in the circuit is honest and non-colluding, full path deanonymization is prevented.
-3. **Deep Learning Website Fingerprinting:** Q-RMT eigenvalue level repulsion prevents CNN/RF classifiers from recognizing specific traffic signatures.
+3. **Deep Learning Website Fingerprinting:** Statistical RMT eigenvalue level repulsion prevents CNN/RF classifiers from recognizing specific traffic signatures.
 4. **Local Network DNS & IPv6 Leaks:** Remote DNS resolution over SOCKS5h and runtime IPv6 blackholing prevent common OS dual-stack exposure.
 5. **Mid-Session Policy Disruption:** An active broadcast kill switch terminates in-flight streams immediately if a tunnel or security policy trips.
+6. **OS-Level Traffic Leaks:** Linux kernel `nftables` output filter locks traffic strictly to the designated proxy port, automatically flushing on clean shutdown (`SIGINT` / `Ctrl+C`).
 
 ### What AnonGuard Does NOT Protect Against:
 1. **Global Active Traffic-Timing Adversary:** If an adversary observes both ingress to the Guard and egress from the Exit simultaneously with synchronized millisecond-precision flow analysis, statistical timing confirmation remains theoretically possible.
@@ -181,7 +182,7 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 | Feature | Linux | macOS | Windows |
 |---------|:-----:|:-----:|:-------:|
 | 3-Hop Layered Onion Routing | ✅ | ✅ | ✅ |
-| Quantum Q-RMT Engine | ✅ | ✅ | ✅ |
+| Statistical RMT Engine | ✅ | ✅ | ✅ |
 | Multi-Authority Consensus | ✅ | ✅ | ✅ |
 | Sybil PoW & Subnet Diversity | ✅ | ✅ | ✅ |
 | Reverse Relay (NAT Traversing) | ✅ | ✅ | ✅ |
@@ -195,7 +196,7 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 |---|---|---|
 | `--listen <ADDR>` | `127.0.0.1:9050` | Gateway bind address |
 | `--onion` | `false` | Enable 3-hop layered onion circuit routing |
-| `--quantum` | `false` | Enable RMT Wigner-Surmise Traffic Morphing |
+| `--quantum`, `--rmt` | `false` | Enable Statistical RMT Wigner-Surmise Traffic Morphing |
 | `--quantum-ensemble <goe\|gue>` | `goe` | Select Gaussian Orthogonal or Unitary ensemble |
 | `--authority` | `false` | Run as an Ed25519 Directory Authority node |
 | `--authority-id <ID>` | `auth-primary` | Directory authority identifier |
@@ -207,8 +208,8 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 | `--relay` | `false` | Run as an AnonGuard relay node |
 | `--allow-open-socks5` | `false` | Permit unauthenticated plain SOCKS5 proxying on relay ports |
 | `--allow-private-exit` | `false` | Permit exit connections to private/loopback networks |
-| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules |
-| `--pow-difficulty <BITS>` | `16` | Registration PoW difficulty in leading zero bits |
+| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules (flushed on clean exit) |
+| `--pow-difficulty <BITS>` | `20` | Registration PoW difficulty in leading zero bits (default: 20) |
 | `--reverse-relay` | `false` | Run volunteer relay behind NAT |
 
 ---
@@ -223,7 +224,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-All **29 unit and integration tests** verify:
+All unit and integration tests verify:
 - 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
 - Fixed 1024-byte OnionCell serialization, HMAC-SHA256 MACs, and monotonic sequence anti-replay validation
 - Multi-authority consensus voting, Ed25519 quorum validation, and key pinning

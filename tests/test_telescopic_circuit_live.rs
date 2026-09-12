@@ -134,3 +134,33 @@ async fn test_exit_policy_blocks_ssrf_live() {
         "Exit node should reject connecting to 127.0.0.1 under default exit policy"
     );
 }
+
+#[tokio::test]
+async fn test_exit_policy_blocks_dns_rebinding_hostname_live() {
+    // Exit node spawned with default ExitPolicy (blocking loopback/private/metadata)
+    let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit_addr = exit_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = exit_listener.accept().await.unwrap();
+        let _ = handle_onion_relay_connection(
+            s,
+            None,
+            None,
+            Some(anonguard::kernel::ExitPolicy::default()),
+        )
+        .await;
+    });
+
+    let chain = vec![ProxyNode::parse(&format!("socks5://{}", exit_addr)).unwrap()];
+    let mut guard_stream = TcpStream::connect(exit_addr).await.unwrap();
+    let circuit_id = 0x88776655;
+
+    // Attempting to bridge to "localhost" (hostname that resolves to 127.0.0.1 / ::1)
+    // must be resolved, detected as private/loopback, and rejected by resolve_and_connect
+    let res =
+        build_telescopic_circuit(&mut guard_stream, circuit_id, &chain, "localhost", 8080).await;
+    assert!(
+        res.is_err(),
+        "Exit node should reject connecting to 'localhost' resolving to loopback under default exit policy"
+    );
+}

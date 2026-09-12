@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_POW_DIFFICULTY: u32 = 16; // 16 leading zero bits
+pub const DEFAULT_POW_DIFFICULTY: u32 = 20; // 20 leading zero bits (default production difficulty)
 pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 600; // 10 minutes window
 
 #[derive(Debug, PartialEq, Eq)]

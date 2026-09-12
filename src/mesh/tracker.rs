@@ -17,13 +17,19 @@ type Directory = Arc<RwLock<HashMap<String, ReverseNodeEntry>>>;
 pub struct TrackerServer {
     listen_addr: String,
     directory: Directory,
+    pub pow_difficulty: u32,
 }
 
 impl TrackerServer {
     pub fn new(listen_addr: String) -> Self {
+        Self::with_difficulty(listen_addr, crate::mesh::sybil::DEFAULT_POW_DIFFICULTY)
+    }
+
+    pub fn with_difficulty(listen_addr: String, pow_difficulty: u32) -> Self {
         Self {
             listen_addr,
             directory: Arc::new(RwLock::new(HashMap::new())),
+            pow_difficulty,
         }
     }
 
@@ -34,8 +40,9 @@ impl TrackerServer {
         loop {
             let (stream, addr) = listener.accept().await?;
             let dir = self.directory.clone();
+            let pow_difficulty = self.pow_difficulty;
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, dir).await {
+                if let Err(e) = handle_connection(stream, dir, pow_difficulty).await {
                     warn!("Tracker connection from {} failed: {}", addr, e);
                 }
             });
@@ -43,7 +50,11 @@ impl TrackerServer {
     }
 }
 
-async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::Result<()> {
+async fn handle_connection(
+    stream: TcpStream,
+    directory: Directory,
+    pow_difficulty: u32,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut first_line = String::new();
     reader.read_line(&mut first_line).await?;
@@ -86,13 +97,7 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
             };
 
             let now = crate::mesh::sybil::current_timestamp_secs();
-            if !crate::mesh::sybil::verify_pow(
-                &node_id,
-                timestamp,
-                nonce,
-                crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
-                now,
-            ) {
+            if !crate::mesh::sybil::verify_pow(&node_id, timestamp, nonce, pow_difficulty, now) {
                 warn!(
                     "Rejected unauthenticated REGISTER_REVERSE for node {} (invalid PoW)",
                     node_id
@@ -214,6 +219,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tracker_pow_authentication() {
+        let test_difficulty = 12;
         let directory: Directory = Arc::new(RwLock::new(HashMap::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -221,7 +227,7 @@ mod tests {
         let dir_clone = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone).await;
+            let _ = handle_connection(stream, dir_clone, test_difficulty).await;
         });
 
         // 1. Send unauthenticated registration without PoW
@@ -237,13 +243,12 @@ mod tests {
         let dir_clone2 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener2.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone2).await;
+            let _ = handle_connection(stream, dir_clone2, test_difficulty).await;
         });
 
         let mut client2 = TcpStream::connect(addr2).await.unwrap();
         let now = crate::mesh::sybil::current_timestamp_secs();
-        let nonce =
-            crate::mesh::sybil::solve_pow("node2", now, crate::mesh::sybil::DEFAULT_POW_DIFFICULTY);
+        let nonce = crate::mesh::sybil::solve_pow("node2", now, test_difficulty);
         let msg = format!("REGISTER_REVERSE node2 secret_auth_123 {} {}\n", now, nonce);
         client2.write_all(msg.as_bytes()).await.unwrap();
 
@@ -261,7 +266,7 @@ mod tests {
         let dir_clone3 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener3.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone3).await;
+            let _ = handle_connection(stream, dir_clone3, test_difficulty).await;
         });
 
         let mut attacker = TcpStream::connect(addr3).await.unwrap();
@@ -279,12 +284,11 @@ mod tests {
         let dir_clone4 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener4.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone4).await;
+            let _ = handle_connection(stream, dir_clone4, test_difficulty).await;
         });
 
         let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
-        let nonce_atk =
-            crate::mesh::sybil::solve_pow("node2", now, crate::mesh::sybil::DEFAULT_POW_DIFFICULTY);
+        let nonce_atk = crate::mesh::sybil::solve_pow("node2", now, test_difficulty);
         let msg_atk = format!("REGISTER_REVERSE node2 {} {}\n", now, nonce_atk);
         attacker2.write_all(msg_atk.as_bytes()).await.unwrap();
         let mut err_resp2 = [0u8; 64];
@@ -297,7 +301,7 @@ mod tests {
         let dir_clone5 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener5.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone5).await;
+            let _ = handle_connection(stream, dir_clone5, test_difficulty).await;
         });
 
         let mut discoverer = TcpStream::connect(addr5).await.unwrap();
@@ -320,7 +324,7 @@ mod tests {
         let dir_clone6 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener6.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone6).await;
+            let _ = handle_connection(stream, dir_clone6, test_difficulty).await;
         });
 
         let mut auth_client = TcpStream::connect(addr6).await.unwrap();

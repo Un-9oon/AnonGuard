@@ -13,7 +13,7 @@ We present **AnonGuard**, an autonomous, defense-in-depth anonymity architecture
 1. **Authenticated Layered Onion Cryptography**: A constant 1024-byte cell protocol utilizing in-band telescopic X25519 Diffie-Hellman key agreement, ChaCha20 stream encryption, and constant-time keyed HMAC-SHA256 MAC authentication per hop, eliminating polynomial MAC key-reuse vulnerabilities and ensuring no relay observes both origin and destination.
 2. **Distributed Multi-Authority Consensus**: An $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures, with cryptographic identity key binding preventing relay impersonation.
 3. **Sybil Resistance Engine**: Computational Proof-of-Work (PoW) registration challenges coupled with strict BGP `/16` CIDR subnet prefix isolation across circuit paths.
-4. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing**: Inter-packet delays and chunk sizes mapped to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, driving mutual information down to $0.00$ bits and disrupting deep learning flow classifiers in $O(1)$ constant time.
+4. **Statistical Random Matrix Theory (RMT) Traffic Morphing**: Inter-packet delays and chunk sizes mapped to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, driving mutual information down to $0.00$ bits and disrupting deep learning flow classifiers in $O(1)$ constant time (requiring no quantum hardware).
 5. **Provably Fail-Closed State Machine**: Active async broadcast kill switch guaranteeing zero transitional or in-flight data leakage.
 
 Empirical evaluation against state-of-the-art Website Fingerprinting neural networks demonstrates a collapse of Top-3 classification accuracy from 65.0% down to 39.0% and Mutual Information to $0.00$ bits, with negligible latency overhead.
@@ -130,7 +130,7 @@ Because $P(s \to 0) = 0$, energy levels (and consequently packet inter-arrival t
 ### $O(1)$ Closed-Form Sampling:
 Integrating $P(s)$ yields the Cumulative Distribution Function (CDF):
 $$F(s) = 1 - \exp\left(-\frac{\pi}{4} s^2\right)$$
-Inverting $F(s)$ allows generating quantum intervals in **$O(1)$ constant time**:
+Inverting $F(s)$ allows generating Wigner-distributed timing intervals in **$O(1)$ constant time**:
 $$s = \sqrt{-\frac{4}{\pi} \ln(1 - u)}, \quad u \sim \mathcal{U}(0, 1)$$
 
 ---
@@ -148,10 +148,10 @@ We evaluated AnonGuard across two complementary methodologies:
 | **Unprotected TCP / SOCKS5** | 37.0% | 62.0% | 50.0% | 0.81 bits | None (Trivial Attribution) |
 | **Standard Tor (Fixed Cells)** | 32.0% | 65.0% | 46.0% | 0.88 bits | High Vulnerability to Timing Analysis |
 | **Lorenz Chaotic Attractor** | 25.0% | 61.0% | 43.0% | 0.68 bits | Moderate Nonlinear Obfuscation |
-| **AnonGuard Q-RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Information-Theoretic Ceiling** |
+| **AnonGuard RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Information-Theoretic Ceiling** |
 
 ### Key Findings:
-1. **Entropy Collapse:** Q-RMT drives the Shannon Mutual Information between packet timing features and website labels down to **$0.00$ bits**.
+1. **Entropy Collapse:** RMT morphing drives the Shannon Mutual Information between packet timing features and website labels down to **$0.00$ bits**.
 2. **Classifier Blindness:** Top-3 neural network accuracy plummets from 65.0% down to 39.0%, approaching random baseline.
 3. **Execution Efficiency:** Wigner Surmise evaluation takes $< 2 \text{ ns}$ per packet, adding less than 1% CPU utilization on commodity hardware.
 
@@ -159,4 +159,4 @@ We evaluated AnonGuard across two complementary methodologies:
 
 ## 7. Conclusion
 
-AnonGuard provides a rigorous, defense-in-depth anonymity pipeline uniting authenticated multi-hop onion routing, distributed quorum consensus, Sybil defense, and quantum-mechanical traffic morphing. The architecture is fully implemented, verified with zero compiler warnings, and open for academic scrutiny.
+AnonGuard provides a rigorous, defense-in-depth anonymity pipeline uniting authenticated multi-hop onion routing, distributed quorum consensus, Sybil defense, and statistical random matrix traffic morphing. The architecture is fully implemented, verified with zero compiler warnings, and open for academic scrutiny.

@@ -116,16 +116,10 @@ impl GatewayServer {
                             };
 
                         let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
-                        if !exit_policy.is_permitted(&target_host, target_port) {
-                            error!(
-                                "Relay Mode: Target {}:{} blocked by Exit Policy (anti-SSRF)",
-                                target_host, target_port
-                            );
-                            return;
-                        }
-
-                        let target_addr = format!("{}:{}", target_host, target_port);
-                        match TcpStream::connect(&target_addr).await {
+                        match exit_policy
+                            .resolve_and_connect(&target_host, target_port)
+                            .await
+                        {
                             Ok(mut target_stream) => {
                                 info!(
                                     "Relay Mode: Forwarding traffic to {}:{}",
@@ -141,8 +135,8 @@ impl GatewayServer {
                             }
                             Err(e) => {
                                 error!(
-                                    "Relay Mode: Failed to connect to target {}: {}",
-                                    target_addr, e
+                                    "Relay Mode: Target {}:{} blocked or unreachable: {}",
+                                    target_host, target_port, e
                                 );
                             }
                         }
@@ -424,6 +418,8 @@ impl GatewayServer {
             let token = auth_token.clone();
             let jitter = self.jitter.clone();
             let kill_switch = self.kill_switch.clone();
+            let pow_difficulty = self.config.pow_difficulty;
+            let allow_private_exit = self.config.allow_private_exit;
 
             tokio::spawn(async move {
                 loop {
@@ -431,11 +427,7 @@ impl GatewayServer {
                         Ok(mut stream) => {
                             use tokio::io::AsyncWriteExt;
                             let now = crate::mesh::sybil::current_timestamp_secs();
-                            let nonce = crate::mesh::sybil::solve_pow(
-                                &nid,
-                                now,
-                                crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
-                            );
+                            let nonce = crate::mesh::sybil::solve_pow(&nid, now, pow_difficulty);
                             let payload =
                                 format!("REGISTER_REVERSE {} {} {} {}\n", nid, token, now, nonce);
                             if stream.write_all(payload.as_bytes()).await.is_ok() {
@@ -459,8 +451,12 @@ impl GatewayServer {
                                             }
                                         };
 
-                                    let target_addr = format!("{}:{}", target_host, target_port);
-                                    match TcpStream::connect(&target_addr).await {
+                                    let exit_policy =
+                                        crate::kernel::ExitPolicy::new(allow_private_exit);
+                                    match exit_policy
+                                        .resolve_and_connect(&target_host, target_port)
+                                        .await
+                                    {
                                         Ok(mut target_stream) => {
                                             info!(
                                                 "Reverse Relay: Forwarding traffic to {}:{}",
@@ -476,8 +472,8 @@ impl GatewayServer {
                                         }
                                         Err(e) => {
                                             error!(
-                                                "Reverse Relay: Failed to connect to target {}: {}",
-                                                target_addr, e
+                                                "Reverse Relay: Target {}:{} blocked or unreachable: {}",
+                                                target_host, target_port, e
                                             );
                                         }
                                     }

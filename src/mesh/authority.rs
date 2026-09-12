@@ -20,16 +20,22 @@ pub struct DirectoryAuthority {
     signing_key: SigningKey,
     listen_addr: String,
     active_relays: Arc<RwLock<HashMap<String, RelayDescriptor>>>,
+    pub pow_difficulty: u32,
 }
 
 impl DirectoryAuthority {
     pub fn new(authority_id: String, listen_addr: String) -> Self {
+        Self::with_difficulty(authority_id, listen_addr, DEFAULT_POW_DIFFICULTY)
+    }
+
+    pub fn with_difficulty(authority_id: String, listen_addr: String, pow_difficulty: u32) -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         Self {
             authority_id,
             signing_key,
             listen_addr,
             active_relays: Arc::new(RwLock::new(HashMap::new())),
+            pow_difficulty,
         }
     }
 
@@ -48,7 +54,7 @@ impl DirectoryAuthority {
             &descriptor.node_id,
             descriptor.registered_at,
             descriptor.pow_nonce,
-            DEFAULT_POW_DIFFICULTY,
+            self.pow_difficulty,
             now,
         );
 
@@ -108,6 +114,7 @@ impl DirectoryAuthority {
             let active_relays = self.active_relays.clone();
             let auth_id = self.authority_id.clone();
             let signing_key = self.signing_key.clone();
+            let pow_difficulty = self.pow_difficulty;
 
             tokio::spawn(async move {
                 match SecureTransportSession::server_handshake(stream, Some(&signing_key)).await {
@@ -139,7 +146,7 @@ impl DirectoryAuthority {
                                             &desc.node_id,
                                             desc.registered_at,
                                             desc.pow_nonce,
-                                            DEFAULT_POW_DIFFICULTY,
+                                            pow_difficulty,
                                             now,
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
@@ -166,9 +173,7 @@ impl DirectoryAuthority {
                                         }
                                     }
                                     Err(_) => {
-                                        let _ = session
-                                            .write_frame(b"ERROR_MALFORMED_DESCRIPTOR")
-                                            .await;
+                                        let _ = session.write_frame(b"ERROR_MALFORMED_JSON").await;
                                     }
                                 }
                             }
@@ -190,13 +195,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_authority_registration_signature_and_anti_hijack() {
-        let auth = DirectoryAuthority::new("auth-1".to_string(), "127.0.0.1:0".to_string());
+        let test_difficulty = 12;
+        let auth = DirectoryAuthority::with_difficulty(
+            "auth-1".to_string(),
+            "127.0.0.1:0".to_string(),
+            test_difficulty,
+        );
         let mut rng = OsRng;
         let relay_key1 = SigningKey::generate(&mut rng);
         let relay_key2 = SigningKey::generate(&mut rng);
 
         let now = current_timestamp_secs();
-        let nonce = solve_pow("relay-1", now, DEFAULT_POW_DIFFICULTY);
+        let nonce = solve_pow("relay-1", now, test_difficulty);
 
         let mut desc = RelayDescriptor::new(
             "relay-1".to_string(),
@@ -224,7 +234,7 @@ mod tests {
             [99u8; 32],
             [0u8; 32],
             true,
-            solve_pow("relay-1", now + 1, DEFAULT_POW_DIFFICULTY),
+            solve_pow("relay-1", now + 1, test_difficulty),
             now + 1,
         );
         hijack_desc.sign_with_key(&relay_key2);
@@ -240,7 +250,7 @@ mod tests {
             [43u8; 32],
             [0u8; 32],
             true,
-            solve_pow("relay-1", now + 5, DEFAULT_POW_DIFFICULTY),
+            solve_pow("relay-1", now + 5, test_difficulty),
             now + 5,
         );
         legit_update.sign_with_key(&relay_key1);

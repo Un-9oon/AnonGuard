@@ -88,7 +88,7 @@ impl Default for GuardConfig {
             directory_authorities: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
             enable_firewall_killswitch: false,
-            pow_difficulty: 16,
+            pow_difficulty: 20,
         }
     }
 }
