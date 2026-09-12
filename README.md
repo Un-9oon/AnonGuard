@@ -19,8 +19,8 @@ AnonGuard is an open-source, defense-in-depth anonymity gateway combining statis
 1. **Authenticated Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, in-band telescopic circuit negotiation (`CREATE`/`CREATED` and encrypted `EXTEND` cells) using per-hop X25519 Diffie-Hellman key agreement, ChaCha20 stream peeling, monotonic sequence counters for anti-replay, and **16-byte HMAC-SHA256 Message Authentication Codes (MAC)** verified in constant-time at every hop to eliminate tag forgery, bit-flipping, and replay attacks. No intermediate relay ever sees both source and destination.
 2. **Statistical Random Matrix Theory (RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** eigenvalue spacing distribution $P(s \to 0) = 0$ via fast inverse-transform sampling from a classical CSPRNG to produce level repulsion, disrupting deep learning packet-timing classifiers in constant $O(1)$ time ($\approx 1 \text{ ns}$ per packet, requiring no quantum hardware).
 3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
-4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
-5. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip, with optional kernel-level `nftables` output filtering on Linux (`--enable-firewall-killswitch`). Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization.
+2. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
+3. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization. *(Note: Optional kernel-level `nftables` output filtering is strictly Linux-only via `--enable-firewall-killswitch`).*
 
 AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all 29 integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
 
@@ -171,7 +171,7 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 3. **Deep Learning Website Fingerprinting:** Statistical RMT eigenvalue level repulsion prevents CNN/RF classifiers from recognizing specific traffic signatures.
 4. **Local Network DNS & IPv6 Leaks:** Remote DNS resolution over SOCKS5h and runtime IPv6 blackholing prevent common OS dual-stack exposure.
 5. **Mid-Session Policy Disruption:** An active broadcast kill switch terminates in-flight streams immediately if a tunnel or security policy trips.
-6. **OS-Level Traffic Leaks:** Linux kernel `nftables` output filter locks traffic strictly to the designated proxy port, automatically flushing on clean shutdown (`SIGINT` / `Ctrl+C`).
+6. **OS-Level Traffic Leaks:** Linux kernel `nftables` output filter locks traffic strictly to the designated proxy port, automatically flushing on clean shutdown (`SIGINT` / `Ctrl+C`). This OS-level firewall backstop is **Linux-only**. macOS and Windows rely strictly on the fail-closed process-level kill switch.
 
 ### What AnonGuard Does NOT Protect Against:
 1. **Global Active Traffic-Timing Adversary:** If an adversary observes both ingress to the Guard and egress from the Exit simultaneously with synchronized millisecond-precision flow analysis, statistical timing confirmation remains theoretically possible.
@@ -211,7 +211,7 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 | `--relay` | `false` | Run as an AnonGuard relay node |
 | `--allow-open-socks5` | `false` | Permit unauthenticated plain SOCKS5 proxying on relay ports |
 | `--allow-private-exit` | `false` | Permit exit connections to private/loopback networks |
-| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules (flushed on clean exit) |
+| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules (flushed on clean exit). **Linux Only.** |
 | `--pow-difficulty <BITS>` | `20` | Registration PoW difficulty in leading zero bits (default: 20) |
 | `--reverse-relay` | `false` | Run volunteer relay behind NAT |
 

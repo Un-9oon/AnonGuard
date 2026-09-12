@@ -108,9 +108,9 @@ async fn test_live_inband_telescopic_circuit_e2e() {
 
     // 8. Client sends encrypted Data cell through the 3-hop circuit
     let req_data = b"GET /onion-test HTTP/1.1\r\n\r\n";
-    let data_cell =
-        OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data, &exit_mac).unwrap();
-    let wire_forward = circuit.wrap_forward(&data_cell);
+    let mut data_cell =
+        OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data).unwrap();
+    let wire_forward = circuit.wrap_forward(&mut data_cell);
     guard_stream.write_all(&wire_forward).await.unwrap();
 
     // 9. Client reads response cell from the circuit
@@ -118,7 +118,6 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     guard_stream.read_exact(&mut wire_backward).await.unwrap();
     let resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
 
-    assert!(resp_cell.is_mac_valid(&exit_mac));
     assert_eq!(resp_cell.command, CellCommand::Data);
     let len = resp_cell.length as usize;
     assert_eq!(

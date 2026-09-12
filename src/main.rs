@@ -109,7 +109,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     allow_private_exit: bool,
 
-    /// Apply OS/kernel-level nftables firewall kill switch (Linux with root/CAP_NET_ADMIN)
+    /// Apply OS/kernel-level nftables firewall kill switch (Linux only, requires root/CAP_NET_ADMIN)
+    #[cfg(target_os = "linux")]
     #[arg(long, default_value_t = false)]
     enable_firewall_killswitch: bool,
 
@@ -144,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );
 
+    #[cfg(target_os = "linux")]
     if args.enable_firewall_killswitch {
         let (proxy_ip, proxy_port) = match args.listen.split_once(':') {
             Some((ip, p)) => (ip, p.parse::<u16>().unwrap_or(9050)),
@@ -202,12 +204,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         allow_private_exit: args.allow_private_exit,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
+        #[cfg(target_os = "linux")]
         enable_firewall_killswitch: args.enable_firewall_killswitch,
+        #[cfg(not(target_os = "linux"))]
+        enable_firewall_killswitch: false,
         pow_difficulty: args.pow_difficulty,
         ..GuardConfig::default()
     };
 
+    #[cfg(target_os = "linux")]
     let firewall_enabled = args.enable_firewall_killswitch;
+    #[cfg(not(target_os = "linux"))]
+    let firewall_enabled = false;
 
     if args.authority {
         let authority = anonguard::mesh::DirectoryAuthority::with_difficulty(
@@ -222,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(())
             }
         };
+        #[cfg(target_os = "linux")]
         if firewall_enabled {
             let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
         }
@@ -238,6 +247,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(())
             }
         };
+        #[cfg(target_os = "linux")]
         if firewall_enabled {
             let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
         }
@@ -476,6 +486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     };
 
+    #[cfg(target_os = "linux")]
     if firewall_enabled {
         info!("Flushing OS/kernel-level nftables firewall kill switch...");
         match anonguard::kernel::NetnsConfig::flush_nftables_rules() {

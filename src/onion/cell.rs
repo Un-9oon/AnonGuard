@@ -54,7 +54,6 @@ impl OnionCell {
         command: CellCommand,
         stream_id: u16,
         data: &[u8],
-        mac_key: &[u8; 32],
     ) -> Result<Self, String> {
         if data.len() > PAYLOAD_SIZE {
             return Err(format!(
@@ -68,69 +67,15 @@ impl OnionCell {
         let len = data.len();
         payload[..len].copy_from_slice(data);
 
-        let mac = Self::calculate_mac(
-            mac_key,
-            circuit_id,
-            sequence_no,
-            command as u8,
-            stream_id,
-            len as u16,
-            &payload[..len],
-        );
-
         Ok(Self {
             circuit_id,
             sequence_no,
             command,
             stream_id,
             length: len as u16,
-            mac,
+            mac: [0u8; 16], // To be filled by AEAD
             payload,
         })
-    }
-
-    pub fn calculate_mac(
-        mac_key: &[u8; 32],
-        circuit_id: u32,
-        sequence_no: u32,
-        command: u8,
-        stream_id: u16,
-        len: u16,
-        data: &[u8],
-    ) -> [u8; 16] {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        type HmacSha256 = Hmac<Sha256>;
-
-        let mut mac = HmacSha256::new_from_slice(mac_key).expect("HMAC supports 32-byte keys");
-        mac.update(&circuit_id.to_be_bytes());
-        mac.update(&sequence_no.to_be_bytes());
-        mac.update(&[command]);
-        mac.update(&stream_id.to_be_bytes());
-        mac.update(&len.to_be_bytes());
-        mac.update(data);
-        let tag = mac.finalize().into_bytes();
-        let mut out = [0u8; 16];
-        out.copy_from_slice(&tag[..16]);
-        out
-    }
-
-    pub fn is_mac_valid(&self, mac_key: &[u8; 32]) -> bool {
-        let len = self.length as usize;
-        if len > PAYLOAD_SIZE {
-            return false;
-        }
-        let expected = Self::calculate_mac(
-            mac_key,
-            self.circuit_id,
-            self.sequence_no,
-            self.command as u8,
-            self.stream_id,
-            self.length,
-            &self.payload[..len],
-        );
-        // Constant-time tag comparison
-        subtle::ConstantTimeEq::ct_eq(&self.mac[..], &expected[..]).into()
     }
 
     pub fn serialize(&self) -> [u8; ONION_CELL_SIZE] {

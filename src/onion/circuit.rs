@@ -1,10 +1,13 @@
-//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and HMAC-SHA256 Authenticated Peeling.
+//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and AEAD Peeling.
 //!
 //! Security: Every hop handshake is identity-bound via Ed25519 signature over the ephemeral
 //! X25519 public keys, linking DH to the relay's long-term identity key pinned in the consensus.
+//! Data is protected by ChaCha20-Poly1305 AEAD for the addressed hop, and ChaCha20 stream cipher
+//! for routing layers, using an explicit stateless nonce derived from the cell's sequence number.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
+use chacha20poly1305::{aead::{AeadInPlace, KeyInit}, ChaCha20Poly1305, Tag};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
@@ -12,38 +15,44 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 
-/// Per-hop cryptographic session state containing forward and backward ciphers plus HMAC-SHA256 MAC key.
+/// Helper to build a 96-bit nonce from circuit_id and sequence_no
+fn build_nonce(circuit_id: u32, sequence_no: u32) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[4..8].copy_from_slice(&circuit_id.to_be_bytes());
+    nonce[8..12].copy_from_slice(&sequence_no.to_be_bytes());
+    nonce
+}
+
+/// Per-hop cryptographic session state containing forward and backward keys.
 pub struct HopCryptState {
-    pub forward_cipher: ChaCha20,
-    pub backward_cipher: ChaCha20,
-    pub mac_key: [u8; 32],
+    pub forward_key: [u8; 32],
+    pub backward_key: [u8; 32],
 }
 
 impl HopCryptState {
-    pub fn new(forward_key: &[u8; 32], backward_key: &[u8; 32], mac_key: &[u8; 32]) -> Self {
-        let nonce = [0u8; 12];
-        let forward_cipher = ChaCha20::new(forward_key.into(), &nonce.into());
-        let backward_cipher = ChaCha20::new(backward_key.into(), &nonce.into());
-
+    pub fn new(forward_key: &[u8; 32], backward_key: &[u8; 32]) -> Self {
         Self {
-            forward_cipher,
-            backward_cipher,
-            mac_key: *mac_key,
+            forward_key: *forward_key,
+            backward_key: *backward_key,
         }
     }
 
-    /// Encrypts/decrypts in-place for forward stream traffic.
-    pub fn encrypt_forward(&mut self, data: &mut [u8]) {
-        self.forward_cipher.apply_keystream(data);
+    /// Encrypts in-place for forward stream traffic using stateless ChaCha20 (no Poly1305 tag).
+    /// This is used for outer onion routing layers to avoid expanding the cell size.
+    pub fn encrypt_forward_stream(&self, nonce: &[u8; 12], data: &mut [u8]) {
+        let mut cipher = ChaCha20::new(&self.forward_key.into(), &(*nonce).into());
+        cipher.apply_keystream(data);
     }
 
-    /// Encrypts/decrypts in-place for backward (return) stream traffic.
-    pub fn encrypt_backward(&mut self, data: &mut [u8]) {
-        self.backward_cipher.apply_keystream(data);
+    /// Decrypts in-place for backward (return) stream traffic.
+    pub fn encrypt_backward_stream(&self, nonce: &[u8; 12], data: &mut [u8]) {
+        let mut cipher = ChaCha20::new(&self.backward_key.into(), &(*nonce).into());
+        cipher.apply_keystream(data);
     }
 }
 
 /// Key derivation function turning an X25519 shared secret into forward, backward, and MAC keys.
+/// We still derive 3 keys to match previous v2 formats, but mac_key is now unused.
 pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut hasher_f = Sha256::new();
     hasher_f.update(shared_secret);
@@ -74,6 +83,7 @@ pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> ([u8; 32], [u8; 32], [u8; 32
 pub struct OnionCircuit {
     pub circuit_id: u32,
     hops: Vec<HopCryptState>,
+    pub sequence_no: u32, // Client's sending sequence
 }
 
 impl OnionCircuit {
@@ -81,45 +91,91 @@ impl OnionCircuit {
         Self {
             circuit_id,
             hops: Vec::new(),
+            sequence_no: 1, // Start at 1, handshake is 0
         }
     }
 
     /// Adds a negotiated hop state to the circuit.
-    pub fn add_hop(&mut self, forward_key: [u8; 32], backward_key: [u8; 32], mac_key: [u8; 32]) {
-        self.hops
-            .push(HopCryptState::new(&forward_key, &backward_key, &mac_key));
+    pub fn add_hop(&mut self, forward_key: [u8; 32], backward_key: [u8; 32], _mac_key: [u8; 32]) {
+        self.hops.push(HopCryptState::new(&forward_key, &backward_key));
     }
 
     pub fn hop_count(&self) -> usize {
         self.hops.len()
     }
 
-    pub fn get_hop_mac_key(&self, index: usize) -> Option<[u8; 32]> {
-        self.hops.get(index).map(|h| h.mac_key)
+    pub fn get_hop_mac_key(&self, _index: usize) -> Option<[u8; 32]> {
+        // Obsolete function, returning zeroed key for backward compat in test shapes
+        Some([0u8; 32])
     }
 
     /// Forward Onion Encryption:
     /// Wraps a cell from innermost layer (Exit) to outermost layer (Guard).
-    pub fn wrap_forward(&mut self, cell: &OnionCell) -> [u8; ONION_CELL_SIZE] {
+    pub fn wrap_forward(&mut self, cell: &mut OnionCell) -> [u8; ONION_CELL_SIZE] {
+        cell.sequence_no = self.sequence_no;
+        self.sequence_no += 1;
+        let nonce = build_nonce(cell.circuit_id, cell.sequence_no);
+
         let mut raw = cell.serialize();
 
-        // Encrypt in reverse order: Exit first, then Middle, then Guard
-        for hop in self.hops.iter_mut().rev() {
-            hop.encrypt_forward(&mut raw[4..]);
+        if let Some(target_hop) = self.hops.last() {
+            let cipher = ChaCha20Poly1305::new(&target_hop.forward_key.into());
+            let (header, body) = raw.split_at_mut(8);
+            
+            let mut pt = Vec::with_capacity(1016 - 16);
+            pt.extend_from_slice(&body[0..5]);
+            pt.extend_from_slice(&body[21..]);
+
+            let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, &mut pt).unwrap();
+            
+            body[0..5].copy_from_slice(&pt[0..5]);
+            body[21..].copy_from_slice(&pt[5..]);
+            body[5..21].copy_from_slice(&tag);
+        }
+
+        let hop_count = self.hops.len();
+        if hop_count > 1 {
+            for hop in self.hops.iter().take(hop_count - 1).rev() {
+                hop.encrypt_forward_stream(&nonce, &mut raw[8..]);
+            }
         }
 
         raw
     }
 
     /// Backward Onion Decryption (Client receives return traffic):
-    /// Removes Guard layer (Hop 0), then Middle (Hop 1), then Exit (Hop 2).
     pub fn unwrap_backward(
         &mut self,
         raw: &mut [u8; ONION_CELL_SIZE],
     ) -> Result<OnionCell, String> {
-        for hop in self.hops.iter_mut() {
-            hop.encrypt_backward(&mut raw[4..]);
+        let seq = u32::from_be_bytes(raw[4..8].try_into().unwrap());
+        let nonce = build_nonce(self.circuit_id, seq);
+
+        let hop_count = self.hops.len();
+        if hop_count > 1 {
+            for hop in self.hops.iter().take(hop_count - 1) {
+                hop.encrypt_backward_stream(&nonce, &mut raw[8..]);
+            }
         }
+
+        if let Some(target_hop) = self.hops.last() {
+            let cipher = ChaCha20Poly1305::new(&target_hop.backward_key.into());
+            let (header, body) = raw.split_at_mut(8);
+            
+            let mut ct = Vec::with_capacity(1016 - 16);
+            ct.extend_from_slice(&body[0..5]);
+            ct.extend_from_slice(&body[21..]);
+            
+            let mut tag = [0u8; 16];
+            tag.copy_from_slice(&body[5..21]);
+
+            cipher.decrypt_in_place_detached(&nonce.into(), header, &mut ct, &tag.into())
+                  .map_err(|_| "Client backward AEAD decryption failed")?;
+
+            body[0..5].copy_from_slice(&ct[0..5]);
+            body[21..].copy_from_slice(&ct[5..]);
+        }
+
         OnionCell::parse(raw)
     }
 }
@@ -134,7 +190,7 @@ pub struct RelayCircuitHop {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PeelResult {
-    /// This cell is addressed directly to this relay with verified HMAC-SHA256 MAC.
+    /// This cell is addressed directly to this relay with verified AEAD tag.
     AddressedToThisRelay(CellCommand, Vec<u8>),
     /// This cell belongs to downstream hops; forward the peeled raw buffer.
     ForwardDownstream(Box<[u8; ONION_CELL_SIZE]>),
@@ -145,33 +201,52 @@ impl RelayCircuitHop {
         circuit_id: u32,
         forward_key: [u8; 32],
         backward_key: [u8; 32],
-        mac_key: [u8; 32],
+        _mac_key: [u8; 32],
     ) -> Self {
         Self {
             circuit_id,
-            crypt: HopCryptState::new(&forward_key, &backward_key, &mac_key),
+            crypt: HopCryptState::new(&forward_key, &backward_key),
             expected_recv_seq: 1, // Handshake cells use sequence 0
             next_send_seq: 1,
         }
     }
 
-    /// Peels one layer of forward onion encryption, verifies the HMAC-SHA256 MAC,
+    /// Peels one layer of forward onion encryption, verifies the AEAD tag (if addressed to us),
     /// and enforces anti-replay sequence number progression.
     pub fn peel_forward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<PeelResult, String> {
-        self.crypt.encrypt_forward(&mut raw[4..]);
+        let seq = u32::from_be_bytes(raw[4..8].try_into().unwrap());
+        
+        if seq < self.expected_recv_seq {
+            return Err(format!(
+                "Anti-replay rejection on circuit {}: received stale sequence {} (expected >= {})",
+                self.circuit_id, seq, self.expected_recv_seq
+            ));
+        }
+        
+        let nonce = build_nonce(self.circuit_id, seq);
+        self.expected_recv_seq = seq + 1;
 
-        if let Ok(cell) = OnionCell::parse(raw) {
-            // Cryptographic HMAC-SHA256 MAC verification
-            if cell.is_mac_valid(&self.crypt.mac_key) {
-                // Anti-replay check: prevent replay, duplication, or reordering of cells
-                if cell.sequence_no < self.expected_recv_seq {
-                    return Err(format!(
-                        "Anti-replay rejection on circuit {}: received stale sequence {} (expected >= {})",
-                        self.circuit_id, cell.sequence_no, self.expected_recv_seq
-                    ));
-                }
-                self.expected_recv_seq = cell.sequence_no + 1;
+        let cipher = ChaCha20Poly1305::new(&self.crypt.forward_key.into());
+        let (header, body) = raw.split_at_mut(8);
+            
+        let mut ct = Vec::with_capacity(1016 - 16);
+        ct.extend_from_slice(&body[0..5]);
+        ct.extend_from_slice(&body[21..]);
+        
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(&body[5..21]);
 
+        let aead_result = cipher.decrypt_in_place_detached(&nonce.into(), header, &mut ct, &tag.into());
+        
+        if aead_result.is_ok() {
+            body[0..5].copy_from_slice(&ct[0..5]);
+            body[21..].copy_from_slice(&ct[5..]);
+            
+            let mut full_cell = [0u8; ONION_CELL_SIZE];
+            full_cell[..8].copy_from_slice(header);
+            full_cell[8..].copy_from_slice(body);
+            
+            if let Ok(cell) = OnionCell::parse(&full_cell) {
                 let len = (cell.length as usize).min(cell.payload.len());
                 return Ok(PeelResult::AddressedToThisRelay(
                     cell.command,
@@ -180,44 +255,63 @@ impl RelayCircuitHop {
             }
         }
 
-        Ok(PeelResult::ForwardDownstream(Box::new(*raw)))
+        self.crypt.encrypt_forward_stream(&nonce, body);
+
+        let mut full_cell = [0u8; ONION_CELL_SIZE];
+        full_cell[..8].copy_from_slice(header);
+        full_cell[8..].copy_from_slice(body);
+
+        Ok(PeelResult::ForwardDownstream(Box::new(full_cell)))
     }
 
     /// Wraps return payload in backward encryption before passing upstream towards client.
     pub fn wrap_backward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) {
-        self.crypt.encrypt_backward(&mut raw[4..]);
+        let seq = u32::from_be_bytes(raw[4..8].try_into().unwrap());
+        let nonce = build_nonce(self.circuit_id, seq);
+        
+        let (_header, body) = raw.split_at_mut(8);
+        self.crypt.encrypt_backward_stream(&nonce, body);
+    }
+
+    /// Originates a backward cell from this relay using AEAD.
+    pub fn wrap_backward_aead(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) {
+        let seq = self.next_send_seq;
+        self.next_send_seq += 1;
+        raw[4..8].copy_from_slice(&seq.to_be_bytes());
+        
+        let nonce = build_nonce(self.circuit_id, seq);
+        
+        let cipher = ChaCha20Poly1305::new(&self.crypt.backward_key.into());
+        let (header, body) = raw.split_at_mut(8);
+        
+        let mut pt = Vec::with_capacity(1016 - 16);
+        pt.extend_from_slice(&body[0..5]);
+        pt.extend_from_slice(&body[21..]);
+
+        let tag = cipher.encrypt_in_place_detached(&nonce.into(), header, &mut pt).unwrap();
+        
+        body[0..5].copy_from_slice(&pt[0..5]);
+        body[21..].copy_from_slice(&pt[5..]);
+        body[5..21].copy_from_slice(&tag);
     }
 }
 
 /// Builds a CREATE cell carrying the client's ephemeral X25519 public key.
-/// Layout: [32-byte client_eph_x25519_pub]
 pub fn build_create_cell(
     circuit_id: u32,
     client_pub: &X25519PublicKey,
 ) -> Result<OnionCell, String> {
-    let initial_mac_key = [0u8; 32];
     OnionCell::new(
         circuit_id,
         0,
         CellCommand::Create,
         0,
         client_pub.as_bytes(),
-        &initial_mac_key,
     )
 }
 
 /// Relay processes a CREATE cell, performs X25519 Diffie-Hellman, and returns the established hop
 /// state and CREATED cell.
-///
-/// # Identity Binding
-/// The relay signs `"AnonGuard-handshake-v1" || relay_eph_pub || client_eph_pub` with its
-/// long-term Ed25519 identity key. The client MUST verify this signature against the pinned
-/// `identity_key_ed25519` from the signed consensus before accepting any derived hop keys.
-///
-/// CREATED cell payload layout:
-///   [0..32]   relay ephemeral X25519 public key
-///   [32..64]  relay Ed25519 identity public key
-///   [64..128] Ed25519 signature (64 bytes)
 pub fn handle_create_cell(
     create_cell: &OnionCell,
     relay_identity_key: &SigningKey,
@@ -243,7 +337,6 @@ pub fn handle_create_cell(
     let shared = relay_secret.diffie_hellman(&client_pub);
     let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
-    // Identity-bind the handshake: sign relay_eph_pub || client_eph_pub under the long-term key.
     let identity_pub = relay_identity_key.verifying_key();
     let mut preimage = Vec::with_capacity(6 + 32 + 32);
     preimage.extend_from_slice(b"AnonGuard-handshake-v1");
@@ -251,7 +344,6 @@ pub fn handle_create_cell(
     preimage.extend_from_slice(client_pub_bytes.as_ref());
     let handshake_sig: Signature = relay_identity_key.sign(&preimage);
 
-    // Build CREATED payload: relay_eph_pub(32) || identity_pub(32) || sig(64) = 128 bytes
     let mut created_payload = [0u8; 128];
     created_payload[0..32].copy_from_slice(relay_pub.as_bytes());
     created_payload[32..64].copy_from_slice(identity_pub.as_bytes());
@@ -263,7 +355,6 @@ pub fn handle_create_cell(
         CellCommand::Created,
         0,
         &created_payload,
-        &mac_key,
     )?;
 
     let relay_hop =
@@ -273,15 +364,6 @@ pub fn handle_create_cell(
 
 /// Client processes a CREATED or EXTENDED cell from a relay, verifying the relay's Ed25519
 /// identity-bound handshake signature before accepting any derived hop keys.
-///
-/// # Security
-/// `pinned_identity_key` MUST be sourced from a verified consensus document (M-of-N authority
-/// quorum). Passing an arbitrary or relay-supplied key defeats the MITM protection.
-///
-/// Expected payload layout:
-///   [0..32]   relay ephemeral X25519 public key
-///   [32..64]  relay Ed25519 identity public key (must match `pinned_identity_key`)
-///   [64..128] Ed25519 signature over `"AnonGuard-handshake-v1" || relay_eph_pub || client_eph_pub`
 pub fn process_created_cell(
     created_cell: &OnionCell,
     client_secret: EphemeralSecret,
@@ -312,8 +394,6 @@ pub fn process_created_cell(
         .try_into()
         .map_err(|_| "Failed to extract handshake signature".to_string())?;
 
-    // 1. Verify the relay-supplied identity key matches the consensus-pinned key.
-    //    Use constant-time comparison to prevent oracle side-channels.
     use subtle::ConstantTimeEq;
     if relay_identity_pub_bytes
         .ct_eq(pinned_identity_key)
@@ -325,7 +405,6 @@ pub fn process_created_cell(
         );
     }
 
-    // 2. Verify the Ed25519 handshake signature.
     let verifying_key = VerifyingKey::from_bytes(&relay_identity_pub_bytes)
         .map_err(|e| format!("Invalid relay Ed25519 identity key: {e}"))?;
     let signature = Signature::from_bytes(&sig_bytes);
@@ -339,20 +418,13 @@ pub fn process_created_cell(
         .verify(&preimage, &signature)
         .map_err(|_| "Handshake Ed25519 signature verification failed — possible MITM".to_string())?;
 
-    // 3. Derive hop keys from X25519 shared secret.
     let relay_eph_pub = X25519PublicKey::from(relay_eph_pub_bytes);
     let shared = client_secret.diffie_hellman(&relay_eph_pub);
     let (forward_key, backward_key, mac_key) = derive_hop_keys(shared.as_bytes());
 
-    // 4. Verify HMAC-SHA256 cell MAC (encrypt-then-MAC, keyed from the derived mac_key).
-    if !created_cell.is_mac_valid(&mac_key) {
-        return Err("Cell HMAC-SHA256 authentication verification failed".to_string());
-    }
-
     Ok((forward_key, backward_key, mac_key))
 }
 
-/// Encodes an EXTEND payload containing the next hop address and the client's ephemeral public key for that hop.
 pub fn encode_extend_payload(
     next_host: &str,
     next_port: u16,
@@ -371,7 +443,6 @@ pub fn encode_extend_payload(
     Ok(payload)
 }
 
-/// Decodes an EXTEND payload received by an intermediate relay.
 pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519PublicKey), String> {
     if payload.len() < 1 + 2 + 32 {
         return Err("EXTEND payload too short".to_string());
@@ -396,7 +467,6 @@ pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519Publi
     Ok((host, port, client_pub))
 }
 
-/// Encodes a RELAY payload instructing the exit relay to connect to target_host:target_port.
 pub fn encode_relay_target(target_host: &str, target_port: u16) -> Result<Vec<u8>, String> {
     let host_bytes = target_host.as_bytes();
     if host_bytes.len() > 255 {
@@ -409,7 +479,6 @@ pub fn encode_relay_target(target_host: &str, target_port: u16) -> Result<Vec<u8
     Ok(payload)
 }
 
-/// Decodes a RELAY payload received by an exit relay.
 pub fn decode_relay_target(payload: &[u8]) -> Result<(String, u16), String> {
     if payload.len() < 1 + 2 {
         return Err("RELAY target payload too short".to_string());
@@ -429,7 +498,6 @@ pub fn decode_relay_target(payload: &[u8]) -> Result<(String, u16), String> {
 
 pub type HandshakeKeys = ([u8; 32], [u8; 32], [u8; 32]);
 
-/// Simulates an X25519 key exchange between client and a relay.
 pub fn perform_client_relay_handshake() -> (HandshakeKeys, HandshakeKeys) {
     let client_secret = EphemeralSecret::random_from_rng(OsRng);
     let client_public = X25519PublicKey::from(&client_secret);
