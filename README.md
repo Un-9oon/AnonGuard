@@ -28,7 +28,15 @@ AnonGuard compiles cleanly with **zero Clippy warnings**, passes **all 20 integr
 
 ## 📦 Quick Installation & Pre-Built Packages
 
-Pre-compiled packages for all operating systems are available directly on the **[GitHub Releases](https://github.com/Un-9oon/AnonGuard/releases)** page.
+### 🚀 Automated 1-Line Interactive Setup Wizard (Easiest for Everyone)
+For non-technical users, run this single command in terminal. The wizard asks a few simple questions, automatically configures all files, installs dependencies, and launches the gateway:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Un-9oon/AnonGuard/main/install.sh | sudo bash
+```
+*(Or run without sudo to install locally into `~/.local/bin`)*
+
+---
 
 ### 🐧 Debian / Ubuntu / Kali / Mint (`.deb`)
 Download the `.deb` package and install it with `dpkg` or `apt`:
