@@ -101,6 +101,14 @@ struct Args {
     #[arg(long)]
     announce: Option<String>,
 
+    /// Allow open, unauthenticated plain SOCKS5 proxying when running in relay mode (off by default)
+    #[arg(long, default_value_t = false)]
+    allow_open_socks5: bool,
+
+    /// Allow exit relays to connect to private/loopback networks (off by default to prevent SSRF)
+    #[arg(long, default_value_t = false)]
+    allow_private_exit: bool,
+
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
     #[arg(long)]
     fetch_from: Option<String>,
@@ -166,6 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         authority_id: args.authority_id.clone(),
         directory_authorities,
         relay_mode: args.relay,
+        allow_open_socks5: args.allow_open_socks5,
+        allow_private_exit: args.allow_private_exit,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
         ..GuardConfig::default()
@@ -238,8 +248,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tokio::spawn(async move {
                 loop {
                     for endpoint in &auth_endpoints {
-                        let host_port = endpoint.trim_start_matches("http://");
-                        let pinned_key = if auth_keys.len() == 1 {
+                        let (auth_id_opt, raw_addr) =
+                            if let Some((id, addr)) = endpoint.split_once('@') {
+                                (Some(id.trim()), addr.trim())
+                            } else {
+                                (None, endpoint.as_str())
+                            };
+                        let host_port = raw_addr.trim_start_matches("http://");
+                        let pinned_key = if let Some(aid) = auth_id_opt {
+                            auth_keys.get(aid).or_else(|| auth_keys.get(host_port))
+                        } else if let Some(k) = auth_keys.get(host_port) {
+                            Some(k)
+                        } else if auth_keys.len() == 1 {
                             auth_keys.values().next()
                         } else {
                             auth_keys.get(endpoint)
@@ -254,6 +274,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 {
                                     Ok(mut session) => {
                                         if let Some(peer_vk) = session.peer_verifying_key() {
+                                            // Strictly reject any peer key that is not in the trusted authority set if authority keys were configured
+                                            if !auth_keys.is_empty()
+                                                && !auth_keys.values().any(|vk| vk == &peer_vk)
+                                            {
+                                                tracing::error!(
+                                                    endpoint = %endpoint,
+                                                    "Rejected Directory Authority: peer key is not in --authority-keys"
+                                                );
+                                                continue;
+                                            }
+
                                             if auth_keys.is_empty() {
                                                 auth_keys.insert(endpoint.clone(), peer_vk);
                                                 auth_keys

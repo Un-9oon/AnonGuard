@@ -105,10 +105,7 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
 
             let mut dir = directory.write().await;
             if let Some(existing) = dir.get(&node_id) {
-                if !existing.auth_token.is_empty()
-                    && !auth_token.is_empty()
-                    && existing.auth_token != auth_token
-                {
+                if !existing.auth_token.is_empty() && existing.auth_token != auth_token {
                     warn!(
                         "Rejected REGISTER_REVERSE for node {} (auth token mismatch/hijacking attempt)",
                         node_id
@@ -189,15 +186,11 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
         }
     } else if cmd.starts_with("GET /nodes") {
         let dir = directory.read().await;
-        // Return nodes that have at least 1 stream available
+        // Return active node IDs only — NEVER leak secret auth_tokens to unauthenticated discovery callers
         let mut nodes = Vec::new();
         for (id, entry) in dir.iter() {
             if !entry.streams.lock().await.is_empty() {
-                if !entry.auth_token.is_empty() {
-                    nodes.push(format!("{} {}", id, entry.auth_token));
-                } else {
-                    nodes.push(id.clone());
-                }
+                nodes.push(id.clone());
             }
         }
         nodes.sort();
@@ -279,5 +272,64 @@ mod tests {
         let mut err_resp = [0u8; 64];
         let n = attacker.read(&mut err_resp).await.unwrap();
         assert!(String::from_utf8_lossy(&err_resp[..n]).contains("ERROR_UNAUTHORIZED"));
+
+        // 4. Test REGISTER_REVERSE hijacking with empty token is strictly rejected
+        let listener4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr4 = listener4.local_addr().unwrap();
+        let dir_clone4 = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener4.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone4).await;
+        });
+
+        let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
+        let nonce_atk =
+            crate::mesh::sybil::solve_pow("node2", now, crate::mesh::sybil::DEFAULT_POW_DIFFICULTY);
+        let msg_atk = format!("REGISTER_REVERSE node2 {} {}\n", now, nonce_atk);
+        attacker2.write_all(msg_atk.as_bytes()).await.unwrap();
+        let mut err_resp2 = [0u8; 64];
+        let n2 = attacker2.read(&mut err_resp2).await.unwrap();
+        assert!(String::from_utf8_lossy(&err_resp2[..n2]).contains("ERROR_AUTH_TOKEN_MISMATCH"));
+
+        // 5. Test GET /nodes discovery NEVER leaks the secret auth_token
+        let listener5 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr5 = listener5.local_addr().unwrap();
+        let dir_clone5 = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener5.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone5).await;
+        });
+
+        let mut discoverer = TcpStream::connect(addr5).await.unwrap();
+        discoverer
+            .write_all(b"GET /nodes HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut disc_resp = [0u8; 512];
+        let nd = discoverer.read(&mut disc_resp).await.unwrap();
+        let disc_text = String::from_utf8_lossy(&disc_resp[..nd]);
+        assert!(disc_text.contains("node2"));
+        assert!(
+            !disc_text.contains("secret_auth_123"),
+            "GET /nodes must NEVER leak secret auth_token!"
+        );
+
+        // 6. Test authorized CONNECT_REVERSE succeeds with correct token
+        let listener6 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr6 = listener6.local_addr().unwrap();
+        let dir_clone6 = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener6.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone6).await;
+        });
+
+        let mut auth_client = TcpStream::connect(addr6).await.unwrap();
+        auth_client
+            .write_all(b"CONNECT_REVERSE node2 secret_auth_123\n")
+            .await
+            .unwrap();
+        let mut ok_resp = [0u8; 64];
+        let nok = auth_client.read(&mut ok_resp).await.unwrap();
+        assert!(String::from_utf8_lossy(&ok_resp[..nok]).contains("OK"));
     }
 }

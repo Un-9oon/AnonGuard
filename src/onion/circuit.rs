@@ -1,4 +1,4 @@
-//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and Poly1305 Authenticated Peeling.
+//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and HMAC-SHA256 Authenticated Peeling.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
@@ -8,7 +8,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 
-/// Per-hop cryptographic session state containing forward and backward ciphers plus Poly1305 MAC key.
+/// Per-hop cryptographic session state containing forward and backward ciphers plus HMAC-SHA256 MAC key.
 pub struct HopCryptState {
     pub forward_cipher: ChaCha20,
     pub backward_cipher: ChaCha20,
@@ -128,7 +128,7 @@ pub struct RelayCircuitHop {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PeelResult {
-    /// This cell is addressed directly to this relay with verified Poly1305 MAC.
+    /// This cell is addressed directly to this relay with verified HMAC-SHA256 MAC.
     AddressedToThisRelay(CellCommand, Vec<u8>),
     /// This cell belongs to downstream hops; forward the peeled raw buffer.
     ForwardDownstream(Box<[u8; ONION_CELL_SIZE]>),

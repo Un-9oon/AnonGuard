@@ -94,6 +94,14 @@ impl GatewayServer {
                     let mut peek_buf = [0u8; 1];
                     let is_socks5 = client.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
                     if is_socks5 {
+                        if !config.allow_open_socks5 {
+                            warn!(
+                                client = %client_addr,
+                                "Relay Mode: Rejected unauthenticated plain SOCKS5 proxy request on onion relay port (anti-abuse policy)"
+                            );
+                            return;
+                        }
+
                         let (target_host, target_port) =
                             match crate::gateway::chain::intercept_socks5_request(&mut client).await
                             {
@@ -106,6 +114,15 @@ impl GatewayServer {
                                     return;
                                 }
                             };
+
+                        let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
+                        if !exit_policy.is_permitted(&target_host, target_port) {
+                            error!(
+                                "Relay Mode: Target {}:{} blocked by Exit Policy (anti-SSRF)",
+                                target_host, target_port
+                            );
+                            return;
+                        }
 
                         let target_addr = format!("{}:{}", target_host, target_port);
                         match TcpStream::connect(&target_addr).await {
@@ -131,10 +148,12 @@ impl GatewayServer {
                         }
                     } else {
                         info!("Relay Mode: Processing incoming in-band Onion Cell connection");
+                        let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
                         let _ = handle_onion_relay_connection(
                             client,
                             Some(kill_switch.clone()),
                             jitter.clone(),
+                            Some(exit_policy),
                         )
                         .await;
                     }
@@ -730,8 +749,11 @@ pub async fn handle_onion_relay_connection(
     mut client: TcpStream,
     kill_switch: Option<KillSwitchController>,
     jitter: Option<JitterEngine>,
+    exit_policy: Option<crate::kernel::ExitPolicy>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let policy = exit_policy.unwrap_or_default();
 
     // 1. Read initial CREATE cell from client
     let mut initial_buf = [0u8; ONION_CELL_SIZE];
@@ -923,6 +945,13 @@ pub async fn handle_onion_relay_connection(
                         }
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
                             if let Ok((target_h, target_p)) = crate::onion::circuit::decode_relay_target(&payload) {
+                                if !policy.is_permitted(&target_h, target_p) {
+                                    error!(
+                                        "Exit relay policy blocked connection to restricted target {}:{} (anti-SSRF)",
+                                        target_h, target_p
+                                    );
+                                    break;
+                                }
                                 let target = format!("{}:{}", target_h, target_p);
                                 match TcpStream::connect(&target).await {
                                     Ok(target_s) => {

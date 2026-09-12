@@ -34,6 +34,10 @@ pub struct GuardConfig {
     pub max_chain_length: usize,
     /// Run as a native SOCKS5 relay node
     pub relay_mode: bool,
+    /// Allow open, unauthenticated plain SOCKS5 proxying when in relay mode (default: false for security)
+    pub allow_open_socks5: bool,
+    /// Allow exit relays to connect to private/loopback networks (default: false to prevent SSRF)
+    pub allow_private_exit: bool,
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
     /// Enable 3-hop layered onion encryption (Sphinx/Tor-style cell peeling)
@@ -69,6 +73,8 @@ impl Default for GuardConfig {
             min_chain_length: 1,
             max_chain_length: 3,
             relay_mode: false,
+            allow_open_socks5: false,
+            allow_private_exit: false,
             reverse_relay_mode: false,
             tracker_url: None,
             enable_onion_routing: false,

@@ -1,4 +1,4 @@
-//! Onion Routing Subsystem with Poly1305 Authenticated Layered Encryption.
+//! Onion Routing Subsystem with HMAC-SHA256 Authenticated Layered Encryption.
 
 pub mod cell;
 pub mod circuit;
@@ -251,7 +251,7 @@ mod tests {
                             .expect("Exit peel error");
                         match peel_exit {
                             PeelResult::AddressedToThisRelay(cmd, data) => {
-                                // Exit verifies Poly1305 MAC and extracts payload!
+                                // Exit verifies HMAC-SHA256 MAC and extracts payload!
                                 assert_eq!(cmd, CellCommand::Data);
                                 assert_eq!(data.as_slice(), secret_payload);
                             }

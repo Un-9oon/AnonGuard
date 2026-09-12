@@ -35,7 +35,7 @@ impl CellCommand {
     }
 }
 
-/// A constant-size 1024-byte cell with a 16-byte Poly1305 MAC tag preventing bit-flipping/tagging.
+/// A constant-size 1024-byte cell with a 16-byte HMAC-SHA256 MAC tag preventing bit-flipping/tagging.
 #[derive(Clone)]
 pub struct OnionCell {
     pub circuit_id: u32,

@@ -20,12 +20,18 @@ async fn test_live_inband_telescopic_circuit_e2e() {
             .unwrap();
     });
 
-    // 2. Spawn Hop 2 (Exit)
+    // 2. Spawn Hop 2 (Exit) - allow private network for local test harness
     let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let exit_addr = exit_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = exit_listener.accept().await.unwrap();
-        let _ = handle_onion_relay_connection(s, None, None).await;
+        let _ = handle_onion_relay_connection(
+            s,
+            None,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+        )
+        .await;
     });
 
     // 3. Spawn Hop 1 (Middle)
@@ -33,7 +39,7 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let middle_addr = middle_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = middle_listener.accept().await.unwrap();
-        let _ = handle_onion_relay_connection(s, None, None).await;
+        let _ = handle_onion_relay_connection(s, None, None, None).await;
     });
 
     // 4. Spawn Hop 0 (Guard)
@@ -41,7 +47,7 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let guard_addr = guard_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = guard_listener.accept().await.unwrap();
-        let _ = handle_onion_relay_connection(s, None, None).await;
+        let _ = handle_onion_relay_connection(s, None, None, None).await;
     });
 
     // 5. Build ProxyNode chain for client
@@ -84,5 +90,34 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     assert_eq!(
         &resp_cell.payload[..len],
         b"HTTP/1.1 200 OK\r\n\r\nONION_E2E_VERIFIED"
+    );
+}
+
+#[tokio::test]
+async fn test_exit_policy_blocks_ssrf_live() {
+    // Exit node spawned with default ExitPolicy (blocking loopback/private/metadata)
+    let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit_addr = exit_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = exit_listener.accept().await.unwrap();
+        let _ = handle_onion_relay_connection(
+            s,
+            None,
+            None,
+            Some(anonguard::kernel::ExitPolicy::default()),
+        )
+        .await;
+    });
+
+    let chain = vec![ProxyNode::parse(&format!("socks5://{}", exit_addr)).unwrap()];
+    let mut guard_stream = TcpStream::connect(exit_addr).await.unwrap();
+    let circuit_id = 0x99887766;
+
+    // Attempting to bridge to loopback (127.0.0.1) must be rejected by default exit policy
+    let res =
+        build_telescopic_circuit(&mut guard_stream, circuit_id, &chain, "127.0.0.1", 8080).await;
+    assert!(
+        res.is_err(),
+        "Exit node should reject connecting to 127.0.0.1 under default exit policy"
     );
 }
