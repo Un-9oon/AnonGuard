@@ -19,6 +19,9 @@ pub struct GuardConfig {
     pub chaos_sigma: f64,
     pub chaos_rho: f64,
     pub chaos_beta: f64,
+    /// Enable Quantum Chaos (RMT) Morphing
+    pub enable_quantum: bool,
+    pub quantum_ensemble: String,
     /// Enable MTU chunk padding
     pub enable_padding: bool,
     /// Padding block size in bytes (e.g. 512, 1024, 1460)
@@ -49,6 +52,8 @@ impl Default for GuardConfig {
             chaos_sigma: 10.0,
             chaos_rho: 28.0,
             chaos_beta: 8.0 / 3.0,
+            enable_quantum: false,
+            quantum_ensemble: "goe".to_string(),
             enable_padding: false,
             padding_block_size: 512,
             ja4_profile: "chrome_120".to_string(),

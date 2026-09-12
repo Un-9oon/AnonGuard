@@ -1,4 +1,4 @@
-use crate::morphing::{LorenzAttractor, PoissonJitter};
+use crate::morphing::{LorenzAttractor, PoissonJitter, QuantumRmtEngine};
 use rand::Rng;
 use std::io::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub enum JitterEngine {
     Poisson(PoissonJitter),
     Chaos(LorenzAttractor),
+    Quantum(QuantumRmtEngine),
 }
 
 /// A continuous stream morphing engine that replaces `tokio::io::copy_bidirectional`.
@@ -46,6 +47,10 @@ where
                                 rand::thread_rng().gen_range(50..=std::cmp::min(data.len(), 1500))
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
+                            JitterEngine::Quantum(q) => {
+                                let target = q.next_chunk_size();
+                                std::cmp::min(target, data.len())
+                            }
                         };
                         let (chunk, rest) = data.split_at(std::cmp::min(shard_len, data.len()));
                         data = rest;
@@ -53,6 +58,10 @@ where
                         match &j1 {
                             JitterEngine::Poisson(p) => p.apply().await,
                             JitterEngine::Chaos(c) => c.apply_delay().await,
+                            JitterEngine::Quantum(q) => {
+                                let delay = q.next_delay_us();
+                                tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+                            }
                         }
                         if b_write.write_all(chunk).await.is_err() {
                             break;
@@ -80,6 +89,10 @@ where
                                 rand::thread_rng().gen_range(50..=std::cmp::min(data.len(), 1500))
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
+                            JitterEngine::Quantum(q) => {
+                                let target = q.next_chunk_size();
+                                std::cmp::min(target, data.len())
+                            }
                         };
                         let (chunk, rest) = data.split_at(std::cmp::min(shard_len, data.len()));
                         data = rest;
@@ -87,6 +100,10 @@ where
                         match &j2 {
                             JitterEngine::Poisson(p) => p.apply().await,
                             JitterEngine::Chaos(c) => c.apply_delay().await,
+                            JitterEngine::Quantum(q) => {
+                                let delay = q.next_delay_us();
+                                tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+                            }
                         }
                         if a_write.write_all(chunk).await.is_err() {
                             break;

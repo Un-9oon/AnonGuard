@@ -49,6 +49,14 @@ struct Args {
     #[arg(long, default_value_t = 2.666666)]
     chaos_beta: f64,
 
+    /// Enable Quantum Random Matrix Theory (Q-RMT) Morphing
+    #[arg(long, default_value_t = false)]
+    quantum: bool,
+
+    /// Quantum Ensemble type: "goe" (Orthogonal) or "gue" (Unitary)
+    #[arg(long, default_value = "goe")]
+    quantum_ensemble: String,
+
     /// Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
     #[arg(short, long, default_value_t = false)]
     relay: bool,
@@ -89,6 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     config.chaos_sigma = args.chaos_sigma;
     config.chaos_rho = args.chaos_rho;
     config.chaos_beta = args.chaos_beta;
+    config.enable_quantum = args.quantum;
+    config.quantum_ensemble = args.quantum_ensemble;
     config.relay_mode = args.relay;
     config.reverse_relay_mode = args.reverse_relay;
     config.tracker_url = args.fetch_from.clone();

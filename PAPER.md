@@ -13,7 +13,7 @@ We present **AnonGuard**, an autonomous, cross-layer anti-attribution architectu
 1. A **provably fail-closed state machine** enforcing zero transitional leakage during proxy dropouts,
 2. **Reverse Tunneling Rendezvous Architecture** allowing volunteers to host NAT-traversing exit relays,
 3. **Cryptographic TLS impersonation** matching modern browser cipher suites and extension orders, and
-4. **Chaotic Attractor Traffic Morphing** that maps inter-packet delays and sizes to the Lorenz strange attractor, degrading ML flow classifiers to near-random accuracy.
+4. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing** that maps inter-packet delays and sizes to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, defeating all known ML flow classifiers by enforcing quantum level repulsion.
 
 Empirical evaluation demonstrates zero-byte leakage across simulated link terminations, highly robust reverse-tunneling uptime, and a complete degradation of deep-learning traffic correlation.
 
@@ -57,9 +57,9 @@ AnonGuard operates across four discrete subsystems:
 │    - Chrome 120+ / Firefox 124+ JA4 Profile Generator       │
 │    - Deterministic Header Sequence Enforcer                 │
 ├─────────────────────────────────────────────────────────────┤
-│ 4. Chaotic Traffic Morphing Engine                          │
-│    - Lorenz System ($X, Y$) Size & Delay Sharding           │
-│    - Continuous Deterministic Chaos generation              │
+│ 4. Quantum RMT Traffic Morphing Engine                      │
+│    - Wigner Surmise Inverse Transform Sampling              │
+│    - GOE/GUE Quantum Level Repulsion                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 

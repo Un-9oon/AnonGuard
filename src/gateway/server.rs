@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
-use crate::morphing::{morph_bidirectional, JitterEngine, LorenzAttractor, PoissonJitter};
+use crate::morphing::{PoissonJitter, LorenzAttractor, QuantumRmtEngine, QuantumEnsemble, JitterEngine, morph_bidirectional};
 
 pub struct GatewayServer {
     config: GuardConfig,
@@ -17,7 +17,14 @@ pub struct GatewayServer {
 
 impl GatewayServer {
     pub fn new(config: GuardConfig, pool: ProxyPool, kill_switch: KillSwitchController) -> Self {
-        let jitter = if config.enable_chaos {
+        let jitter = if config.enable_quantum {
+            let ensemble = if config.quantum_ensemble.to_lowercase() == "gue" {
+                QuantumEnsemble::GUE
+            } else {
+                QuantumEnsemble::GOE
+            };
+            Some(JitterEngine::Quantum(QuantumRmtEngine::new(ensemble, 1.5, 1024)))
+        } else if config.enable_chaos {
             Some(JitterEngine::Chaos(LorenzAttractor::new(
                 config.chaos_sigma,
                 config.chaos_rho,
