@@ -77,19 +77,20 @@ To prevent intermediate relays from inspecting stream contents, AnonGuard enforc
 
 ### Cell Specification
 - **Cell Size:** Strictly fixed at 1024 bytes ($C = 1024$).
-- **Header (13 bytes):** `CircuitID` (4B) $\|$ `Command` (1B) $\|$ `StreamID` (2B) $\|$ `Length` (2B) $\|$ `Digest` (4B).
-- **Payload (1011 bytes):** Padded with deterministic pseudorandom noise.
+- **Header (25 bytes):** `CircuitID` (4B) $\|$ `Command` (1B) $\|$ `StreamID` (2B) $\|$ `Length` (2B) $\|$ `Poly1305 MAC` (16B).
+- **Payload (999 bytes):** Padded with deterministic pseudorandom noise.
 
 ### Key Agreement & Peeling
 For each 3-hop circuit $(R_1, R_2, R_3)$:
 1. Client establishes ephemeral shared secrets $(S_1, S_2, S_3)$ via X25519 Diffie-Hellman.
-2. Symmetric forward and backward keys are derived:
-   $$K_{f, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Forward-Key-v1"} \,\|\, i)$$
-   $$K_{b, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Backward-Key-v1"} \,\|\, i)$$
+2. Symmetric forward, backward, and Poly1305 MAC keys are derived:
+   $$K_{f, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Forward-Key-v2"} \,\|\, i)$$
+   $$K_{b, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Backward-Key-v2"} \,\|\, i)$$
+   $$K_{m, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Poly1305-MAC-Key-v2"} \,\|\, i)$$
 3. **Forward Wrapping:** At the client:
    $$\text{WireCell} = E_{K_{f, 1}}\Big(E_{K_{f, 2}}\big(E_{K_{f, 3}}(\text{Cell})\big)\Big)$$
-4. **Relay Peeling:**
-   Each relay applies its keystream: $D_{K_{f, i}}(\text{Buffer})$. If the 4-byte digest matches, the cell terminates at this relay; otherwise, the peeled buffer is forwarded downstream.
+4. **Relay Peeling & Non-Malleability Verification:**
+   Each relay applies its forward keystream: $D_{K_{f, i}}(\text{Buffer})$. The relay validates the 16-byte Poly1305 MAC using $K_{m, i}$ in constant-time ($O(1)$). If valid, the cell is authentic and addressed to this relay; otherwise, the peeled buffer is forwarded downstream. Cells with invalid MACs or bit-flip manipulations are rejected, defeating cell tagging attacks.
 
 ---
 
@@ -133,7 +134,9 @@ $$s = \sqrt{-\frac{4}{\pi} \ln(1 - u)}, \quad u \sim \mathcal{U}(0, 1)$$
 
 ## 6. Empirical Evaluation & Degradation Benchmarks
 
-We evaluated AnonGuard against an automated 10-class Website Fingerprinting testbed using 1D Convolutional Neural Networks and k-NN classifiers on packet sequences.
+We evaluated AnonGuard across two complementary methodologies:
+1. **Mathematical Simulation Testbed (`eval/evaluate_classifier.py`):** Generates closed-world packet sequences under controlled traffic models to evaluate theoretical mutual information bounds and classifier degradation.
+2. **Physical PCAP Testbed (`eval/real_pcap_collector.py`):** Connects a real browser and HTTP client through the live `anonguard-daemon` SOCKS5 gateway (`127.0.0.1:9050`) while using `tshark`/`tcpdump` to capture live physical network packets, parsing inter-arrival times and packet lengths from real-world network interfaces.
 
 ### Empirical Results Table
 

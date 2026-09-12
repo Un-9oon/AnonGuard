@@ -3,12 +3,12 @@
 > **A Military-Grade, Research-Backed Decentralized Anonymity Network built in Rust.**  
 > Designed to defeat state-level traffic analysis, AI-driven flow correlation, and website fingerprinting attacks.
 
-[![Build](https://img.shields.io/badge/build-passing-brightgreen)](#)
+[![Build](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml)
 [![Language](https://img.shields.io/badge/language-Rust-orange)](#)
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#)
 [![Research](https://img.shields.io/badge/research-Oxford%20PhD-purple)](#)
 [![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](#)
-[![Tests](https://img.shields.io/badge/tests-20%20passing-brightgreen)](#)
+[![Tests](https://img.shields.io/badge/tests-21%20passing-brightgreen)](#)
 
 ---
 
@@ -16,10 +16,10 @@
 
 AnonGuard is an advanced **defense-grade anonymity gateway** combining cutting-edge theoretical physics and robust cryptographic routing:
 
-1. **Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, per-hop X25519 Diffie-Hellman key exchange, and ChaCha20-Poly1305 forward peeling & reverse wrapping. No relay ever sees both source and destination.
+1. **Layered Onion Cryptography (3-Hop Circuit Routing)** — Constant 1024-byte cells, per-hop X25519 Diffie-Hellman key exchange, ChaCha20 stream peeling, and **16-byte Poly1305 Message Authentication Codes (MAC)** verified in constant-time at every hop to prevent bit-flipping and cell tagging attacks. No relay ever sees both source and destination.
 2. **Quantum Random Matrix Theory (Q-RMT) Traffic Morphing** — Utilizes Eugene Wigner's **Wigner Surmise** to produce eigenvalue level repulsion $P(s \to 0) = 0$, mathematically disrupting Deep Learning feature representations in constant $O(1)$ time.
 3. **Distributed Multi-Authority Consensus** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures.
-4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges alongside BGP `/16` CIDR subnet diversity isolation across circuit hops.
+4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges across all tracker endpoints alongside BGP `/16` CIDR subnet diversity isolation across circuit hops.
 5. **Authenticated Cryptographic Framing** — Ephemeral X25519 + ChaCha20 stream framing completely replacing plaintext HTTP for all node registrations and directory operations.
 
 AnonGuard compiles cleanly with **zero Clippy warnings**, passes **all 20 integration & unit tests**, and is cross-platform (Linux, macOS, Windows).
@@ -108,10 +108,16 @@ On any Debian/Ubuntu system, build your own signed `.deb` package in seconds:
 
 ## Empirical ML Degradation Benchmark Results
 
-We conducted empirical evaluations against deep learning traffic classifiers (Deep Fingerprinting / CNN, Multi-Layer Perceptrons, and k-NN) across 10 closed-world website categories:
+AnonGuard provides two complementary evaluation tools for Website Fingerprinting (WF) analysis:
+1. **Mathematical Simulation Harness (`eval/evaluate_classifier.py`):** Generates closed-world packet arrival streams across 10 site archetypes to evaluate the theoretical bounds of Wigner surmise level repulsion against deep neural networks.
+2. **Physical Network PCAP Collector (`eval/real_pcap_collector.py`):** Uses `tshark`/`tcpdump` to capture live physical network traces driven by browser requests through the active `anonguard-daemon` SOCKS5 gateway (`127.0.0.1:9050`).
 
-```
+```bash
+# Run mathematical simulation benchmark
 python3 eval/evaluate_classifier.py
+
+# Collect physical network PCAPs through live gateway
+python3 eval/real_pcap_collector.py --interface lo --proxy-port 9050
 ```
 
 | Defense Strategy | Neural Top-1 | Neural Top-3 | k-NN Acc | Mutual Info $I(X; Y)$ | Security Guarantee |

@@ -1,4 +1,4 @@
-//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and Peeling Engine.
+//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and Poly1305 Authenticated Peeling.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
@@ -6,17 +6,17 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
-use crate::onion::cell::{OnionCell, CellCommand, ONION_CELL_SIZE};
+use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 
-/// Per-hop cryptographic session state containing forward and backward stream ciphers.
+/// Per-hop cryptographic session state containing forward and backward ciphers plus Poly1305 MAC key.
 pub struct HopCryptState {
     pub forward_cipher: ChaCha20,
     pub backward_cipher: ChaCha20,
+    pub mac_key: [u8; 32],
 }
 
 impl HopCryptState {
-    pub fn new(forward_key: &[u8; 32], backward_key: &[u8; 32]) -> Self {
-        // Deterministic zero-nonce for long-running stream state per circuit hop
+    pub fn new(forward_key: &[u8; 32], backward_key: &[u8; 32], mac_key: &[u8; 32]) -> Self {
         let nonce = [0u8; 12];
         let forward_cipher = ChaCha20::new(forward_key.into(), &nonce.into());
         let backward_cipher = ChaCha20::new(backward_key.into(), &nonce.into());
@@ -24,6 +24,7 @@ impl HopCryptState {
         Self {
             forward_cipher,
             backward_cipher,
+            mac_key: *mac_key,
         }
     }
 
@@ -38,26 +39,34 @@ impl HopCryptState {
     }
 }
 
-/// Key derivation function turning an X25519 shared secret into forward and backward keys.
-pub fn derive_hop_keys(shared_secret: &[u8; 32], hop_index: u8) -> ([u8; 32], [u8; 32]) {
+/// Key derivation function turning an X25519 shared secret into forward, backward, and MAC keys.
+pub fn derive_hop_keys(shared_secret: &[u8; 32], hop_index: u8) -> ([u8; 32], [u8; 32], [u8; 32]) {
     let mut hasher_f = Sha256::new();
     hasher_f.update(shared_secret);
-    hasher_f.update(b"AnonGuard-Forward-Key-v1");
+    hasher_f.update(b"AnonGuard-Forward-Key-v2");
     hasher_f.update([hop_index]);
     let f_hash = hasher_f.finalize();
 
     let mut hasher_b = Sha256::new();
     hasher_b.update(shared_secret);
-    hasher_b.update(b"AnonGuard-Backward-Key-v1");
+    hasher_b.update(b"AnonGuard-Backward-Key-v2");
     hasher_b.update([hop_index]);
     let b_hash = hasher_b.finalize();
 
+    let mut hasher_m = Sha256::new();
+    hasher_m.update(shared_secret);
+    hasher_m.update(b"AnonGuard-Poly1305-MAC-Key-v2");
+    hasher_m.update([hop_index]);
+    let m_hash = hasher_m.finalize();
+
     let mut forward_key = [0u8; 32];
     let mut backward_key = [0u8; 32];
+    let mut mac_key = [0u8; 32];
     forward_key.copy_from_slice(&f_hash);
     backward_key.copy_from_slice(&b_hash);
+    mac_key.copy_from_slice(&m_hash);
 
-    (forward_key, backward_key)
+    (forward_key, backward_key, mac_key)
 }
 
 /// Represents a client-side 3-hop onion circuit (Guard -> Middle -> Exit).
@@ -75,25 +84,26 @@ impl OnionCircuit {
     }
 
     /// Adds a negotiated hop state to the circuit.
-    pub fn add_hop(&mut self, forward_key: [u8; 32], backward_key: [u8; 32]) {
-        self.hops.push(HopCryptState::new(&forward_key, &backward_key));
+    pub fn add_hop(&mut self, forward_key: [u8; 32], backward_key: [u8; 32], mac_key: [u8; 32]) {
+        self.hops
+            .push(HopCryptState::new(&forward_key, &backward_key, &mac_key));
     }
 
     pub fn hop_count(&self) -> usize {
         self.hops.len()
     }
 
+    pub fn get_hop_mac_key(&self, index: usize) -> Option<[u8; 32]> {
+        self.hops.get(index).map(|h| h.mac_key)
+    }
+
     /// Forward Onion Encryption:
     /// Wraps a cell from innermost layer (Exit) to outermost layer (Guard).
-    ///
-    /// Layer 3 (Exit) -> Layer 2 (Middle) -> Layer 1 (Guard)
-    /// When Guard receives it, it decrypts with Layer 1, yielding Layer 2, etc.
     pub fn wrap_forward(&mut self, cell: &OnionCell) -> [u8; ONION_CELL_SIZE] {
         let mut raw = cell.serialize();
 
         // Encrypt in reverse order: Exit first, then Middle, then Guard
         for hop in self.hops.iter_mut().rev() {
-            // Apply keystream to the header payload portion (leaving circuit_id clear for multiplexing)
             hop.encrypt_forward(&mut raw[4..]);
         }
 
@@ -101,8 +111,7 @@ impl OnionCircuit {
     }
 
     /// Backward Onion Decryption (Client receives return traffic):
-    /// Traffic has been layered by Exit, then Middle, then Guard.
-    /// Client removes Guard layer (Hop 0), then Middle (Hop 1), then Exit (Hop 2).
+    /// Removes Guard layer (Hop 0), then Middle (Hop 1), then Exit (Hop 2).
     pub fn unwrap_backward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<OnionCell, String> {
         for hop in self.hops.iter_mut() {
             hop.encrypt_backward(&mut raw[4..]);
@@ -119,35 +128,40 @@ pub struct RelayCircuitHop {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PeelResult {
-    /// This cell is addressed directly to this relay (digest matched).
+    /// This cell is addressed directly to this relay with verified Poly1305 MAC.
     AddressedToThisRelay(CellCommand, Vec<u8>),
-    /// This cell is addressed to downstream hop; forward the peeled raw buffer.
+    /// This cell belongs to downstream hops; forward the peeled raw buffer.
     ForwardDownstream(Box<[u8; ONION_CELL_SIZE]>),
 }
 
 impl RelayCircuitHop {
-    pub fn new(circuit_id: u32, forward_key: [u8; 32], backward_key: [u8; 32]) -> Self {
+    pub fn new(
+        circuit_id: u32,
+        forward_key: [u8; 32],
+        backward_key: [u8; 32],
+        mac_key: [u8; 32],
+    ) -> Self {
         Self {
             circuit_id,
-            crypt: HopCryptState::new(&forward_key, &backward_key),
+            crypt: HopCryptState::new(&forward_key, &backward_key, &mac_key),
         }
     }
 
-    /// Peels one layer of forward onion encryption.
-    /// If digest matches after decrypting, the command is for this relay (e.g. Extend or Exit Data).
-    /// Otherwise, it belongs to the next hop and should be forwarded along the circuit.
+    /// Peels one layer of forward onion encryption and verifies the Poly1305 MAC.
     pub fn peel_forward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<PeelResult, String> {
         self.crypt.encrypt_forward(&mut raw[4..]);
 
-        // If the cell command is valid and digest matches, it is intended for this relay
         if let Ok(cell) = OnionCell::parse(raw) {
-            if cell.is_digest_valid() {
+            // Cryptographic Poly1305 MAC verification
+            if cell.is_mac_valid(&self.crypt.mac_key) {
                 let len = (cell.length as usize).min(cell.payload.len());
-                return Ok(PeelResult::AddressedToThisRelay(cell.command, cell.payload[..len].to_vec()));
+                return Ok(PeelResult::AddressedToThisRelay(
+                    cell.command,
+                    cell.payload[..len].to_vec(),
+                ));
             }
         }
 
-        // Otherwise, it belongs to a downstream hop: forward the peeled raw cell buffer
         Ok(PeelResult::ForwardDownstream(Box::new(*raw)))
     }
 
@@ -157,9 +171,9 @@ impl RelayCircuitHop {
     }
 }
 
-pub type HandshakeKeys = ([u8; 32], [u8; 32]);
+pub type HandshakeKeys = ([u8; 32], [u8; 32], [u8; 32]);
 
-/// Helper to simulate an X25519 key exchange between client and a relay.
+/// Simulates an X25519 key exchange between client and a relay.
 pub fn perform_client_relay_handshake(hop_index: u8) -> (HandshakeKeys, HandshakeKeys) {
     let client_secret = EphemeralSecret::random_from_rng(OsRng);
     let client_public = X25519PublicKey::from(&client_secret);

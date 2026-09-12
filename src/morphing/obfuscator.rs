@@ -10,6 +10,19 @@ pub enum JitterEngine {
     Quantum(QuantumRmtEngine),
 }
 
+impl JitterEngine {
+    pub async fn apply_delay(&self) {
+        match self {
+            JitterEngine::Poisson(p) => p.apply().await,
+            JitterEngine::Chaos(c) => c.apply_delay().await,
+            JitterEngine::Quantum(q) => {
+                let delay = q.next_delay_us();
+                tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+            }
+        }
+    }
+}
+
 /// A continuous stream morphing engine that replaces `tokio::io::copy_bidirectional`.
 /// It shards data into random chunks and injects Poisson delays to defeat timing correlation.
 pub async fn morph_bidirectional<A, B>(

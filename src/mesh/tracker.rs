@@ -47,9 +47,42 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
 
     if cmd.starts_with("REGISTER_REVERSE") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if parts.len() >= 2 {
+        if parts.len() >= 4 {
             let node_id = parts[1].to_string();
-            info!("Registered reverse connection for Node: {}", node_id);
+            let timestamp: u64 = match parts[2].parse() {
+                Ok(ts) => ts,
+                Err(_) => {
+                    warn!("Invalid timestamp in REGISTER_REVERSE: {}", parts[2]);
+                    use tokio::io::AsyncWriteExt;
+                    let mut s = reader.into_inner();
+                    let _ = s.write_all(b"ERROR_INVALID_TIMESTAMP\n").await;
+                    return Ok(());
+                }
+            };
+            let nonce: u64 = match parts[3].parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    warn!("Invalid nonce in REGISTER_REVERSE: {}", parts[3]);
+                    use tokio::io::AsyncWriteExt;
+                    let mut s = reader.into_inner();
+                    let _ = s.write_all(b"ERROR_INVALID_NONCE\n").await;
+                    return Ok(());
+                }
+            };
+
+            let now = crate::mesh::sybil::current_timestamp_secs();
+            if !crate::mesh::sybil::verify_pow(&node_id, timestamp, nonce, 12, now) {
+                warn!(
+                    "Rejected unauthenticated REGISTER_REVERSE for node {} (invalid PoW)",
+                    node_id
+                );
+                use tokio::io::AsyncWriteExt;
+                let mut s = reader.into_inner();
+                let _ = s.write_all(b"ERROR_INVALID_POW\n").await;
+                return Ok(());
+            }
+
+            info!("Registered reverse connection for authenticated Node: {}", node_id);
 
             // Extract the underlying stream out of the BufReader
             let raw_stream = reader.into_inner();
@@ -59,6 +92,12 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
                 .entry(node_id)
                 .or_insert_with(|| Arc::new(Mutex::new(Vec::new())));
             pool.lock().await.push(raw_stream);
+        } else {
+            warn!("Rejected malformed REGISTER_REVERSE (missing PoW credentials)");
+            use tokio::io::AsyncWriteExt;
+            let mut s = reader.into_inner();
+            let _ = s.write_all(b"ERROR_POW_REQUIRED\n").await;
+            return Ok(());
         }
     } else if cmd.starts_with("CONNECT_REVERSE") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -114,4 +153,50 @@ async fn handle_connection(stream: TcpStream, directory: Directory) -> std::io::
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn test_tracker_pow_authentication() {
+        let directory: Directory = Arc::new(RwLock::new(HashMap::new()));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let dir_clone = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone).await;
+        });
+
+        // 1. Send unauthenticated registration without PoW
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(b"REGISTER_REVERSE node1\n").await.unwrap();
+        let mut resp = [0u8; 64];
+        let n = client.read(&mut resp).await.unwrap();
+        assert!(String::from_utf8_lossy(&resp[..n]).contains("ERROR_POW_REQUIRED"));
+
+        // 2. Send registration with valid PoW
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let dir_clone2 = directory.clone();
+        tokio::spawn(async move {
+            let (stream, _) = listener2.accept().await.unwrap();
+            let _ = handle_connection(stream, dir_clone2).await;
+        });
+
+        let mut client2 = TcpStream::connect(addr2).await.unwrap();
+        let now = crate::mesh::sybil::current_timestamp_secs();
+        let nonce = crate::mesh::sybil::solve_pow("node2", now, 12);
+        let msg = format!("REGISTER_REVERSE node2 {} {}\n", now, nonce);
+        client2.write_all(msg.as_bytes()).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let dir = directory.read().await;
+        assert!(dir.contains_key("node2"));
+        assert_eq!(dir.get("node2").unwrap().lock().await.len(), 1);
+    }
 }

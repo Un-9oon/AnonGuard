@@ -7,6 +7,10 @@ use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
 use crate::morphing::{PoissonJitter, LorenzAttractor, QuantumRmtEngine, QuantumEnsemble, JitterEngine, morph_bidirectional};
+use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
+use crate::onion::circuit::{derive_hop_keys, OnionCircuit};
+use rand::rngs::OsRng;
+use x25519_dalek::EphemeralSecret;
 
 pub struct GatewayServer {
     config: GuardConfig,
@@ -235,9 +239,42 @@ impl GatewayServer {
                             target_host,
                             target_port
                         );
-                        let _ =
-                            morph_bidirectional(&mut client, &mut upstream_stream, jitter.clone())
-                                .await;
+
+                        if config.enable_onion_routing {
+                            let circuit_id: u32 = rand::random();
+                            let mut circuit = OnionCircuit::new(circuit_id);
+                            let mut exit_mac = [0u8; 32];
+                            for hop_idx in 0..chain.len() {
+                                let client_secret = EphemeralSecret::random_from_rng(OsRng);
+                                let hop_secret = EphemeralSecret::random_from_rng(OsRng);
+                                let pub_hop = x25519_dalek::PublicKey::from(&hop_secret);
+                                let shared = client_secret.diffie_hellman(&pub_hop);
+                                let (fwd, bwd, mac) = derive_hop_keys(shared.as_bytes(), hop_idx as u8);
+                                if hop_idx == chain.len() - 1 {
+                                    exit_mac = mac;
+                                }
+                                circuit.add_hop(fwd, bwd, mac);
+                            }
+
+                            info!(
+                                circuit_id = circuit_id,
+                                hops = chain.len(),
+                                "Activating 3-hop layered ChaCha20/Poly1305 onion encryption on tunnel"
+                            );
+
+                            let _ = stream_onion_circuit(
+                                &mut client,
+                                &mut upstream_stream,
+                                circuit,
+                                exit_mac,
+                                jitter.clone(),
+                            )
+                            .await;
+                        } else {
+                            let _ =
+                                morph_bidirectional(&mut client, &mut upstream_stream, jitter.clone())
+                                    .await;
+                        }
                     }
                 }
             });
@@ -263,7 +300,9 @@ impl GatewayServer {
                     match TcpStream::connect(&hp).await {
                         Ok(mut stream) => {
                             use tokio::io::AsyncWriteExt;
-                            let payload = format!("REGISTER_REVERSE {}\n", nid);
+                            let now = crate::mesh::sybil::current_timestamp_secs();
+                            let nonce = crate::mesh::sybil::solve_pow(&nid, now, 12);
+                            let payload = format!("REGISTER_REVERSE {} {} {}\n", nid, now, nonce);
                             if stream.write_all(payload.as_bytes()).await.is_ok() {
                                 // Wait for the tracker to send data (meaning a client has connected to this stream)
                                 // We peek 1 byte to see if data arrived. If so, it's a SOCKS5 client!
@@ -322,4 +361,114 @@ impl GatewayServer {
         std::future::pending::<()>().await;
         Ok(())
     }
+}
+
+/// Streams bidirectional client TCP traffic over an authenticated 3-hop OnionCircuit.
+/// Outbound traffic is chunked into <= 999 byte slices, encapsulated into 1024-byte OnionCells,
+/// wrapped in 3 layers of ChaCha20 encryption with a 16-byte Poly1305 MAC, and sent upstream.
+/// Inbound traffic is read in 1024-byte cells, unwrapped across all 3 layers, verified with Poly1305,
+/// and forwarded to the local client.
+pub async fn stream_onion_circuit(
+    client: &mut TcpStream,
+    upstream: &mut TcpStream,
+    circuit: OnionCircuit,
+    exit_mac_key: [u8; 32],
+    jitter: Option<JitterEngine>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::Mutex;
+
+    let circuit = Arc::new(Mutex::new(circuit));
+    let (mut client_read, mut client_write) = client.split();
+    let (mut upstream_read, mut upstream_write) = upstream.split();
+
+    let circuit_fwd = circuit.clone();
+    let jitter_fwd = jitter.clone();
+    let exit_mac_fwd = exit_mac_key;
+
+    let fwd = async move {
+        let mut buf = [0u8; PAYLOAD_SIZE];
+        let stream_id = 1u16;
+        loop {
+            let n = match client_read.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+
+            let cell = {
+                let guard = circuit_fwd.lock().await;
+                OnionCell::new(
+                    guard.circuit_id,
+                    CellCommand::Data,
+                    stream_id,
+                    &buf[..n],
+                    &exit_mac_fwd,
+                )
+            };
+
+            let wire_buffer = {
+                let mut guard = circuit_fwd.lock().await;
+                guard.wrap_forward(&cell)
+            };
+
+            if let Some(ref j) = jitter_fwd {
+                j.apply_delay().await;
+            }
+
+            if upstream_write.write_all(&wire_buffer).await.is_err() {
+                break;
+            }
+        }
+        let _ = upstream_write.shutdown().await;
+    };
+
+    let circuit_bwd = circuit.clone();
+    let exit_mac_bwd = exit_mac_key;
+    let bwd = async move {
+        let mut wire_buffer = [0u8; ONION_CELL_SIZE];
+        loop {
+            if upstream_read.read_exact(&mut wire_buffer).await.is_err() {
+                break;
+            }
+
+            let cell_res = {
+                let mut guard = circuit_bwd.lock().await;
+                guard.unwrap_backward(&mut wire_buffer)
+            };
+
+            match cell_res {
+                Ok(cell) => {
+                    if !cell.is_mac_valid(&exit_mac_bwd) {
+                        warn!("Dropped return onion cell: Poly1305 MAC tag mismatch");
+                        continue;
+                    }
+
+                    match cell.command {
+                        CellCommand::Data => {
+                            let len = (cell.length as usize).min(cell.payload.len());
+                            if client_write.write_all(&cell.payload[..len]).await.is_err() {
+                                break;
+                            }
+                        }
+                        CellCommand::Destroy => break,
+                        _ => {}
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to unwrap backward onion cell: {}", e);
+                    break;
+                }
+            }
+        }
+        let _ = client_write.shutdown().await;
+    };
+
+    tokio::select! {
+        _ = fwd => {},
+        _ = bwd => {},
+    }
+
+    Ok(())
 }

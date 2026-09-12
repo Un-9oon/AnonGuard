@@ -1,0 +1,29 @@
+name: Continuous Integration & Verification
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-lint:
+    name: Test & Clippy Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check Cargo.lock reproducibility
+        run: cargo check --locked --all-targets
+
+      - name: Run Test Suite
+        run: cargo test --all-targets --verbose
+
+      - name: Run Clippy Linter (Strict Zero-Warning Enforcement)
+        run: cargo clippy --all-targets -- -D warnings
