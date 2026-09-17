@@ -77,7 +77,6 @@ impl Drop for HopKeys {
     }
 }
 
-
 /// Helper to build a 96-bit nonce from circuit_id and sequence_no
 fn build_nonce(direction: u8, circuit_id: u32, sequence_no: u32) -> [u8; 12] {
     let mut nonce = [0u8; 12];
@@ -172,27 +171,40 @@ impl Default for ReplayWindow {
 
 impl ReplayWindow {
     pub fn new() -> Self {
-        Self { window: 0, next_expected: 1 }
+        Self {
+            window: 0,
+            next_expected: 1,
+        }
     }
-    
+
     pub fn check_and_advance(&mut self, seq: u32) -> Result<(), CircuitError> {
         let _hop_index = (seq >> BWD_COUNTER_BITS) as usize;
         let counter = seq & BWD_COUNTER_MASK;
+
         if counter < self.next_expected {
             let diff = self.next_expected - counter;
             if diff > 64 || (self.window & (1 << (diff - 1))) != 0 {
-                return Err(CircuitError::AntiReplayRejection(format!("Replay on sequence {}", seq)));
+                return Err(CircuitError::AntiReplayRejection(format!(
+                    "Replay on sequence {}",
+                    seq
+                )));
             }
             self.window |= 1 << (diff - 1);
+        } else if counter == self.next_expected {
+            self.window = (self.window << 1) | 1;
+            self.next_expected = counter + 1;
         } else {
             let diff = counter - self.next_expected;
             if diff > MAX_SEQ_GAP {
-                return Err(CircuitError::AntiReplayRejection(format!("Sequence gap too large: {}", diff)));
+                return Err(CircuitError::AntiReplayRejection(format!(
+                    "Sequence gap too large: {}",
+                    diff
+                )));
             }
             if diff >= 64 {
-                self.window = 0;
-            } else if diff > 0 {
-                self.window = (self.window << diff) | (1 << (diff - 1));
+                self.window = 1;
+            } else {
+                self.window = (self.window << diff) | 1;
             }
             self.next_expected = counter + 1;
         }
@@ -223,13 +235,22 @@ impl OnionCircuit {
         self.hops.len()
     }
 
-    pub fn wrap_forward(&mut self, cell: &mut OnionCell) -> Result<[u8; ONION_CELL_SIZE], CircuitError> {
+    pub fn wrap_forward(
+        &mut self,
+        cell: &mut OnionCell,
+    ) -> Result<[u8; ONION_CELL_SIZE], CircuitError> {
         if self.sequence_no == u32::MAX {
             return Err(CircuitError::SequenceExhausted);
         }
+        if cell.circuit_id != self.circuit_id {
+            return Err(CircuitError::InvalidCircuitId);
+        }
         cell.sequence_no = self.sequence_no;
-        self.sequence_no = self.sequence_no.checked_add(1).ok_or(CircuitError::SequenceExhausted)?;
-        let nonce = build_nonce(1, cell.circuit_id, cell.sequence_no);
+        self.sequence_no = self
+            .sequence_no
+            .checked_add(1)
+            .ok_or(CircuitError::SequenceExhausted)?;
+        let nonce = build_nonce(1, self.circuit_id, cell.sequence_no);
 
         let mut raw = cell.serialize();
 
@@ -256,7 +277,18 @@ impl OnionCircuit {
         &mut self,
         raw: &mut [u8; ONION_CELL_SIZE],
     ) -> Result<(usize, OnionCell), CircuitError> {
-        let seq_bytes = raw[4..8].try_into().map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
+        let cell_circuit_id = u32::from_be_bytes(
+            raw[0..4]
+                .try_into()
+                .map_err(|_| CircuitError::ParseError("Invalid circuit id bytes".to_string()))?,
+        );
+        if cell_circuit_id != self.circuit_id {
+            return Err(CircuitError::InvalidCircuitId);
+        }
+
+        let seq_bytes = raw[4..8]
+            .try_into()
+            .map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
         let seq = u32::from_be_bytes(seq_bytes);
         let hop_index = (seq >> BWD_COUNTER_BITS) as usize;
 
@@ -304,11 +336,7 @@ pub enum PeelResult {
 }
 
 impl RelayCircuitHop {
-    pub fn new(
-        circuit_id: u32,
-        keys: HopKeys,
-        hop_index: usize,
-    ) -> Self {
+    pub fn new(circuit_id: u32, keys: HopKeys, hop_index: usize) -> Self {
         Self {
             circuit_id,
             crypt: HopCryptState::new(keys),
@@ -318,54 +346,81 @@ impl RelayCircuitHop {
         }
     }
 
-    pub fn peel_forward(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<PeelResult, CircuitError> {
-        let seq_bytes = raw[4..8].try_into().map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
+    pub fn peel_forward(
+        &mut self,
+        raw: &mut [u8; ONION_CELL_SIZE],
+    ) -> Result<PeelResult, CircuitError> {
+        let cell_circuit_id = u32::from_be_bytes(
+            raw[0..4]
+                .try_into()
+                .map_err(|_| CircuitError::ParseError("Invalid circuit id bytes".to_string()))?,
+        );
+        if cell_circuit_id != self.circuit_id {
+            return Err(CircuitError::InvalidCircuitId);
+        }
+
+        let seq_bytes = raw[4..8]
+            .try_into()
+            .map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
         let seq = u32::from_be_bytes(seq_bytes);
 
         let nonce = build_nonce(1, self.circuit_id, seq);
-        
+
         let mut pt_scratch = [0u8; ONION_CELL_SIZE];
         pt_scratch.copy_from_slice(raw);
         let (header, body) = pt_scratch.split_at_mut(8);
         let (pt, mac_buf) = body.split_at_mut(1000);
-        
+
         let expected_tag = compute_mac(&self.crypt.keys.forward_mac, &nonce, header, pt);
-        
+
         if expected_tag[..16].ct_eq(mac_buf).unwrap_u8() == 1 {
             self.crypt.encrypt_forward_stream(&nonce, pt);
             if seq < self.expected_recv_seq {
-                return Err(CircuitError::AntiReplayRejection(format!("Stale sequence {}", seq)));
+                return Err(CircuitError::AntiReplayRejection(format!(
+                    "Stale sequence {}",
+                    seq
+                )));
             }
             if seq - self.expected_recv_seq > MAX_SEQ_GAP {
-                return Err(CircuitError::AntiReplayRejection("Sequence gap too large".to_string()));
-            }
-            self.expected_recv_seq = seq + 1;
-            
-            raw.copy_from_slice(&pt_scratch);
-            if let Ok(cell) = OnionCell::parse(raw) {
-                let len = (cell.length as usize).min(cell.payload.len());
-                return Ok(PeelResult::AddressedToThisRelay(
-                    cell.command,
-                    cell.payload[..len].to_vec(),
+                return Err(CircuitError::AntiReplayRejection(
+                    "Sequence gap too large".to_string(),
                 ));
             }
+            self.expected_recv_seq = seq + 1;
+
+            raw.copy_from_slice(&pt_scratch);
+            let cell = OnionCell::parse(raw).map_err(|e| {
+                CircuitError::ParseError(format!("MAC verified but cell parse failed: {}", e))
+            })?;
+            let len = (cell.length as usize).min(cell.payload.len());
+            return Ok(PeelResult::AddressedToThisRelay(
+                cell.command,
+                cell.payload[..len].to_vec(),
+            ));
         }
-        
+
         let (_, fwd_body) = raw.split_at_mut(8);
         self.crypt.encrypt_forward_stream(&nonce, fwd_body);
-        
+
         let mut full_cell = [0u8; ONION_CELL_SIZE];
         full_cell.copy_from_slice(raw);
         Ok(PeelResult::ForwardDownstream(Box::new(full_cell)))
     }
 
-    pub fn wrap_backward_relay(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<(), CircuitError> {
-        let seq_bytes = raw[4..8].try_into().map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
+    pub fn wrap_backward_relay(
+        &mut self,
+        raw: &mut [u8; ONION_CELL_SIZE],
+    ) -> Result<(), CircuitError> {
+        let seq_bytes = raw[4..8]
+            .try_into()
+            .map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
         let seq = u32::from_be_bytes(seq_bytes);
-        
+
         let claimed_hop = (seq >> BWD_COUNTER_BITS) as usize;
         if claimed_hop == self.hop_index {
-            return Err(CircuitError::AntiReplayRejection("Relayed cell claims our hop index".to_string()));
+            return Err(CircuitError::AntiReplayRejection(
+                "Relayed cell claims our hop index".to_string(),
+            ));
         }
 
         let nonce = build_nonce(2, self.circuit_id, seq);
@@ -375,9 +430,15 @@ impl RelayCircuitHop {
         Ok(())
     }
 
-    pub fn wrap_backward_originate(&mut self, raw: &mut [u8; ONION_CELL_SIZE]) -> Result<(), CircuitError> {
+    pub fn wrap_backward_originate(
+        &mut self,
+        raw: &mut [u8; ONION_CELL_SIZE],
+    ) -> Result<(), CircuitError> {
         let counter = self.next_send_seq;
-        self.next_send_seq = self.next_send_seq.checked_add(1).ok_or(CircuitError::SequenceExhausted)?;
+        self.next_send_seq = self
+            .next_send_seq
+            .checked_add(1)
+            .ok_or(CircuitError::SequenceExhausted)?;
         let seq = pack_backward_seq(self.hop_index, counter)?;
         raw[4..8].copy_from_slice(&seq.to_be_bytes());
 
@@ -410,7 +471,10 @@ pub fn handle_create_cell(
     relay_identity_key: &SigningKey,
 ) -> Result<(RelayCircuitHop, OnionCell), CircuitError> {
     if create_cell.command != CellCommand::Create {
-        return Err(CircuitError::ParseError(format!("Expected CREATE, got {:?}", create_cell.command)));
+        return Err(CircuitError::ParseError(format!(
+            "Expected CREATE, got {:?}",
+            create_cell.command
+        )));
     }
     if create_cell.length < 33 {
         return Err(CircuitError::PayloadTooShort);
@@ -431,7 +495,9 @@ pub fn handle_create_cell(
     let shared = relay_secret.diffie_hellman(&client_pub);
     // Non-contributory DH rejection (V-03)
     if shared.as_bytes() == &[0u8; 32] {
-        return Err(CircuitError::General("Non-contributory DH key rejected".to_string()));
+        return Err(CircuitError::General(
+            "Non-contributory DH key rejected".to_string(),
+        ));
     }
 
     let keys = derive_hop_keys(shared.as_bytes())?;
@@ -454,7 +520,8 @@ pub fn handle_create_cell(
         CellCommand::Created,
         0,
         &created_payload,
-    ).map_err(CircuitError::General)?;
+    )
+    .map_err(CircuitError::General)?;
 
     let relay_hop = RelayCircuitHop::new(create_cell.circuit_id, keys, hop_index);
     Ok((relay_hop, created_cell))
@@ -470,32 +537,41 @@ pub fn process_created_cell(
 ) -> Result<HopKeys, CircuitError> {
     if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended
     {
-        return Err(CircuitError::ParseError(format!("Expected CREATED or EXTENDED cell, got {:?}", created_cell.command)));
+        return Err(CircuitError::ParseError(format!(
+            "Expected CREATED or EXTENDED cell, got {:?}",
+            created_cell.command
+        )));
     }
     if created_cell.length < 128 {
         return Err(CircuitError::PayloadTooShort);
     }
 
-    let relay_eph_pub_bytes: [u8; 32] = created_cell.payload[0..32]
-        .try_into()
-        .map_err(|_| CircuitError::ParseError("Failed to extract relay ephemeral public key".to_string()))?;
-    let relay_identity_pub_bytes: [u8; 32] = created_cell.payload[32..64]
-        .try_into()
-        .map_err(|_| CircuitError::ParseError("Failed to extract relay identity public key".to_string()))?;
-    let sig_bytes: [u8; 64] = created_cell.payload[64..128]
-        .try_into()
-        .map_err(|_| CircuitError::ParseError("Failed to extract handshake signature".to_string()))?;
+    let relay_eph_pub_bytes: [u8; 32] = created_cell.payload[0..32].try_into().map_err(|_| {
+        CircuitError::ParseError("Failed to extract relay ephemeral public key".to_string())
+    })?;
+    let relay_identity_pub_bytes: [u8; 32] =
+        created_cell.payload[32..64].try_into().map_err(|_| {
+            CircuitError::ParseError("Failed to extract relay identity public key".to_string())
+        })?;
+    let sig_bytes: [u8; 64] = created_cell.payload[64..128].try_into().map_err(|_| {
+        CircuitError::ParseError("Failed to extract handshake signature".to_string())
+    })?;
 
     // V-03: all-zero pin rejected
     if pinned_identity_key == &[0u8; 32] {
         return Err(CircuitError::UnpinnedRelay);
     }
-    if relay_identity_pub_bytes.ct_eq(pinned_identity_key).unwrap_u8() != 1 {
+    if relay_identity_pub_bytes
+        .ct_eq(pinned_identity_key)
+        .unwrap_u8()
+        != 1
+    {
         return Err(CircuitError::UnpinnedRelay);
     }
 
-    let verifying_key = VerifyingKey::from_bytes(&relay_identity_pub_bytes)
-        .map_err(|e| CircuitError::ParseError(format!("Invalid relay Ed25519 identity key: {e}")))?;
+    let verifying_key = VerifyingKey::from_bytes(&relay_identity_pub_bytes).map_err(|e| {
+        CircuitError::ParseError(format!("Invalid relay Ed25519 identity key: {e}"))
+    })?;
     let signature = Signature::from_bytes(&sig_bytes);
 
     let mut preimage = Vec::with_capacity(6 + 32 + 32);
@@ -503,17 +579,21 @@ pub fn process_created_cell(
     preimage.extend_from_slice(&relay_eph_pub_bytes);
     preimage.extend_from_slice(client_pub_bytes);
 
-    verifying_key.verify_strict(&preimage, &signature).map_err(|_| {
-        CircuitError::General("Handshake Ed25519 signature verification failed".to_string())
-    })?;
+    verifying_key
+        .verify_strict(&preimage, &signature)
+        .map_err(|_| {
+            CircuitError::General("Handshake Ed25519 signature verification failed".to_string())
+        })?;
 
     let relay_eph_pub = X25519PublicKey::from(relay_eph_pub_bytes);
     let shared = client_secret.diffie_hellman(&relay_eph_pub);
     // V-03: non-contributory DH rejection
     if shared.as_bytes() == &[0u8; 32] {
-        return Err(CircuitError::General("Non-contributory DH key rejected".to_string()));
+        return Err(CircuitError::General(
+            "Non-contributory DH key rejected".to_string(),
+        ));
     }
-    
+
     derive_hop_keys(shared.as_bytes())
 }
 
@@ -525,7 +605,9 @@ pub fn encode_extend_payload(
 ) -> Result<Vec<u8>, CircuitError> {
     let host_bytes = next_host.as_bytes();
     if host_bytes.len() > 255 {
-        return Err(CircuitError::General("Host string exceeds 255 bytes limit".to_string()));
+        return Err(CircuitError::General(
+            "Host string exceeds 255 bytes limit".to_string(),
+        ));
     }
 
     let mut payload = Vec::with_capacity(1 + 1 + host_bytes.len() + 2 + 32);
@@ -537,7 +619,9 @@ pub fn encode_extend_payload(
     Ok(payload)
 }
 
-pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519PublicKey, usize), CircuitError> {
+pub fn decode_extend_payload(
+    payload: &[u8],
+) -> Result<(String, u16, X25519PublicKey, usize), CircuitError> {
     if payload.len() < 1 + 1 + 2 + 32 {
         return Err(CircuitError::PayloadTooShort);
     }
@@ -565,7 +649,9 @@ pub fn decode_extend_payload(payload: &[u8]) -> Result<(String, u16, X25519Publi
 pub fn encode_relay_target(target_host: &str, target_port: u16) -> Result<Vec<u8>, CircuitError> {
     let host_bytes = target_host.as_bytes();
     if host_bytes.len() > 255 {
-        return Err(CircuitError::General("Target host string exceeds 255 bytes limit".to_string()));
+        return Err(CircuitError::General(
+            "Target host string exceeds 255 bytes limit".to_string(),
+        ));
     }
     let mut payload = Vec::with_capacity(1 + host_bytes.len() + 2);
     payload.push(host_bytes.len() as u8);

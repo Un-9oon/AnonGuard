@@ -25,7 +25,7 @@ impl NetnsConfig {
         let ip: std::net::IpAddr = self.authorized_proxy_ip.parse().map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Invalid authorized_proxy_ip for nftables: {}", e)
+                format!("Invalid authorized_proxy_ip for nftables: {}", e),
             )
         })?;
 

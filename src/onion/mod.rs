@@ -8,8 +8,8 @@ pub mod circuit;
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{
     build_create_cell, decode_extend_payload, derive_hop_keys, encode_extend_payload,
-    handle_create_cell, perform_client_relay_handshake, process_created_cell,
-    HopCryptState, OnionCircuit, PeelResult, RelayCircuitHop,
+    handle_create_cell, perform_client_relay_handshake, process_created_cell, HopCryptState,
+    OnionCircuit, PeelResult, RelayCircuitHop,
 };
 
 #[cfg(test)]
@@ -44,7 +44,8 @@ mod tests {
             client_secret_0,
             client_pub_0.as_bytes(),
             &guard_pk,
-            circuit_id, 0
+            circuit_id,
+            0,
         )
         .unwrap();
         client_circuit.add_hop(hop_keys0).unwrap();
@@ -73,9 +74,12 @@ mod tests {
             handle_create_cell(&create_cell_1, &middle_sk).unwrap();
 
         let mut return_wire_1 = created_cell_1.serialize();
-        relay_guard.wrap_backward_originate(&mut return_wire_1).unwrap();
+        relay_guard
+            .wrap_backward_originate(&mut return_wire_1)
+            .unwrap();
 
-        let (_hop, client_unwrapped_1) = client_circuit.unwrap_backward(&mut return_wire_1).unwrap();
+        let (_hop, client_unwrapped_1) =
+            client_circuit.unwrap_backward(&mut return_wire_1).unwrap();
         assert_eq!(client_unwrapped_1.command, CellCommand::Created);
 
         let hop_keys1 = process_created_cell(
@@ -83,7 +87,8 @@ mod tests {
             client_secret_1,
             middle_pub_for_relay.as_bytes(),
             &middle_pk,
-            circuit_id, 1
+            circuit_id,
+            1,
         )
         .unwrap();
         client_circuit.add_hop(hop_keys1).unwrap();
@@ -118,10 +123,13 @@ mod tests {
             handle_create_cell(&create_cell_2, &exit_sk).unwrap();
 
         let mut return_wire_2 = created_cell_2.serialize();
-        relay_middle.wrap_backward_originate(&mut return_wire_2).unwrap();
+        relay_middle
+            .wrap_backward_originate(&mut return_wire_2)
+            .unwrap();
         relay_guard.wrap_backward_relay(&mut return_wire_2).unwrap();
 
-        let (_hop, client_unwrapped_2) = client_circuit.unwrap_backward(&mut return_wire_2).unwrap();
+        let (_hop, client_unwrapped_2) =
+            client_circuit.unwrap_backward(&mut return_wire_2).unwrap();
         assert_eq!(client_unwrapped_2.command, CellCommand::Created);
 
         let hop_keys2 = process_created_cell(
@@ -129,7 +137,8 @@ mod tests {
             client_secret_2,
             exit_pub_for_relay.as_bytes(),
             &exit_pk,
-            circuit_id, 2
+            circuit_id,
+            2,
         )
         .unwrap();
         client_circuit.add_hop(hop_keys2).unwrap();
@@ -177,7 +186,8 @@ mod tests {
             client_secret,
             client_pub.as_bytes(),
             &wrong_pk,
-            circuit_id, 0
+            circuit_id,
+            0,
         );
 
         assert!(result.is_err());
@@ -200,7 +210,8 @@ mod tests {
             client_secret,
             client_pub.as_bytes(),
             &relay_pk,
-            circuit_id, 0
+            circuit_id,
+            0,
         );
 
         assert!(result.is_err());
@@ -244,8 +255,7 @@ mod tests {
         client_circuit.add_hop(client_hop2).unwrap();
 
         let mut relay_guard = RelayCircuitHop::new(77, relay0_keys, 0);
-        let mut relay_middle =
-            RelayCircuitHop::new(77, relay1_keys, 1);
+        let mut relay_middle = RelayCircuitHop::new(77, relay1_keys, 1);
         let mut relay_exit = RelayCircuitHop::new(77, relay2_keys, 2);
 
         let payload = b"TAMPER_TEST_SENSITIVE_DATA";
@@ -314,7 +324,7 @@ mod tests {
 
         let mut cell1 = OnionCell::new(1, 1, CellCommand::Data, 1, b"MESSAGE_1").unwrap();
         let mut raw1 = client_circuit.wrap_forward(&mut cell1).unwrap();
-        
+
         let mut raw1_clone = raw1;
 
         let p1 = relay.peel_forward(&mut raw1).unwrap();
@@ -342,8 +352,7 @@ mod tests {
         client_circuit.add_hop(client_hop2).unwrap();
 
         let mut relay_guard = RelayCircuitHop::new(42, relay0_keys, 0);
-        let mut relay_middle =
-            RelayCircuitHop::new(42, relay1_keys, 1);
+        let mut relay_middle = RelayCircuitHop::new(42, relay1_keys, 1);
         let mut relay_exit = RelayCircuitHop::new(42, relay2_keys, 2);
 
         let secret_payload = b"TOP_SECRET_E2E_AUTHENTICATED_CELL";
@@ -379,8 +388,12 @@ mod tests {
         let exit_resp_cell = OnionCell::new(42, 1, CellCommand::Data, 7, response_data).unwrap();
         let mut return_buffer = exit_resp_cell.serialize();
 
-        relay_exit.wrap_backward_originate(&mut return_buffer).unwrap();
-        relay_middle.wrap_backward_relay(&mut return_buffer).unwrap();
+        relay_exit
+            .wrap_backward_originate(&mut return_buffer)
+            .unwrap();
+        relay_middle
+            .wrap_backward_relay(&mut return_buffer)
+            .unwrap();
         relay_guard.wrap_backward_relay(&mut return_buffer).unwrap();
 
         let (_hop, client_recovered) = client_circuit

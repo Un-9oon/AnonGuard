@@ -34,7 +34,16 @@ fn bench_aead(c: &mut Criterion) {
     let forward_key = [1u8; 32];
     let backward_key = [2u8; 32];
     let mac_key = [3u8; 32];
-    let mut hop = RelayCircuitHop::new(1234, HopKeys { forward_key, backward_key, forward_mac: mac_key, backward_mac: mac_key }, 0);
+    let mut hop = RelayCircuitHop::new(
+        1234,
+        HopKeys {
+            forward_key,
+            backward_key,
+            forward_mac: mac_key,
+            backward_mac: mac_key,
+        },
+        0,
+    );
 
     let payload = vec![0u8; 995];
     let cell = OnionCell::new(1234, 1, CellCommand::Data, 1, &payload).unwrap();

@@ -95,7 +95,6 @@ impl ProxyPool {
         Ok(loaded)
     }
 
-
     /// Checks if a given host:port is a known mesh target from the consensus.
     pub async fn is_mesh_target(&self, host: &str, port: u16) -> bool {
         let id_keys = self.identity_keys.read().await;

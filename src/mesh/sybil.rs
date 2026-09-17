@@ -259,7 +259,8 @@ mod tests {
         let now = current_timestamp_secs();
         let difficulty = 12; // 12 bits for fast test execution
 
-        let nonce = solve_pow_bounded(node_id, now, difficulty).expect("Failed to solve PoW within bounds");
+        let nonce =
+            solve_pow_bounded(node_id, now, difficulty).expect("Failed to solve PoW within bounds");
         assert!(verify_pow(node_id, now, nonce, difficulty, now));
 
         // Tampering with node_id should fail

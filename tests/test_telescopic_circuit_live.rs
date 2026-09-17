@@ -1,11 +1,11 @@
 use anonguard::core::state_machine::GuardedSocket;
 use anonguard::gateway::server::{build_telescopic_circuit, handle_onion_relay_connection};
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use anonguard::mesh::ProxyNode;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use rand::rngs::OsRng;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -43,7 +43,9 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     tokio::spawn(async move {
         let (s, _) = exit_listener.accept().await.unwrap();
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,
@@ -62,7 +64,9 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     tokio::spawn(async move {
         let (s, _) = middle_listener.accept().await.unwrap();
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,
@@ -81,7 +85,9 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     tokio::spawn(async move {
         let (s, _) = guard_listener.accept().await.unwrap();
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,
@@ -150,7 +156,9 @@ async fn test_exit_policy_blocks_ssrf_live() {
     tokio::spawn(async move {
         let (s, _) = exit_listener.accept().await.unwrap();
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,
@@ -193,7 +201,9 @@ async fn test_exit_policy_blocks_dns_rebinding_hostname_live() {
     tokio::spawn(async move {
         let (s, _) = exit_listener.accept().await.unwrap();
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,
@@ -242,7 +252,9 @@ async fn test_mitm_identity_key_mismatch_is_rejected() {
         let (s, _) = relay_listener.accept().await.unwrap();
         // Relay signs with relay_sk (legitimate)
         let dummy_ks = Arc::new(AtomicBool::new(false));
-        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
         let _ = handle_onion_relay_connection(
             guarded_s,
             dummy_ks,

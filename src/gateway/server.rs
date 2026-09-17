@@ -1,7 +1,7 @@
 //! Tokio asynchronous local gateway server listening on 127.0.0.1:9050.
 
+use crate::core::state_machine::{ActiveGuarded, GuardedSocket};
 use tokio::net::{TcpListener, TcpStream};
-use crate::core::state_machine::{GuardedSocket, ActiveGuarded};
 use tracing::{error, info, warn};
 
 use crate::core::GuardConfig;
@@ -175,7 +175,8 @@ impl GatewayServer {
                 }
 
                 let mut peek_buf = [0u8; 1];
-                let is_socks5 = client_stream.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
+                let is_socks5 =
+                    client_stream.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
 
                 let mut client = GuardedSocket::new(client_stream, kill_switch.atomic_handle())
                     .begin_verification()
@@ -397,9 +398,10 @@ impl GatewayServer {
                             );
                             let _ =
                                 crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
-                            let mut guard_stream_guarded = GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
-                                .begin_verification()
-                                .mark_verified();
+                            let mut guard_stream_guarded =
+                                GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
+                                    .begin_verification()
+                                    .mark_verified();
                             let _ = stream_onion_circuit(
                                 &mut client,
                                 &mut guard_stream_guarded,
@@ -597,7 +599,11 @@ impl GatewayServer {
                         Ok(mut stream) => {
                             use tokio::io::AsyncWriteExt;
                             let now = crate::mesh::sybil::current_timestamp_secs();
-                            let nonce = match crate::mesh::sybil::solve_pow_bounded(&nid, now, pow_difficulty) {
+                            let nonce = match crate::mesh::sybil::solve_pow_bounded(
+                                &nid,
+                                now,
+                                pow_difficulty,
+                            ) {
                                 Some(n) => n,
                                 None => {
                                     error!("Failed to solve PoW for reverse relay registration within bounds (DoS protection)");
@@ -699,7 +705,7 @@ pub async fn stream_onion_circuit(
         let stream_id = 1u16;
         let mut client_seq = 2u32; // Seq 1 was RELAY cell
         let mut dummy_interval = tokio::time::interval(std::time::Duration::from_millis(1000));
-        
+
         loop {
             let mut is_dummy = false;
             let n = tokio::select! {
@@ -718,15 +724,13 @@ pub async fn stream_onion_circuit(
                 let guard = circuit_fwd.lock().await;
                 let seq = client_seq;
                 client_seq += 1;
-                
-                let cmd = if is_dummy { CellCommand::Dummy } else { CellCommand::Data };
-                match OnionCell::new(
-                    guard.circuit_id,
-                    seq,
-                    cmd,
-                    stream_id,
-                    &buf[..n],
-                ) {
+
+                let cmd = if is_dummy {
+                    CellCommand::Dummy
+                } else {
+                    CellCommand::Data
+                };
+                match OnionCell::new(guard.circuit_id, seq, cmd, stream_id, &buf[..n]) {
                     Ok(c) => c,
                     Err(e) => {
                         error!("OnionCell construction failed: {}", e);
@@ -739,7 +743,7 @@ pub async fn stream_onion_circuit(
                 let mut guard = circuit_fwd.lock().await;
                 guard.wrap_forward(&mut cell)
             };
-            
+
             let wire_buffer = match wire_buffer_res {
                 Ok(buf) => buf,
                 Err(e) => {
@@ -857,7 +861,9 @@ pub async fn build_telescopic_circuit(
         0,
     )
     .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
-    circuit.add_hop(hop_keys_0).map_err(|e| format!("Failed to add hop 0: {:?}", e))?;
+    circuit
+        .add_hop(hop_keys_0)
+        .map_err(|e| format!("Failed to add hop 0: {:?}", e))?;
     // 2. Telescopic circuit extension for subsequent hops
     #[allow(clippy::needless_range_loop)]
     for hop_idx in 1..chain.len() {
@@ -865,9 +871,13 @@ pub async fn build_telescopic_circuit(
         let client_pub = x25519_dalek::PublicKey::from(&client_secret);
         let client_pub_bytes = *client_pub.as_bytes();
 
-        let extend_payload =
-            encode_extend_payload(&chain[hop_idx].host, chain[hop_idx].port, &client_pub, hop_idx)
-                .map_err(|e| format!("Failed to encode EXTEND payload: {:?}", e))?;
+        let extend_payload = encode_extend_payload(
+            &chain[hop_idx].host,
+            chain[hop_idx].port,
+            &client_pub,
+            hop_idx,
+        )
+        .map_err(|e| format!("Failed to encode EXTEND payload: {:?}", e))?;
         let mut extend_cell = OnionCell::new(
             circuit_id,
             hop_idx as u32,
@@ -877,23 +887,36 @@ pub async fn build_telescopic_circuit(
         )
         .map_err(|e| format!("Failed to build EXTEND cell: {}", e))?;
 
-        let wire_buffer = circuit.wrap_forward(&mut extend_cell).map_err(|e| format!("Failed to wrap forward: {:?}", e))?;
+        let wire_buffer = circuit
+            .wrap_forward(&mut extend_cell)
+            .map_err(|e| format!("Failed to wrap forward: {:?}", e))?;
         stream.write_all(&wire_buffer).await?;
 
         let mut return_wire = [0u8; ONION_CELL_SIZE];
         stream.read_exact(&mut return_wire).await?;
-        let (_hop, resp_cell) = circuit
-            .unwrap_backward(&mut return_wire)
-            .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {:?}", hop_idx, e))?;
+        let (_hop, resp_cell) = circuit.unwrap_backward(&mut return_wire).map_err(|e| {
+            format!(
+                "Failed to unwrap backward cell from Hop {}: {:?}",
+                hop_idx, e
+            )
+        })?;
 
         let pinned_key = pinned_identity_keys.get(hop_idx).ok_or_else(|| {
             format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake")
         })?;
-        let keys =
-            process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key, circuit_id, hop_idx)
-                .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {:?}", e))?;
+        let keys = process_created_cell(
+            &resp_cell,
+            client_secret,
+            &client_pub_bytes,
+            pinned_key,
+            circuit_id,
+            hop_idx,
+        )
+        .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {:?}", e))?;
 
-        circuit.add_hop(keys).map_err(|e| format!("Failed to add hop {}: {:?}", hop_idx, e))?;
+        circuit
+            .add_hop(keys)
+            .map_err(|e| format!("Failed to add hop {}: {:?}", hop_idx, e))?;
     }
 
     // 3. Instruct the exit hop to connect in-band to target_host:target_port
@@ -902,7 +925,9 @@ pub async fn build_telescopic_circuit(
     let mut relay_cell = OnionCell::new(circuit_id, 1, CellCommand::Relay, 0, &relay_payload)
         .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
 
-    let wire_buffer = circuit.wrap_forward(&mut relay_cell).map_err(|e| format!("Failed to wrap forward relay cell: {:?}", e))?;
+    let wire_buffer = circuit
+        .wrap_forward(&mut relay_cell)
+        .map_err(|e| format!("Failed to wrap forward relay cell: {:?}", e))?;
     stream.write_all(&wire_buffer).await?;
 
     let mut return_wire = [0u8; ONION_CELL_SIZE];
@@ -993,11 +1018,9 @@ pub async fn handle_onion_relay_connection(
                     res = ds.read(&mut raw_buf) => {
                         let n = match res {
                             Ok(0) => {
-                                let seq = relay_hop.next_send_seq;
-                                relay_hop.next_send_seq += 1;
                                 if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
-                                    seq,
+                                    0,
                                     CellCommand::Destroy,
                                     1,
                                     &[],
@@ -1010,11 +1033,9 @@ pub async fn handle_onion_relay_connection(
                             }
                             Ok(n) => n,
                             Err(_) => {
-                                let seq = relay_hop.next_send_seq;
-                                relay_hop.next_send_seq += 1;
                                 if let Ok(destroy_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
-                                    seq,
+                                    0,
                                     CellCommand::Destroy,
                                     1,
                                     &[],
@@ -1026,11 +1047,9 @@ pub async fn handle_onion_relay_connection(
                                 break;
                             }
                         };
-                        let seq = relay_hop.next_send_seq;
-                        relay_hop.next_send_seq += 1;
                         let Ok(return_cell) = OnionCell::new(
                             relay_hop.circuit_id,
-                            seq,
+                            0,
                             CellCommand::Data,
                             1,
                             &raw_buf[..n],
@@ -1059,12 +1078,12 @@ pub async fn handle_onion_relay_connection(
                                 let extend_ok = async {
                                     let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                         .map_err(|e| format!("bad EXTEND payload: {e}"))?;
-                                        
+
                                     // V-11: Enforce is_exit check for non-mesh targets
                                     if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {
                                         return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
                                     }
-                                    
+
                                     let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
 
                                         .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
@@ -1086,9 +1105,7 @@ pub async fn handle_onion_relay_connection(
                                     }
                                     Err(e) => {
                                         error!("EXTEND failed on circuit {}: {}", relay_hop.circuit_id, e);
-                                        let seq = relay_hop.next_send_seq;
-                                        relay_hop.next_send_seq += 1;
-                                        if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, seq, CellCommand::Destroy, 0, &[]) {
+                                        if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, 0, CellCommand::Destroy, 0, &[]) {
                                             let mut wire = destroy_cell.serialize();
                                             let _ = relay_hop.wrap_backward_originate(&mut wire);
                                             let _ = client.write_all(&wire).await;
@@ -1131,12 +1148,12 @@ pub async fn handle_onion_relay_connection(
                                 let extend_ok = async {
                                     let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                         .map_err(|e| format!("bad EXTEND payload: {e}"))?;
-                                        
+
                                     // V-11: Enforce is_exit check for non-mesh targets
                                     if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {
                                         return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
                                     }
-                                    
+
                                     let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
 
                                     .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
@@ -1159,9 +1176,7 @@ pub async fn handle_onion_relay_connection(
                                 }
                                 Err(e) => {
                                     error!("EXTEND failed on circuit {}: {}", relay_hop.circuit_id, e);
-                                    let seq = relay_hop.next_send_seq;
-                                    relay_hop.next_send_seq += 1;
-                                    if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, seq, CellCommand::Destroy, 0, &[]) {
+                                    if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, 0, CellCommand::Destroy, 0, &[]) {
                                         let mut wire = destroy_cell.serialize();
                                         let _ = relay_hop.wrap_backward_originate(&mut wire);
                                         let _ = client.write_all(&wire).await;
@@ -1181,11 +1196,9 @@ pub async fn handle_onion_relay_connection(
                                 match policy.resolve_and_connect(&target_h, target_p).await {
 
                                     Ok(target_s) => {
-                                        let seq = relay_hop.next_send_seq;
-                                        relay_hop.next_send_seq += 1;
                                         if let Ok(resp_cell) = OnionCell::new(
                                             relay_hop.circuit_id,
-                                            seq,
+                                            0,
                                             CellCommand::Relay,
                                             0,
                                             b"CONNECTED",

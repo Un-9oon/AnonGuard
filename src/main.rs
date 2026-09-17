@@ -312,7 +312,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let host_port = tracker_url.trim_start_matches("http://");
                 loop {
                     let now = anonguard::mesh::sybil::current_timestamp_secs();
-                    let nonce = match anonguard::mesh::sybil::solve_pow_bounded(&node_id, now, pow_difficulty) {
+                    let nonce = match anonguard::mesh::sybil::solve_pow_bounded(
+                        &node_id,
+                        now,
+                        pow_difficulty,
+                    ) {
                         Some(n) => n,
                         None => {
                             tracing::error!("Failed to solve PoW within bounds. CPU too slow or difficulty too high!");
@@ -320,10 +324,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             continue;
                         }
                     };
-                    let line = format!(
-                        "REGISTER_REVERSE {} {} {}\n",
-                        node_id, now, nonce
-                    );
+                    let line = format!("REGISTER_REVERSE {} {} {}\n", node_id, now, nonce);
 
                     if let Ok(mut stream) = tokio::net::TcpStream::connect(host_port).await {
                         use tokio::io::AsyncWriteExt;
