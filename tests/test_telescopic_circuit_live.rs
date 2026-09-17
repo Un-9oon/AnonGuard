@@ -50,6 +50,8 @@ async fn test_live_inband_telescopic_circuit_e2e() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -67,6 +69,8 @@ async fn test_live_inband_telescopic_circuit_e2e() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &middle_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -84,6 +88,8 @@ async fn test_live_inband_telescopic_circuit_e2e() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &guard_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -151,6 +157,8 @@ async fn test_exit_policy_blocks_ssrf_live() {
             None,
             Some(anonguard::kernel::ExitPolicy::default()),
             &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -192,6 +200,8 @@ async fn test_exit_policy_blocks_dns_rebinding_hostname_live() {
             None,
             Some(anonguard::kernel::ExitPolicy::default()),
             &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -239,6 +249,8 @@ async fn test_mitm_identity_key_mismatch_is_rejected() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &relay_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });

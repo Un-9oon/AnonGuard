@@ -38,6 +38,7 @@ pub struct GuardConfig {
     pub allow_open_socks5: bool,
     /// Allow exit relays to connect to private/loopback networks (default: false to prevent SSRF)
     pub allow_private_exit: bool,
+    pub is_exit: bool,
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
     /// Enable 3-hop layered onion encryption (Sphinx/Tor-style cell peeling)
@@ -81,6 +82,7 @@ impl Default for GuardConfig {
             relay_mode: false,
             allow_open_socks5: false,
             allow_private_exit: false,
+            is_exit: false,
             reverse_relay_mode: false,
             tracker_url: None,
             enable_onion_routing: false,

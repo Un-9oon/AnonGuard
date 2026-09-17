@@ -19,7 +19,7 @@ async fn test_tracker_registration_end_to_end() {
     let my_listen = "127.0.0.1:9050";
     let node_id = format!("relay-{}", my_listen);
     let now = anonguard::mesh::sybil::current_timestamp_secs();
-    let nonce = anonguard::mesh::sybil::solve_pow(&node_id, now, pow_difficulty);
+    let nonce = anonguard::mesh::sybil::solve_pow_bounded(&node_id, now, pow_difficulty).expect("PoW failed");
     let line = format!(
         "REGISTER_REVERSE {} {} {}\n",
         node_id, now, nonce

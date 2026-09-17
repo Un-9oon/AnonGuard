@@ -241,7 +241,7 @@ impl DirectoryAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesh::sybil::solve_pow;
+    use crate::mesh::sybil::solve_pow_bounded;
 
     #[tokio::test]
     async fn test_authority_registration_signature_and_anti_hijack() {
@@ -256,7 +256,7 @@ mod tests {
         let relay_key2 = SigningKey::generate(&mut rng);
 
         let now = current_timestamp_secs();
-        let nonce = solve_pow("relay-1", now, test_difficulty);
+        let nonce = solve_pow_bounded("relay-1", now, test_difficulty).expect("PoW failed");
 
         let mut desc = RelayDescriptor::new(
             "relay-1".to_string(),
@@ -284,7 +284,7 @@ mod tests {
             [99u8; 32],
             [0u8; 32],
             true,
-            solve_pow("relay-1", now + 1, test_difficulty),
+            solve_pow_bounded("relay-1", now + 1, test_difficulty).expect("PoW failed"),
             now + 1,
         );
         hijack_desc.sign_with_key(&relay_key2);
@@ -300,7 +300,7 @@ mod tests {
             [43u8; 32],
             [0u8; 32],
             true,
-            solve_pow("relay-1", now + 5, test_difficulty),
+            solve_pow_bounded("relay-1", now + 5, test_difficulty).expect("PoW failed"),
             now + 5,
         );
         legit_update.sign_with_key(&relay_key1);

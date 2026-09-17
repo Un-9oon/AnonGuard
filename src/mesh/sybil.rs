@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_POW_DIFFICULTY: u32 = 20; // 28 leading zero bits (default production difficulty)
+pub const DEFAULT_POW_DIFFICULTY: u32 = 26; // 28 leading zero bits (default production difficulty)
 pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300; // 5 minutes window (reduced from 10 to limit replay)
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,6 +20,7 @@ pub enum SybilError {
     SubnetCollision([u8; 2]),
     Ipv6SubnetCollision([u8; 4]),
     DuplicateNode(String),
+    UnresolvableHost(String),
 }
 
 impl std::fmt::Display for SybilError {
@@ -47,6 +48,11 @@ impl std::fmt::Display for SybilError {
             Self::DuplicateNode(host) => write!(
                 f,
                 "Sybil detection: Duplicate node address in circuit: {}",
+                host
+            ),
+            Self::UnresolvableHost(host) => write!(
+                f,
+                "Sybil detection: Unresolvable or non-IP node address in circuit: {}",
                 host
             ),
         }
@@ -121,9 +127,9 @@ pub fn verify_pow(
 }
 
 /// Solves a Proof-of-Work challenge for a given node identity.
-pub fn solve_pow(node_id: &str, timestamp: u64, difficulty_bits: u32) -> u64 {
+pub fn solve_pow_bounded(node_id: &str, timestamp: u64, difficulty_bits: u32) -> Option<u64> {
     let mut nonce: u64 = 0;
-    loop {
+    while nonce < 10_000_000 {
         let mut hasher = Sha256::new();
         hasher.update(node_id.as_bytes());
         hasher.update(timestamp.to_be_bytes());
@@ -131,10 +137,11 @@ pub fn solve_pow(node_id: &str, timestamp: u64, difficulty_bits: u32) -> u64 {
         let hash = hasher.finalize();
 
         if count_leading_zero_bits(&hash) >= difficulty_bits {
-            return nonce;
+            return Some(nonce);
         }
         nonce = nonce.wrapping_add(1);
     }
+    None
 }
 
 fn count_leading_zero_bits(bytes: &[u8]) -> u32 {
@@ -170,7 +177,6 @@ pub fn extract_ipv4_subnet_16(host: &str) -> Option<[u8; 2]> {
 /// Extracts the /32 IPv6 subnet prefix (first 4 bytes) if host is an IPv6 address.
 /// /32 represents a typical ISP or large data center allocation block.
 pub fn extract_ipv6_subnet_32(host: &str) -> Option<[u8; 4]> {
-    // Remove brackets if present (e.g. "[2001:db8::1]")
     let ip_str = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_str.parse::<Ipv6Addr>() {
         let octets = ip.octets();
@@ -195,19 +201,48 @@ pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
         }
         seen_hosts.push(host);
 
-        // Check for IPv4 /16 subnet prefix collision
-        if let Some(subnet) = extract_ipv4_subnet_16(host) {
-            if seen_ipv4_subnets.contains(&subnet) {
-                return Err(SybilError::SubnetCollision(subnet));
+        // Try to parse as IP
+        let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(ipv4) => {
+                    let octets = ipv4.octets();
+                    let subnet = [octets[0], octets[1]];
+                    if seen_ipv4_subnets.contains(&subnet) {
+                        return Err(SybilError::SubnetCollision(subnet));
+                    }
+                    seen_ipv4_subnets.push(subnet);
+                }
+                std::net::IpAddr::V6(ipv6) => {
+                    // Check if it's an IPv4-mapped IPv6 address (::ffff:a.b.c.d)
+                    if let Some(ipv4) = ipv6.to_ipv4_mapped() {
+                        let octets = ipv4.octets();
+                        let subnet = [octets[0], octets[1]];
+                        if seen_ipv4_subnets.contains(&subnet) {
+                            return Err(SybilError::SubnetCollision(subnet));
+                        }
+                        seen_ipv4_subnets.push(subnet);
+                    } else if let Some(ipv4) = ipv6.to_ipv4() {
+                        // Also check IPv4-compatible (::a.b.c.d)
+                        let octets = ipv4.octets();
+                        let subnet = [octets[0], octets[1]];
+                        if seen_ipv4_subnets.contains(&subnet) {
+                            return Err(SybilError::SubnetCollision(subnet));
+                        }
+                        seen_ipv4_subnets.push(subnet);
+                    } else {
+                        let octets = ipv6.octets();
+                        let subnet = [octets[0], octets[1], octets[2], octets[3]];
+                        if seen_ipv6_subnets.contains(&subnet) {
+                            return Err(SybilError::Ipv6SubnetCollision(subnet));
+                        }
+                        seen_ipv6_subnets.push(subnet);
+                    }
+                }
             }
-            seen_ipv4_subnets.push(subnet);
-        }
-        // Check for IPv6 /32 subnet prefix collision
-        else if let Some(subnet) = extract_ipv6_subnet_32(host) {
-            if seen_ipv6_subnets.contains(&subnet) {
-                return Err(SybilError::Ipv6SubnetCollision(subnet));
-            }
-            seen_ipv6_subnets.push(subnet);
+        } else {
+            // Reject non-IP hostnames
+            return Err(SybilError::UnresolvableHost(host.to_string()));
         }
     }
 
@@ -224,7 +259,7 @@ mod tests {
         let now = current_timestamp_secs();
         let difficulty = 12; // 12 bits for fast test execution
 
-        let nonce = solve_pow(node_id, now, difficulty);
+        let nonce = solve_pow_bounded(node_id, now, difficulty).expect("Failed to solve PoW within bounds");
         assert!(verify_pow(node_id, now, nonce, difficulty, now));
 
         // Tampering with node_id should fail

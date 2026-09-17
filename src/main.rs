@@ -110,6 +110,8 @@ struct Args {
     /// Allow exit relays to connect to private/loopback networks (off by default to prevent SSRF)
     #[arg(long, default_value_t = false)]
     allow_private_exit: bool,
+    #[arg(long, default_value_t = false)]
+    is_exit: bool,
 
     /// Apply OS/kernel-level nftables firewall kill switch (Linux only, requires root/CAP_NET_ADMIN)
     #[cfg(target_os = "linux")]
@@ -225,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         relay_mode: args.relay,
         allow_open_socks5: args.allow_open_socks5,
         allow_private_exit: args.allow_private_exit,
+        is_exit: args.is_exit,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
         #[cfg(target_os = "linux")]
@@ -309,7 +312,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let host_port = tracker_url.trim_start_matches("http://");
                 loop {
                     let now = anonguard::mesh::sybil::current_timestamp_secs();
-                    let nonce = anonguard::mesh::sybil::solve_pow(&node_id, now, pow_difficulty);
+                    let nonce = match anonguard::mesh::sybil::solve_pow_bounded(&node_id, now, pow_difficulty) {
+                        Some(n) => n,
+                        None => {
+                            tracing::error!("Failed to solve PoW within bounds. CPU too slow or difficulty too high!");
+                            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                            continue;
+                        }
+                    };
                     let line = format!(
                         "REGISTER_REVERSE {} {} {}\n",
                         node_id, now, nonce

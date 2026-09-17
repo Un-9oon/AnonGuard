@@ -95,6 +95,13 @@ impl ProxyPool {
         Ok(loaded)
     }
 
+
+    /// Checks if a given host:port is a known mesh target from the consensus.
+    pub async fn is_mesh_target(&self, host: &str, port: u16) -> bool {
+        let id_keys = self.identity_keys.read().await;
+        id_keys.contains_key(&format!("{}:{}", host, port))
+    }
+
     /// Returns the pinned Ed25519 identity keys for each node in a chain, in order.
     /// Nodes loaded from text files (not consensus) will return `[0u8; 32]` (zeroed),
     /// which `build_telescopic_circuit` will reject — enforcing consensus-sourced routing.

@@ -179,6 +179,21 @@ impl ExitPolicy {
                     return false;
                 }
 
+                // Future Use (240.0.0.0/4)
+                if (octets[0] & 0xf0) == 240 {
+                    return false;
+                }
+                
+                // IETF Protocol Assignments (192.0.0.0/24)
+                if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
+                    return false;
+                }
+                
+                // Benchmarking (198.18.0.0/15)
+                if octets[0] == 198 && (octets[1] & 0xfe) == 18 {
+                    return false;
+                }
+
                 true
             }
             IpAddr::V6(ipv6) => {
@@ -203,9 +218,19 @@ impl ExitPolicy {
                 if (segments[0] & 0xfe00) == 0xfc00 {
                     return false;
                 }
-                // IPv4-mapped IPv6 (::ffff:x.x.x.x)
-                if let Some(v4) = ipv6.to_ipv4_mapped() {
+                // IPv4-mapped IPv6 (::ffff:x.x.x.x) and IPv4-compatible (::x.x.x.x)
+                if let Some(v4) = ipv6.to_ipv4() {
                     return self.is_ip_permitted(IpAddr::V4(v4));
+                }
+                
+                // NAT64 prefixes (64:ff9b::/96)
+                if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
+                    return false;
+                }
+
+                // 6to4 prefixes (2002::/16)
+                if segments[0] == 0x2002 {
+                    return false;
                 }
 
                 true

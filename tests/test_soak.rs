@@ -66,6 +66,8 @@ async fn test_soak_local_relays() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -83,6 +85,8 @@ async fn test_soak_local_relays() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &middle_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });
@@ -100,6 +104,8 @@ async fn test_soak_local_relays() {
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &guard_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
         )
         .await;
     });

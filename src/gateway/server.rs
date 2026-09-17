@@ -251,6 +251,8 @@ impl GatewayServer {
                             jitter.clone(),
                             Some(exit_policy),
                             &relay_identity_key,
+                            config.is_exit,
+                            pool.clone(),
                         )
                         .await;
                     }
@@ -577,7 +579,7 @@ impl GatewayServer {
         let host_port = tracker_url.trim_start_matches("http://");
         // Generate a cryptographically secure authorization token for this reverse relay instance
         let auth_token = format!("{:016x}", rand::random::<u64>());
-        info!("[AnonGuard Reverse Relay] Active and guarded (node: {}, token: {}). Maintaining outbound pool to Tracker: {}", node_id, auth_token, host_port);
+        info!("[AnonGuard Reverse Relay] Active and guarded (node: {}, token: <REDACTED>). Maintaining outbound pool to Tracker: {}", node_id, host_port);
 
         // Keep a pool of 3 connections
         for _ in 0..3 {
@@ -595,7 +597,14 @@ impl GatewayServer {
                         Ok(mut stream) => {
                             use tokio::io::AsyncWriteExt;
                             let now = crate::mesh::sybil::current_timestamp_secs();
-                            let nonce = crate::mesh::sybil::solve_pow(&nid, now, pow_difficulty);
+                            let nonce = match crate::mesh::sybil::solve_pow_bounded(&nid, now, pow_difficulty) {
+                                Some(n) => n,
+                                None => {
+                                    error!("Failed to solve PoW for reverse relay registration within bounds (DoS protection)");
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                                    continue;
+                                }
+                            };
                             let payload =
                                 format!("REGISTER_REVERSE {} {} {} {}\n", nid, token, now, nonce);
                             if stream.write_all(payload.as_bytes()).await.is_ok() {
@@ -689,21 +698,32 @@ pub async fn stream_onion_circuit(
         let mut buf = [0u8; PAYLOAD_SIZE];
         let stream_id = 1u16;
         let mut client_seq = 2u32; // Seq 1 was RELAY cell
+        let mut dummy_interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+        
         loop {
-            let n = match client_read.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
+            let mut is_dummy = false;
+            let n = tokio::select! {
+                res = client_read.read(&mut buf) => match res {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                },
+                _ = dummy_interval.tick() => {
+                    is_dummy = true;
+                    0
+                }
             };
 
             let mut cell = {
                 let guard = circuit_fwd.lock().await;
                 let seq = client_seq;
                 client_seq += 1;
+                
+                let cmd = if is_dummy { CellCommand::Dummy } else { CellCommand::Data };
                 match OnionCell::new(
                     guard.circuit_id,
                     seq,
-                    CellCommand::Data,
+                    cmd,
                     stream_id,
                     &buf[..n],
                 ) {
@@ -914,6 +934,8 @@ pub async fn handle_onion_relay_connection(
     jitter: Option<JitterEngine>,
     exit_policy: Option<crate::kernel::ExitPolicy>,
     relay_identity_key: &Ed25519SigningKey,
+    is_exit_allowed: bool,
+    pool: crate::mesh::pool::ProxyPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -946,13 +968,13 @@ pub async fn handle_onion_relay_connection(
 
     // 2. Relay packet processing loop
     let mut downstream: Option<GuardedSocket<ActiveGuarded>> = None;
-    let mut is_exit = false;
+    let mut is_currently_exit_hop = false;
 
     loop {
         let mut client_buf = [0u8; ONION_CELL_SIZE];
 
         if let Some(ref mut ds) = downstream {
-            if is_exit {
+            if is_currently_exit_hop {
                 // Exit relay: downstream is the destination target server (raw TCP)
                 let mut raw_buf = [0u8; PAYLOAD_SIZE];
                 tokio::select! {
@@ -1033,10 +1055,18 @@ pub async fn handle_onion_relay_connection(
                         if res.is_err() { break; }
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
+
                                 let extend_ok = async {
                                     let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                         .map_err(|e| format!("bad EXTEND payload: {e}"))?;
+                                        
+                                    // V-11: Enforce is_exit check for non-mesh targets
+                                    if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {
+                                        return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
+                                    }
+                                    
                                     let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
+
                                         .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
                                     let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
                                         .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
@@ -1097,10 +1127,18 @@ pub async fn handle_onion_relay_connection(
                     if res.is_err() { break; }
                     match relay_hop.peel_forward(&mut client_buf) {
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
-                            let extend_ok = async {
-                                let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
-                                    .map_err(|e| format!("bad EXTEND payload: {e}"))?;
-                                let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
+
+                                let extend_ok = async {
+                                    let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
+                                        .map_err(|e| format!("bad EXTEND payload: {e}"))?;
+                                        
+                                    // V-11: Enforce is_exit check for non-mesh targets
+                                    if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {
+                                        return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
+                                    }
+                                    
+                                    let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
+
                                     .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
                                 let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
                                     .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
@@ -1117,7 +1155,7 @@ pub async fn handle_onion_relay_connection(
                                     let _ = relay_hop.wrap_backward_originate(&mut resp);
                                     if client.write_all(&resp).await.is_err() { break; }
                                     downstream = Some(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified());
-                                    is_exit = false;
+                                    is_currently_exit_hop = false;
                                 }
                                 Err(e) => {
                                     error!("EXTEND failed on circuit {}: {}", relay_hop.circuit_id, e);
@@ -1133,8 +1171,15 @@ pub async fn handle_onion_relay_connection(
                             }
                         }
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
+
                             if let Ok((target_h, target_p)) = crate::onion::circuit::decode_relay_target(&payload) {
+                                // V-11: Enforce is_exit check for Relay cells
+                                if !is_exit_allowed && !pool.is_mesh_target(&target_h, target_p).await {
+                                    error!("Relay cell rejected: not an exit relay and target is not a known mesh node");
+                                    break;
+                                }
                                 match policy.resolve_and_connect(&target_h, target_p).await {
+
                                     Ok(target_s) => {
                                         let seq = relay_hop.next_send_seq;
                                         relay_hop.next_send_seq += 1;
@@ -1150,7 +1195,7 @@ pub async fn handle_onion_relay_connection(
                                             if client.write_all(&resp).await.is_ok() {
                                                 info!("Exit relay successfully bridged circuit {} to target {}:{}", relay_hop.circuit_id, target_h, target_p);
                                                 downstream = Some(GuardedSocket::new(target_s, kill_switch_arc.clone()).begin_verification().mark_verified());
-                                                is_exit = true;
+                                                is_currently_exit_hop = true;
                                             }
                                         }
                                     }

@@ -21,8 +21,15 @@ impl NetnsConfig {
 
     /// Generates strict nftables firewall rules dropping all outbound traffic
     /// except packets destined for the authorized proxy endpoint.
-    pub fn generate_nftables_rules(&self) -> String {
-        format!(
+    pub fn generate_nftables_rules(&self) -> Result<String, std::io::Error> {
+        let ip: std::net::IpAddr = self.authorized_proxy_ip.parse().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid authorized_proxy_ip for nftables: {}", e)
+            )
+        })?;
+
+        Ok(format!(
             r#"table inet anonguard_filter {{
     chain output {{
         type filter hook output priority 0; policy drop;
@@ -40,8 +47,8 @@ impl NetnsConfig {
         drop
     }}
 }}"#,
-            self.authorized_proxy_ip, self.authorized_proxy_port
-        )
+            ip, self.authorized_proxy_port
+        ))
     }
 
     /// Applies the strict nftables ruleset to the Linux kernel via `nft -f -`.
@@ -50,7 +57,7 @@ impl NetnsConfig {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
-        let rules = self.generate_nftables_rules();
+        let rules = self.generate_nftables_rules()?;
         let mut child = Command::new("nft")
             .arg("-f")
             .arg("-")

@@ -165,7 +165,7 @@ async fn handle_connection(
 
             let mut dir = directory.write().await;
             if let Some(existing) = dir.get(&node_id) {
-                if !existing.auth_token.is_empty() && existing.auth_token != auth_token {
+                if !existing.auth_token.is_empty() && subtle::ConstantTimeEq::ct_eq(existing.auth_token.as_bytes(), auth_token.as_bytes()).unwrap_u8() == 0 {
                     warn!(
                         "Rejected REGISTER_REVERSE for node {} (auth token mismatch/hijacking attempt)",
                         node_id
@@ -209,7 +209,7 @@ async fn handle_connection(
             };
 
             if let Some(entry) = entry_opt {
-                if !entry.auth_token.is_empty() && entry.auth_token != provided_token {
+                if !entry.auth_token.is_empty() && subtle::ConstantTimeEq::ct_eq(entry.auth_token.as_bytes(), provided_token.as_bytes()).unwrap_u8() == 0 {
                     warn!(
                         "Rejected unauthorized CONNECT_REVERSE for node {} (token mismatch)",
                         node_id
@@ -322,7 +322,7 @@ mod tests {
 
         let mut client2 = TcpStream::connect(addr2).await.unwrap();
         let now = crate::mesh::sybil::current_timestamp_secs();
-        let nonce = crate::mesh::sybil::solve_pow("node2", now, test_difficulty);
+        let nonce = crate::mesh::sybil::solve_pow_bounded("node2", now, test_difficulty).expect("PoW failed");
         let msg = format!("REGISTER_REVERSE node2 secret_auth_123 {} {}\n", now, nonce);
         client2.write_all(msg.as_bytes()).await.unwrap();
 
@@ -380,7 +380,7 @@ mod tests {
         });
 
         let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
-        let nonce_atk = crate::mesh::sybil::solve_pow("node2", now, test_difficulty);
+        let nonce_atk = crate::mesh::sybil::solve_pow_bounded("node2", now, test_difficulty).expect("PoW failed");
         let msg_atk = format!("REGISTER_REVERSE node2 {} {}\n", now, nonce_atk);
         attacker2.write_all(msg_atk.as_bytes()).await.unwrap();
         let mut err_resp2 = [0u8; 64];
