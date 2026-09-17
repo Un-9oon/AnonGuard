@@ -123,6 +123,10 @@ struct Args {
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
     #[arg(long)]
     fetch_from: Option<String>,
+
+    /// Path to persist the relay's long-term Ed25519 identity key
+    #[arg(long)]
+    identity_key_path: Option<PathBuf>,
 }
 
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
@@ -134,6 +138,23 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
         bytes[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(bytes)
+}
+
+fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::SigningKey {
+    use std::io::Write;
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return ed25519_dalek::SigningKey::from_bytes(&arr);
+        }
+    }
+    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::File::create(path) {
+        let _ = f.write_all(&key.to_bytes());
+    }
+    key
 }
 
 #[tokio::main]
@@ -211,6 +232,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         #[cfg(not(target_os = "linux"))]
         enable_firewall_killswitch: false,
         pow_difficulty: args.pow_difficulty,
+        identity_key_path: args.identity_key_path.unwrap_or_else(|| {
+            let mut p = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("/etc/anonguard"));
+            p.push(".local/share/anonguard/identity.key");
+            p
+        }),
         ..GuardConfig::default()
     };
 
@@ -275,21 +303,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.relay {
         if let Some(tracker_url) = args.announce.clone() {
             let my_listen = args.listen.clone();
+            let pow_difficulty = args.pow_difficulty;
+            let node_id = format!("relay-{}", my_listen);
             tokio::spawn(async move {
-                // Parse host/port from tracker_url (e.g. http://127.0.0.1:8080)
                 let host_port = tracker_url.trim_start_matches("http://");
-                let proxy_uri = format!("socks5://{}", my_listen);
-                let payload = format!(
-                    "POST /register HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n\r\n{}",
-                    host_port,
-                    proxy_uri.len(),
-                    proxy_uri
-                );
-
                 loop {
+                    let now = anonguard::mesh::sybil::current_timestamp_secs();
+                    let nonce = anonguard::mesh::sybil::solve_pow(&node_id, now, pow_difficulty);
+                    let line = format!(
+                        "REGISTER_REVERSE {} {} {} {}\n",
+                        node_id, my_listen, now, nonce
+                    );
+
                     if let Ok(mut stream) = tokio::net::TcpStream::connect(host_port).await {
                         use tokio::io::AsyncWriteExt;
-                        let _ = stream.write_all(payload.as_bytes()).await;
+                        let _ = stream.write_all(line.as_bytes()).await;
                         tracing::debug!("Announced presence to tracker {}", tracker_url);
                     } else {
                         tracing::warn!("Failed to announce to tracker {}", tracker_url);
@@ -458,7 +486,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let kill_switch = KillSwitchController::new();
-    let gateway = GatewayServer::new(config, pool, kill_switch);
+    let relay_identity_key =
+        std::sync::Arc::new(load_or_create_identity_key(&config.identity_key_path));
+    let gateway = GatewayServer::new(config, pool, kill_switch, relay_identity_key);
 
     let run_res = tokio::select! {
         res = async {

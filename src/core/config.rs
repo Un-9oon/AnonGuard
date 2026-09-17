@@ -55,6 +55,8 @@ pub struct GuardConfig {
     pub enable_firewall_killswitch: bool,
     /// Registration PoW difficulty in leading zero bits
     pub pow_difficulty: u32,
+    /// Path to persist the relay's long-term Ed25519 identity key
+    pub identity_key_path: std::path::PathBuf,
 }
 
 impl Default for GuardConfig {
@@ -89,6 +91,7 @@ impl Default for GuardConfig {
             listen_addr: "127.0.0.1:9050".to_string(),
             enable_firewall_killswitch: false,
             pow_difficulty: 20,
+            identity_key_path: std::path::PathBuf::from("/etc/anonguard/identity.key"),
         }
     }
 }

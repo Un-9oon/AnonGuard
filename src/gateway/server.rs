@@ -34,10 +34,16 @@ pub struct GatewayServer {
     jitter: Option<JitterEngine>,
     connection_semaphore: Arc<Semaphore>,
     ip_connections: Arc<RwLock<HashMap<IpAddr, u32>>>,
+    relay_identity_key: Arc<Ed25519SigningKey>,
 }
 
 impl GatewayServer {
-    pub fn new(config: GuardConfig, pool: ProxyPool, kill_switch: KillSwitchController) -> Self {
+    pub fn new(
+        config: GuardConfig,
+        pool: ProxyPool,
+        kill_switch: KillSwitchController,
+        relay_identity_key: Arc<Ed25519SigningKey>,
+    ) -> Self {
         let jitter = if config.enable_quantum {
             let ensemble = if config.quantum_ensemble.to_lowercase() == "gue" {
                 QuantumEnsemble::GUE
@@ -71,6 +77,7 @@ impl GatewayServer {
             jitter,
             connection_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_CONNECTIONS)),
             ip_connections: Arc::new(RwLock::new(HashMap::new())),
+            relay_identity_key,
         }
     }
 
@@ -129,6 +136,7 @@ impl GatewayServer {
             let jitter = self.jitter.clone();
             let config = self.config.clone();
             let ip_tracker = self.ip_connections.clone();
+            let relay_identity_key = self.relay_identity_key.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -233,10 +241,6 @@ impl GatewayServer {
                     } else {
                         info!("Relay Mode: Processing incoming in-band Onion Cell connection");
                         let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
-                        // Generate or load the relay's long-term Ed25519 identity key.
-                        // In production this should be persisted to disk; here we use an
-                        // ephemeral key per-process (stable within one daemon lifetime).
-                        let relay_identity_key = Ed25519SigningKey::generate(&mut OsRng);
                         let _ = handle_onion_relay_connection(
                             client,
                             Some(kill_switch.clone()),
