@@ -108,8 +108,7 @@ async fn test_live_inband_telescopic_circuit_e2e() {
 
     // 8. Client sends encrypted Data cell through the 3-hop circuit
     let req_data = b"GET /onion-test HTTP/1.1\r\n\r\n";
-    let mut data_cell =
-        OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data).unwrap();
+    let mut data_cell = OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data).unwrap();
     let wire_forward = circuit.wrap_forward(&mut data_cell);
     guard_stream.write_all(&wire_forward).await.unwrap();
 
@@ -246,7 +245,9 @@ async fn test_mitm_identity_key_mismatch_is_rejected() {
 
     let err_msg = match res {
         Err(e) => e.to_string(),
-        Ok(_) => panic!("Client must reject a relay whose identity key does not match the pinned consensus key"),
+        Ok(_) => panic!(
+            "Client must reject a relay whose identity key does not match the pinned consensus key"
+        ),
     };
     assert!(
         err_msg.contains("identity key does not match") || err_msg.contains("MITM"),

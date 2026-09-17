@@ -72,20 +72,25 @@ impl QuantumRmtEngine {
     fn sample_gue(&self) -> f64 {
         let mut rng = rand::thread_rng();
 
-        loop {
-            // Envelope generation: Exponential distribution is a good fit for the tail.
-            // Simplified rejection sampling against uniform box [0, 3] covering 99.9% of mass
-            // In a highly optimized version, we'd use a fitted bounding function.
+        let mut best_s = 0.886; // Default to peak if all iterations fail
+        let mut found = false;
+
+        // Bounded iteration (constant time) to prevent timing side-channels (V-002 fix).
+        // 16 iterations gives a very high probability of success while maintaining O(1) execution time.
+        for _ in 0..16 {
             let s: f64 = rng.gen_range(0.0..3.0);
             let p_s = (32.0 / (PI * PI)) * (s * s) * (-(4.0 / PI) * (s * s)).exp();
-
-            // Peak of GUE Wigner is roughly at s = sqrt(pi/4) approx 0.886
-            // Max value is P(0.886) approx 0.932. Let's box max Y at 1.0
             let y: f64 = rng.gen_range(0.0..1.0);
 
-            if y <= p_s {
-                return s;
+            // If we found a valid sample and haven't already locked one in, keep it.
+            // We evaluate both sides fully to keep execution path uniform.
+            let valid = y <= p_s;
+            if valid && !found {
+                best_s = s;
+                found = true;
             }
         }
+
+        best_s
     }
 }

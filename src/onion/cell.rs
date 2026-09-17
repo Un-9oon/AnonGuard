@@ -17,6 +17,7 @@ pub enum CellCommand {
     Extended = 6,
     Data = 7,
     DataAck = 8,
+    Dummy = 9,
 }
 
 impl CellCommand {
@@ -30,6 +31,7 @@ impl CellCommand {
             6 => Some(Self::Extended),
             7 => Some(Self::Data),
             8 => Some(Self::DataAck),
+            9 => Some(Self::Dummy),
             _ => None,
         }
     }

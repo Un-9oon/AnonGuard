@@ -258,11 +258,13 @@ impl GatewayServer {
                         return;
                     }
                     Err(_) => {
-                        warn!("SOCKS5 handshake timed out after {}s (Slowloris defense)", timeout_duration.as_secs());
+                        warn!(
+                            "SOCKS5 handshake timed out after {}s (Slowloris defense)",
+                            timeout_duration.as_secs()
+                        );
                         return;
                     }
                 };
-
 
                 // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                 let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
@@ -729,18 +731,16 @@ pub async fn stream_onion_circuit(
             };
 
             match cell_res {
-                Ok(cell) => {
-                    match cell.command {
-                        CellCommand::Data => {
-                            let len = (cell.length as usize).min(cell.payload.len());
-                            if client_write.write_all(&cell.payload[..len]).await.is_err() {
-                                break;
-                            }
+                Ok(cell) => match cell.command {
+                    CellCommand::Data => {
+                        let len = (cell.length as usize).min(cell.payload.len());
+                        if client_write.write_all(&cell.payload[..len]).await.is_err() {
+                            break;
                         }
-                        CellCommand::Destroy => break,
-                        _ => {}
                     }
-                }
+                    CellCommand::Destroy => break,
+                    _ => {}
+                },
                 Err(e) => {
                     warn!("Failed to unwrap backward onion cell: {}", e);
                     break;
@@ -823,9 +823,13 @@ pub async fn build_telescopic_circuit(
     let pinned_key_0 = pinned_identity_keys
         .first()
         .ok_or("No pinned identity key for Hop 0 — refusing unauthenticated handshake")?;
-    let (fwd0, bwd0, mac0) =
-        process_created_cell(&created_cell, client_secret_0, &client_pub_0_bytes, pinned_key_0)
-            .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
+    let (fwd0, bwd0, mac0) = process_created_cell(
+        &created_cell,
+        client_secret_0,
+        &client_pub_0_bytes,
+        pinned_key_0,
+    )
+    .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
     circuit.add_hop(fwd0, bwd0, mac0);
     // 2. Telescopic circuit extension for subsequent hops
     #[allow(clippy::needless_range_loop)]
@@ -855,9 +859,9 @@ pub async fn build_telescopic_circuit(
             .unwrap_backward(&mut return_wire)
             .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {}", hop_idx, e))?;
 
-        let pinned_key = pinned_identity_keys
-            .get(hop_idx)
-            .ok_or_else(|| format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake"))?;
+        let pinned_key = pinned_identity_keys.get(hop_idx).ok_or_else(|| {
+            format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake")
+        })?;
         let (fwd, bwd, mac) =
             process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key)
                 .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {e}"))?;
@@ -868,14 +872,8 @@ pub async fn build_telescopic_circuit(
     // 3. Instruct the exit hop to connect in-band to target_host:target_port
     let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
         .map_err(|e| format!("Failed to encode RELAY target payload: {}", e))?;
-    let mut relay_cell = OnionCell::new(
-        circuit_id,
-        1,
-        CellCommand::Relay,
-        0,
-        &relay_payload,
-    )
-    .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
+    let mut relay_cell = OnionCell::new(circuit_id, 1, CellCommand::Relay, 0, &relay_payload)
+        .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
 
     let wire_buffer = circuit.wrap_forward(&mut relay_cell);
     stream.write_all(&wire_buffer).await?;
@@ -916,8 +914,13 @@ pub async fn handle_onion_relay_connection(
 
     // 1. Read initial CREATE cell from client
     let mut initial_buf = [0u8; ONION_CELL_SIZE];
-    match tokio::time::timeout(tokio::time::Duration::from_secs(10), client.read_exact(&mut initial_buf)).await {
-        Ok(Ok(_)) => {},
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        client.read_exact(&mut initial_buf),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(format!("Failed to read initial CREATE cell: {}", e).into()),
         Err(_) => return Err("Timeout waiting for initial CREATE cell (Slowloris defense)".into()),
     }

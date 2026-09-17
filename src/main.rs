@@ -14,7 +14,7 @@ use anonguard::mesh::ProxyPool;
 #[derive(Parser, Debug)]
 #[command(
     name = "anonguard-daemon",
-    version = "0.1.0",
+    version = "0.2.0",
     about = "AnonGuard Standalone Anonymity Gateway"
 )]
 struct Args {
@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = Args::parse();
 
     info!(
-        version = "0.1.0",
+        version = "0.2.0",
         listen_addr = %args.listen,
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );

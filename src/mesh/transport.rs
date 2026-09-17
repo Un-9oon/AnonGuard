@@ -6,7 +6,6 @@
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
 use rand::rngs::OsRng;
-use sha2::{Digest, Sha256};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -204,20 +203,17 @@ impl SecureTransportSession {
 }
 
 fn derive_transport_keys(shared_secret: &[u8; 32], is_client: bool) -> ([u8; 32], [u8; 32]) {
-    let mut hasher_a = Sha256::new();
-    hasher_a.update(shared_secret);
-    hasher_a.update(b"AnonGuard-Client-To-Server-v1");
-    let c2s = hasher_a.finalize();
+    use hkdf::Hkdf;
 
-    let mut hasher_b = Sha256::new();
-    hasher_b.update(shared_secret);
-    hasher_b.update(b"AnonGuard-Server-To-Client-v1");
-    let s2c = hasher_b.finalize();
+    let hk = Hkdf::<sha2::Sha256>::new(None, shared_secret);
 
     let mut k_c2s = [0u8; 32];
+    hk.expand(b"AnonGuard-Client-To-Server-v2-HKDF", &mut k_c2s)
+        .expect("HKDF-Expand failed for C2S key");
+
     let mut k_s2c = [0u8; 32];
-    k_c2s.copy_from_slice(&c2s);
-    k_s2c.copy_from_slice(&s2c);
+    hk.expand(b"AnonGuard-Server-To-Client-v2-HKDF", &mut k_s2c)
+        .expect("HKDF-Expand failed for S2C key");
 
     if is_client {
         (k_c2s, k_s2c)

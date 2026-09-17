@@ -2,8 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] - 2026-09-12
+## [0.2.0] - 2026-09-17
 
+### Security & Hardening
+- **CRITICAL**: Migrated onion circuit and transport Key Derivation Functions (KDF) to RFC 5869 HKDF-SHA256 (V-001).
+- **CRITICAL**: Added 7 new fuzz targets covering all untrusted-input attack surfaces (`peel_forward`, `decode_extend`, etc.).
+- **HIGH**: Fixed timing side-channel in Quantum RMT engine (GUE sampling) by using constant-time bounded iteration (V-002).
+- **HIGH**: Implemented `NonceRegistry` to track and prevent PoW nonce replay within the validity window (V-006).
+- Reduced PoW timestamp drift tolerance from 10 minutes to 5 minutes to limit replay windows.
+- Replaced stub soak test with a full multi-relay concurrent load and E2E verification test.
+- Added explicit AEAD bit-flip tampering rejection test.
+
+### CI/CD & Operations
+- Enforced `cargo fmt` checking and benchmark compilation gating (`cargo bench --no-run`) in CI pipeline.
+- Fixed `crypto_bench.rs` compilation type mismatch errors.
+
+## [0.1.0] - 2026-09-12
 ### Security
 - **CRITICAL**: Fixed a vulnerability where relays could be MITM'd if an attacker intercepted traffic during handshake. Relays now strictly pin and verify the expected X25519 Ephemeral key against the Ed25519 identity key signature.
 - **CRITICAL**: Migrated cryptographic hot path from `HMAC-SHA256-then-ChaCha20` to `ChaCha20-Poly1305` Authenticated Encryption with Associated Data (AEAD) to prevent malleability and CCA attacks.

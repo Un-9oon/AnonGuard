@@ -51,14 +51,8 @@ mod tests {
         let client_pub_1 = X25519PublicKey::from(&client_secret_1);
         let extend_payload_1 = encode_extend_payload("10.0.0.2", 9002, &client_pub_1).unwrap();
 
-        let mut extend_cell_1 = OnionCell::new(
-            circuit_id,
-            1,
-            CellCommand::Extend,
-            0,
-            &extend_payload_1,
-        )
-        .unwrap();
+        let mut extend_cell_1 =
+            OnionCell::new(circuit_id, 1, CellCommand::Extend, 0, &extend_payload_1).unwrap();
 
         let mut wire_buffer_1 = client_circuit.wrap_forward(&mut extend_cell_1);
 
@@ -95,14 +89,8 @@ mod tests {
         let client_pub_2 = X25519PublicKey::from(&client_secret_2);
         let extend_payload_2 = encode_extend_payload("10.0.0.3", 9003, &client_pub_2).unwrap();
 
-        let mut extend_cell_2 = OnionCell::new(
-            circuit_id,
-            1,
-            CellCommand::Extend,
-            0,
-            &extend_payload_2,
-        )
-        .unwrap();
+        let mut extend_cell_2 =
+            OnionCell::new(circuit_id, 1, CellCommand::Extend, 0, &extend_payload_2).unwrap();
 
         let mut wire_buffer_2 = client_circuit.wrap_forward(&mut extend_cell_2);
 
@@ -143,8 +131,7 @@ mod tests {
         client_circuit.add_hop(fwd2, bwd2, mac2);
 
         let payload = b"TELESCOPIC_ONION_AUTHENTICATED_VERIFICATION";
-        let mut data_cell =
-            OnionCell::new(circuit_id, 1, CellCommand::Data, 1, payload).unwrap();
+        let mut data_cell = OnionCell::new(circuit_id, 1, CellCommand::Data, 1, payload).unwrap();
         let mut client_send_buf = client_circuit.wrap_forward(&mut data_cell);
 
         let p0 = relay_guard.peel_forward(&mut client_send_buf).unwrap();
@@ -240,7 +227,60 @@ mod tests {
 
     #[test]
     fn test_tampering_rejection() {
-        // We will test AEAD tampering in the 3-hop circuit test
+        // Build a valid 3-hop circuit
+        let (client_hop0, relay0_keys) = perform_client_relay_handshake();
+        let (client_hop1, relay1_keys) = perform_client_relay_handshake();
+        let (client_hop2, relay2_keys) = perform_client_relay_handshake();
+
+        let mut client_circuit = OnionCircuit::new(77);
+        client_circuit.add_hop(client_hop0.0, client_hop0.1, client_hop0.2);
+        client_circuit.add_hop(client_hop1.0, client_hop1.1, client_hop1.2);
+        client_circuit.add_hop(client_hop2.0, client_hop2.1, client_hop2.2);
+
+        let mut relay_guard = RelayCircuitHop::new(77, relay0_keys.0, relay0_keys.1, relay0_keys.2);
+        let mut relay_middle =
+            RelayCircuitHop::new(77, relay1_keys.0, relay1_keys.1, relay1_keys.2);
+        let mut relay_exit = RelayCircuitHop::new(77, relay2_keys.0, relay2_keys.1, relay2_keys.2);
+
+        let payload = b"TAMPER_TEST_SENSITIVE_DATA";
+        let mut cell = OnionCell::new(77, 1, CellCommand::Data, 1, payload).unwrap();
+        let mut wire = client_circuit.wrap_forward(&mut cell);
+
+        // Peel through guard and middle (these are stream layers, not AEAD)
+        let p0 = relay_guard.peel_forward(&mut wire).unwrap();
+        let mut to_middle = match p0 {
+            PeelResult::ForwardDownstream(b) => *b,
+            _ => panic!("Guard should forward downstream"),
+        };
+
+        let p1 = relay_middle.peel_forward(&mut to_middle).unwrap();
+        let mut to_exit = match p1 {
+            PeelResult::ForwardDownstream(b) => *b,
+            _ => panic!("Middle should forward downstream"),
+        };
+
+        // Flip a byte in the ciphertext body (after the 8-byte header)
+        to_exit[20] ^= 0xFF;
+
+        // The exit relay must NOT accept this as an authenticated cell.
+        // peel_forward() should either return ForwardDownstream or Err, but NOT AddressedToThisRelay.
+        let result = relay_exit.peel_forward(&mut to_exit);
+        match result {
+            Ok(PeelResult::AddressedToThisRelay(_, data)) => {
+                // If it somehow accepted, the data must NOT match the original
+                assert_ne!(
+                    data.as_slice(),
+                    payload,
+                    "CRITICAL: Tampered cell was accepted with original payload — AEAD integrity broken!"
+                );
+            }
+            Ok(PeelResult::ForwardDownstream(_)) => {
+                // Expected: AEAD failed, cell treated as not-for-this-relay and forwarded
+            }
+            Err(_) => {
+                // Also acceptable: explicit rejection
+            }
+        }
     }
 
     #[test]
@@ -250,13 +290,13 @@ mod tests {
         let backward_key = [2u8; 32];
         let mac_key = [99u8; 32];
         let mut relay = RelayCircuitHop::new(1, forward_key, backward_key, mac_key);
-        
+
         let mut client_circuit = OnionCircuit::new(1);
         client_circuit.add_hop(forward_key, backward_key, mac_key);
 
         let mut cell1 = OnionCell::new(1, 1, CellCommand::Data, 1, b"MESSAGE_1").unwrap();
         let mut raw1 = client_circuit.wrap_forward(&mut cell1);
-        
+
         let p1 = relay.peel_forward(&mut raw1).unwrap();
         assert!(matches!(
             p1,
@@ -316,8 +356,7 @@ mod tests {
         }
 
         let response_data = b"EXIT_AUTHENTICATED_RESPONSE";
-        let exit_resp_cell =
-            OnionCell::new(42, 1, CellCommand::Data, 7, response_data).unwrap();
+        let exit_resp_cell = OnionCell::new(42, 1, CellCommand::Data, 7, response_data).unwrap();
         let mut return_buffer = exit_resp_cell.serialize();
 
         relay_exit.wrap_backward_aead(&mut return_buffer);

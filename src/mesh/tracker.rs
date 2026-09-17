@@ -78,9 +78,14 @@ async fn handle_connection(
     use tokio::io::AsyncReadExt;
     let mut reader = BufReader::new(stream);
     let mut first_line = String::new();
-    
-    match tokio::time::timeout(tokio::time::Duration::from_secs(5), (&mut reader).take(4096).read_line(&mut first_line)).await {
-        Ok(Ok(_)) => {},
+
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        (&mut reader).take(4096).read_line(&mut first_line),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             warn!("Tracker read timed out (Slowloris defense)");

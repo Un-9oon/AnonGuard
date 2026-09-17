@@ -2,13 +2,16 @@
 //!
 //! Provides cryptographic Proof-of-Work (PoW) verification for node registration
 //! and enforces BGP/CIDR subnet diversity across 3-hop circuits.
+//! Includes a NonceRegistry to prevent PoW nonce replay within the validity window.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const DEFAULT_POW_DIFFICULTY: u32 = 28; // 28 leading zero bits (default production difficulty)
-pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 600; // 10 minutes window
+pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300; // 5 minutes window (reduced from 10 to limit replay)
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SybilError {
@@ -51,6 +54,45 @@ impl std::fmt::Display for SybilError {
 }
 
 impl std::error::Error for SybilError {}
+
+/// Tracks recently-seen PoW nonces to prevent replay within the validity window.
+/// Entries are automatically purged when they fall outside MAX_TIMESTAMP_DRIFT_SECS.
+pub struct NonceRegistry {
+    /// Maps (node_id, nonce) -> timestamp of first observation
+    seen: Mutex<HashMap<(String, u64), u64>>,
+}
+
+impl NonceRegistry {
+    pub fn new() -> Self {
+        Self {
+            seen: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Checks if a nonce has been seen before for the given node_id.
+    /// If not seen, records it and returns false ("not a replay").
+    /// If already seen, returns true ("replay detected").
+    pub fn check_and_record(&self, node_id: &str, nonce: u64, current_time: u64) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+
+        // Purge expired entries (outside 2x the drift window for safety)
+        let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
+        seen.retain(|_, ts| *ts > expiry_threshold);
+
+        let key = (node_id.to_string(), nonce);
+        if seen.contains_key(&key) {
+            return true; // Replay detected
+        }
+        seen.insert(key, current_time);
+        false // First time seen
+    }
+}
+
+impl Default for NonceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Verifies a relay's cryptographic Proof-of-Work challenge.
 pub fn verify_pow(
@@ -221,11 +263,17 @@ mod tests {
         // Colliding IPv6 circuit sharing 2001:0db8::/32
         let colliding_ipv6_circuit = ["2001:0db8:85a3::1", "2001:0db8:1234::2", "2001:0db9::3"];
         let err_ipv6 = validate_circuit_diversity(&colliding_ipv6_circuit).unwrap_err();
-        assert_eq!(err_ipv6, SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8]));
-        
+        assert_eq!(
+            err_ipv6,
+            SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8])
+        );
+
         // Ensure bracketed IPv6 works
         let colliding_bracketed = ["[2001:0db8::1]", "2001:db8:ffff::2", "2001:0db9::3"];
         let err_bracket = validate_circuit_diversity(&colliding_bracketed).unwrap_err();
-        assert_eq!(err_bracket, SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8]));
+        assert_eq!(
+            err_bracket,
+            SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8])
+        );
     }
 }

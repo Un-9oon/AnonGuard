@@ -1,0 +1,29 @@
+[Unit]
+Description=AnonGuard Node (High Security Profile)
+After=network.target
+
+[Service]
+Type=simple
+User=anonguard
+Group=anonguard
+# Default assumes deployment as a middle/exit node on standard ports. Adjust args as needed.
+ExecStart=/usr/local/bin/anonguard-daemon --role exit --listen 0.0.0.0:9050
+
+# Prevent logging to disk to protect user anonymity
+StandardOutput=null
+StandardError=null
+
+# Forensic & Security Hardening Sandboxing
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+
+# Ensure the kernel doesn't swap sensitive keys or packet buffers to disk
+LimitCORE=0
+# Requires Swap setup disabled globally for full effect, but this helps prevent localized memory dumps
+
+[Install]
+WantedBy=multi-user.target
