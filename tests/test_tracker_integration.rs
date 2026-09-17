@@ -21,8 +21,8 @@ async fn test_tracker_registration_end_to_end() {
     let now = anonguard::mesh::sybil::current_timestamp_secs();
     let nonce = anonguard::mesh::sybil::solve_pow(&node_id, now, pow_difficulty);
     let line = format!(
-        "REGISTER_REVERSE {} {} {} {}\n",
-        node_id, my_listen, now, nonce
+        "REGISTER_REVERSE {} {} {}\n",
+        node_id, now, nonce
     );
 
     let mut stream = TcpStream::connect(&tracker_addr)

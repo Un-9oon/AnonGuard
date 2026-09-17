@@ -1,4 +1,7 @@
 use anonguard::gateway::server::{build_telescopic_circuit, handle_onion_relay_connection};
+use anonguard::core::state_machine::{GuardedSocket, ActiveGuarded};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use anonguard::mesh::ProxyNode;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
@@ -55,9 +58,11 @@ async fn test_soak_local_relays() {
     let exit_addr = exit_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = exit_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
         let _ = handle_onion_relay_connection(
-            s,
-            None,
+            guarded_s,
+            dummy_ks,
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &exit_sk,
@@ -70,9 +75,11 @@ async fn test_soak_local_relays() {
     let middle_addr = middle_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = middle_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
         let _ = handle_onion_relay_connection(
-            s,
-            None,
+            guarded_s,
+            dummy_ks,
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &middle_sk,
@@ -85,9 +92,11 @@ async fn test_soak_local_relays() {
     let guard_addr = guard_listener.local_addr().unwrap();
     tokio::spawn(async move {
         let (s, _) = guard_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone()).begin_verification().mark_verified();
         let _ = handle_onion_relay_connection(
-            s,
-            None,
+            guarded_s,
+            dummy_ks,
             None,
             Some(anonguard::kernel::ExitPolicy::new(true)),
             &guard_sk,

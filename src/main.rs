@@ -311,8 +311,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let now = anonguard::mesh::sybil::current_timestamp_secs();
                     let nonce = anonguard::mesh::sybil::solve_pow(&node_id, now, pow_difficulty);
                     let line = format!(
-                        "REGISTER_REVERSE {} {} {} {}\n",
-                        node_id, my_listen, now, nonce
+                        "REGISTER_REVERSE {} {} {}\n",
+                        node_id, now, nonce
                     );
 
                     if let Ok(mut stream) = tokio::net::TcpStream::connect(host_port).await {
