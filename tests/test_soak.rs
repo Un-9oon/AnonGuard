@@ -1,6 +1,6 @@
+use anonguard::core::state_machine::GuardedSocket;
 use anonguard::gateway::server::{build_telescopic_circuit, handle_onion_relay_connection};
-use anonguard::core::state_machine::{GuardedSocket, ActiveGuarded};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use anonguard::mesh::ProxyNode;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
@@ -138,7 +138,7 @@ async fn test_soak_local_relays() {
         let msg = format!("SOAK_MSG_{:04}", i);
         let mut data_cell =
             OnionCell::new(circuit_id, 2, CellCommand::Data, 1, msg.as_bytes()).unwrap();
-        let wire_forward = circuit.wrap_forward(&mut data_cell);
+        let wire_forward = circuit.wrap_forward(&mut data_cell).unwrap();
         guard_stream.write_all(&wire_forward).await.unwrap();
 
         let mut wire_backward = [0u8; ONION_CELL_SIZE];
@@ -150,17 +150,17 @@ async fn test_soak_local_relays() {
             .unwrap_backward(&mut wire_backward)
             .unwrap_or_else(|_| panic!("Failed to unwrap response for message {}", i));
 
-        assert_eq!(resp_cell.command, CellCommand::Data);
+        assert_eq!(resp_cell.1.command, CellCommand::Data);
 
-        let len = resp_cell.length as usize;
+        let len = resp_cell.1.length as usize;
         let expected = format!("ECHO:{}", msg);
         assert_eq!(
-            &resp_cell.payload[..len],
+            &resp_cell.1.payload[..len],
             expected.as_bytes(),
             "Message {} response mismatch: expected '{}', got '{}'",
             i,
             expected,
-            String::from_utf8_lossy(&resp_cell.payload[..len])
+            String::from_utf8_lossy(&resp_cell.1.payload[..len])
         );
 
         successful_roundtrips += 1;

@@ -1,6 +1,6 @@
+use anonguard::core::state_machine::GuardedSocket;
 use anonguard::gateway::server::{build_telescopic_circuit, handle_onion_relay_connection};
-use anonguard::core::state_machine::{GuardedSocket, ActiveGuarded};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use anonguard::mesh::ProxyNode;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
@@ -118,7 +118,7 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     // 8. Client sends encrypted Data cell through the 3-hop circuit
     let req_data = b"GET /onion-test HTTP/1.1\r\n\r\n";
     let mut data_cell = OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data).unwrap();
-    let wire_forward = circuit.wrap_forward(&mut data_cell);
+    let wire_forward = circuit.wrap_forward(&mut data_cell).unwrap();
     guard_stream.write_all(&wire_forward).await.unwrap();
 
     // 9. Client reads response cell from the circuit
@@ -126,10 +126,10 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     guard_stream.read_exact(&mut wire_backward).await.unwrap();
     let resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
 
-    assert_eq!(resp_cell.command, CellCommand::Data);
-    let len = resp_cell.length as usize;
+    assert_eq!(resp_cell.1.command, CellCommand::Data);
+    let len = resp_cell.1.length as usize;
     assert_eq!(
-        &resp_cell.payload[..len],
+        &resp_cell.1.payload[..len],
         b"HTTP/1.1 200 OK\r\n\r\nONION_E2E_VERIFIED"
     );
 }

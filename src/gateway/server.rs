@@ -1,7 +1,7 @@
 //! Tokio asynchronous local gateway server listening on 127.0.0.1:9050.
 
 use tokio::net::{TcpListener, TcpStream};
-use crate::core::state_machine::{GuardedSocket, ActiveGuarded, Uninitialized};
+use crate::core::state_machine::{GuardedSocket, ActiveGuarded};
 use tracing::{error, info, warn};
 
 use crate::core::GuardConfig;
@@ -715,9 +715,17 @@ pub async fn stream_onion_circuit(
                 }
             };
 
-            let wire_buffer = {
+            let wire_buffer_res = {
                 let mut guard = circuit_fwd.lock().await;
                 guard.wrap_forward(&mut cell)
+            };
+            
+            let wire_buffer = match wire_buffer_res {
+                Ok(buf) => buf,
+                Err(e) => {
+                    tracing::warn!("Failed to wrap forward cell: {:?}", e);
+                    break;
+                }
             };
 
             if let Some(ref j) = jitter_fwd {
@@ -745,7 +753,7 @@ pub async fn stream_onion_circuit(
             };
 
             match cell_res {
-                Ok(cell) => match cell.command {
+                Ok((_hop, cell)) => match cell.command {
                     CellCommand::Data => {
                         let len = (cell.length as usize).min(cell.payload.len());
                         if client_write.write_all(&cell.payload[..len]).await.is_err() {
@@ -809,8 +817,8 @@ pub async fn build_telescopic_circuit(
     let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
     let client_pub_0 = x25519_dalek::PublicKey::from(&client_secret_0);
     let client_pub_0_bytes = *client_pub_0.as_bytes();
-    let create_cell = build_create_cell(circuit_id, &client_pub_0)
-        .map_err(|e| format!("Failed to build CREATE cell: {}", e))?;
+    let create_cell = build_create_cell(circuit_id, &client_pub_0, 0)
+        .map_err(|e| format!("Failed to build CREATE cell: {:?}", e))?;
     stream.write_all(&create_cell.serialize()).await?;
 
     let mut created_buf = [0u8; ONION_CELL_SIZE];
@@ -820,14 +828,16 @@ pub async fn build_telescopic_circuit(
     let pinned_key_0 = pinned_identity_keys
         .first()
         .ok_or("No pinned identity key for Hop 0 — refusing unauthenticated handshake")?;
-    let (fwd0, bwd0, mac0) = process_created_cell(
+    let hop_keys_0 = process_created_cell(
         &created_cell,
         client_secret_0,
         &client_pub_0_bytes,
         pinned_key_0,
+        circuit_id,
+        0,
     )
     .map_err(|e| format!("Hop 0 identity-bound handshake failed: {}", e))?;
-    circuit.add_hop(fwd0, bwd0, mac0);
+    circuit.add_hop(hop_keys_0).map_err(|e| format!("Failed to add hop 0: {:?}", e))?;
     // 2. Telescopic circuit extension for subsequent hops
     #[allow(clippy::needless_range_loop)]
     for hop_idx in 1..chain.len() {
@@ -836,8 +846,8 @@ pub async fn build_telescopic_circuit(
         let client_pub_bytes = *client_pub.as_bytes();
 
         let extend_payload =
-            encode_extend_payload(&chain[hop_idx].host, chain[hop_idx].port, &client_pub)
-                .map_err(|e| format!("Failed to encode EXTEND payload: {}", e))?;
+            encode_extend_payload(&chain[hop_idx].host, chain[hop_idx].port, &client_pub, hop_idx)
+                .map_err(|e| format!("Failed to encode EXTEND payload: {:?}", e))?;
         let mut extend_cell = OnionCell::new(
             circuit_id,
             hop_idx as u32,
@@ -847,39 +857,39 @@ pub async fn build_telescopic_circuit(
         )
         .map_err(|e| format!("Failed to build EXTEND cell: {}", e))?;
 
-        let wire_buffer = circuit.wrap_forward(&mut extend_cell);
+        let wire_buffer = circuit.wrap_forward(&mut extend_cell).map_err(|e| format!("Failed to wrap forward: {:?}", e))?;
         stream.write_all(&wire_buffer).await?;
 
         let mut return_wire = [0u8; ONION_CELL_SIZE];
         stream.read_exact(&mut return_wire).await?;
-        let resp_cell = circuit
+        let (_hop, resp_cell) = circuit
             .unwrap_backward(&mut return_wire)
-            .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {}", hop_idx, e))?;
+            .map_err(|e| format!("Failed to unwrap backward cell from Hop {}: {:?}", hop_idx, e))?;
 
         let pinned_key = pinned_identity_keys.get(hop_idx).ok_or_else(|| {
             format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake")
         })?;
-        let (fwd, bwd, mac) =
-            process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key)
-                .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {e}"))?;
+        let keys =
+            process_created_cell(&resp_cell, client_secret, &client_pub_bytes, pinned_key, circuit_id, hop_idx)
+                .map_err(|e| format!("Hop {hop_idx} identity-bound handshake failed: {:?}", e))?;
 
-        circuit.add_hop(fwd, bwd, mac);
+        circuit.add_hop(keys).map_err(|e| format!("Failed to add hop {}: {:?}", hop_idx, e))?;
     }
 
     // 3. Instruct the exit hop to connect in-band to target_host:target_port
     let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
-        .map_err(|e| format!("Failed to encode RELAY target payload: {}", e))?;
+        .map_err(|e| format!("Failed to encode RELAY target payload: {:?}", e))?;
     let mut relay_cell = OnionCell::new(circuit_id, 1, CellCommand::Relay, 0, &relay_payload)
         .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
 
-    let wire_buffer = circuit.wrap_forward(&mut relay_cell);
+    let wire_buffer = circuit.wrap_forward(&mut relay_cell).map_err(|e| format!("Failed to wrap forward relay cell: {:?}", e))?;
     stream.write_all(&wire_buffer).await?;
 
     let mut return_wire = [0u8; ONION_CELL_SIZE];
     stream.read_exact(&mut return_wire).await?;
-    let resp_cell = circuit
+    let (_hop, resp_cell) = circuit
         .unwrap_backward(&mut return_wire)
-        .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {}", e))?;
+        .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {:?}", e))?;
 
     if resp_cell.command != CellCommand::Relay {
         return Err(format!(
@@ -971,7 +981,7 @@ pub async fn handle_onion_relay_connection(
                                     &[],
                                 ) {
                                     let mut wire = destroy_cell.serialize();
-                                    relay_hop.wrap_backward_aead(&mut wire);
+                                    let _ = relay_hop.wrap_backward_originate(&mut wire);
                                     let _ = client.write_all(&wire).await;
                                 }
                                 break;
@@ -988,7 +998,7 @@ pub async fn handle_onion_relay_connection(
                                     &[],
                                 ) {
                                     let mut wire = destroy_cell.serialize();
-                                    relay_hop.wrap_backward_aead(&mut wire);
+                                    let _ = relay_hop.wrap_backward_originate(&mut wire);
                                     let _ = client.write_all(&wire).await;
                                 }
                                 break;
@@ -1006,7 +1016,7 @@ pub async fn handle_onion_relay_connection(
                             break;
                         };
                         let mut wire = return_cell.serialize();
-                        relay_hop.wrap_backward_aead(&mut wire);
+                        let _ = relay_hop.wrap_backward_originate(&mut wire);
                         if let Some(ref j) = jitter {
                             j.apply_delay().await;
                         }
@@ -1024,11 +1034,11 @@ pub async fn handle_onion_relay_connection(
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
                                 let extend_ok = async {
-                                    let (next_h, next_p, next_pub) = decode_extend_payload(&payload)
+                                    let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                         .map_err(|e| format!("bad EXTEND payload: {e}"))?;
                                     let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
                                         .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
-                                    let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub)
+                                    let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
                                         .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
                                     next_s.write_all(&c_cell.serialize()).await
                                         .map_err(|e| format!("failed to write CREATE to next hop: {e}"))?;
@@ -1040,7 +1050,7 @@ pub async fn handle_onion_relay_connection(
 
                                 match extend_ok {
                                     Ok((next_s, mut resp)) => {
-                                        relay_hop.wrap_backward_aead(&mut resp);
+                                        let _ = relay_hop.wrap_backward_originate(&mut resp);
                                         if client.write_all(&resp).await.is_err() { break; }
                                         downstream = Some(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified());
                                     }
@@ -1050,7 +1060,7 @@ pub async fn handle_onion_relay_connection(
                                         relay_hop.next_send_seq += 1;
                                         if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, seq, CellCommand::Destroy, 0, &[]) {
                                             let mut wire = destroy_cell.serialize();
-                                            relay_hop.wrap_backward_aead(&mut wire);
+                                            let _ = relay_hop.wrap_backward_originate(&mut wire);
                                             let _ = client.write_all(&wire).await;
                                         }
                                         break;
@@ -1070,7 +1080,7 @@ pub async fn handle_onion_relay_connection(
                     }
                     res = ds.read_exact(&mut ds_buf) => {
                         if res.is_err() { break; }
-                        relay_hop.wrap_backward(&mut ds_buf);
+                        let _ = relay_hop.wrap_backward_relay(&mut ds_buf);
                         if let Some(ref j) = jitter {
                             j.apply_delay().await;
                         }
@@ -1088,11 +1098,11 @@ pub async fn handle_onion_relay_connection(
                     match relay_hop.peel_forward(&mut client_buf) {
                         Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
                             let extend_ok = async {
-                                let (next_h, next_p, next_pub) = decode_extend_payload(&payload)
+                                let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                     .map_err(|e| format!("bad EXTEND payload: {e}"))?;
                                 let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
                                     .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
-                                let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub)
+                                let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
                                     .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
                                 next_s.write_all(&c_cell.serialize()).await
                                     .map_err(|e| format!("failed to write CREATE to next hop: {e}"))?;
@@ -1104,7 +1114,7 @@ pub async fn handle_onion_relay_connection(
 
                             match extend_ok {
                                 Ok((next_s, mut resp)) => {
-                                    relay_hop.wrap_backward_aead(&mut resp);
+                                    let _ = relay_hop.wrap_backward_originate(&mut resp);
                                     if client.write_all(&resp).await.is_err() { break; }
                                     downstream = Some(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified());
                                     is_exit = false;
@@ -1115,7 +1125,7 @@ pub async fn handle_onion_relay_connection(
                                     relay_hop.next_send_seq += 1;
                                     if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, seq, CellCommand::Destroy, 0, &[]) {
                                         let mut wire = destroy_cell.serialize();
-                                        relay_hop.wrap_backward_aead(&mut wire);
+                                        let _ = relay_hop.wrap_backward_originate(&mut wire);
                                         let _ = client.write_all(&wire).await;
                                     }
                                     break;
@@ -1136,7 +1146,7 @@ pub async fn handle_onion_relay_connection(
                                             b"CONNECTED",
                                         ) {
                                             let mut resp = resp_cell.serialize();
-                                            relay_hop.wrap_backward_aead(&mut resp);
+                                            let _ = relay_hop.wrap_backward_originate(&mut resp);
                                             if client.write_all(&resp).await.is_ok() {
                                                 info!("Exit relay successfully bridged circuit {} to target {}:{}", relay_hop.circuit_id, target_h, target_p);
                                                 downstream = Some(GuardedSocket::new(target_s, kill_switch_arc.clone()).begin_verification().mark_verified());
