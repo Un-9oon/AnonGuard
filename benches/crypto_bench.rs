@@ -1,4 +1,4 @@
-use anonguard::mesh::sybil::{solve_pow, verify_pow};
+use anonguard::mesh::sybil::{solve_pow_bounded, verify_pow};
 use anonguard::onion::cell::{CellCommand, OnionCell};
 use anonguard::onion::circuit::{HopKeys, RelayCircuitHop};
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -10,10 +10,10 @@ fn bench_pow(c: &mut Criterion) {
     let timestamp: u64 = 1600000000;
 
     group.bench_function("solve_pow_20", |b| {
-        b.iter(|| solve_pow(black_box("test_domain"), black_box(timestamp), difficulty))
+        b.iter(|| solve_pow_bounded(black_box("test_domain"), black_box(timestamp), difficulty).unwrap())
     });
 
-    let nonce = solve_pow("test_domain", timestamp, difficulty);
+    let nonce = solve_pow_bounded("test_domain", timestamp, difficulty).unwrap();
     group.bench_function("verify_pow", |b| {
         b.iter(|| {
             verify_pow(
