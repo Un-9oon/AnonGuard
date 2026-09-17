@@ -180,13 +180,17 @@ impl GatewayServer {
                         }
 
                         let (target_host, target_port) =
-                            match crate::gateway::chain::read_socks5_request(&mut client).await {
-                                Ok(res) => res,
-                                Err(e) => {
-                                    error!(
-                                        "Relay Mode: Failed to intercept SOCKS5 handshake: {}",
-                                        e
-                                    );
+                            match tokio::time::timeout(
+                                tokio::time::Duration::from_secs(10),
+                                crate::gateway::chain::read_socks5_request(&mut client)
+                            ).await {
+                                Ok(Ok(target)) => target,
+                                Ok(Err(e)) => {
+                                    warn!("Relay Mode: SOCKS5 handshake failed: {}", e);
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!("Relay Mode: SOCKS5 handshake timed out (Slowloris defense)");
                                     return;
                                 }
                             };

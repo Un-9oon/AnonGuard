@@ -24,6 +24,7 @@ pub struct DirectoryAuthority {
     active_relays: Arc<RwLock<HashMap<String, RelayDescriptor>>>,
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
+    nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
 }
 
 impl DirectoryAuthority {
@@ -42,6 +43,7 @@ impl DirectoryAuthority {
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_AUTHORITY_CONNECTIONS,
             )),
+            nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
 
@@ -66,6 +68,10 @@ impl DirectoryAuthority {
 
         if !is_valid_pow {
             return Err("Invalid or insufficient Proof-of-Work challenge solution".to_string());
+        }
+
+        if self.nonce_registry.check_and_record(&descriptor.node_id, descriptor.pow_nonce, now) {
+            return Err("PoW replay attack detected".to_string());
         }
 
         let mut relays = self.active_relays.write().await;
@@ -131,12 +137,21 @@ impl DirectoryAuthority {
             let auth_id = self.authority_id.clone();
             let signing_key = self.signing_key.clone();
             let pow_difficulty = self.pow_difficulty;
+            let registry = self.nonce_registry.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
-                match SecureTransportSession::server_handshake(stream, Some(&signing_key)).await {
-                    Ok(mut session) => {
-                        while let Ok(frame) = session.read_frame().await {
+                let handshake_res = tokio::time::timeout(
+                    tokio::time::Duration::from_secs(15),
+                    SecureTransportSession::server_handshake(stream, Some(&signing_key))
+                ).await;
+                
+                match handshake_res {
+                    Ok(Ok(mut session)) => {
+                        while let Ok(Ok(frame)) = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(15),
+                            session.read_frame()
+                        ).await {
                             let text = String::from_utf8_lossy(&frame);
                             if text.starts_with("GET_CONSENSUS") {
                                 let relays = active_relays.read().await;
@@ -167,6 +182,8 @@ impl DirectoryAuthority {
                                             now,
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
+                                        } else if registry.check_and_record(&desc.node_id, desc.pow_nonce, now) {
+                                            let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
                                             if existing.identity_key_ed25519
                                                 != desc.identity_key_ed25519
@@ -196,8 +213,11 @@ impl DirectoryAuthority {
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         warn!("Authority secure handshake from {} failed: {}", addr, e);
+                    }
+                    Err(_) => {
+                        warn!("Authority secure handshake from {} timed out (Slowloris defense)", addr);
                     }
                 }
             });

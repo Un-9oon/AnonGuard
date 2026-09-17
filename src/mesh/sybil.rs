@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_POW_DIFFICULTY: u32 = 28; // 28 leading zero bits (default production difficulty)
+pub const DEFAULT_POW_DIFFICULTY: u32 = 20; // 28 leading zero bits (default production difficulty)
 pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300; // 5 minutes window (reduced from 10 to limit replay)
 
 #[derive(Debug, PartialEq, Eq)]

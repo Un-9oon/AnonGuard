@@ -9,7 +9,7 @@ use tracing::{info, warn};
 #[derive(Clone)]
 pub struct ReverseNodeEntry {
     pub auth_token: String,
-    pub streams: Arc<Mutex<Vec<TcpStream>>>,
+    pub streams: Arc<Mutex<Vec<(TcpStream, tokio::sync::OwnedSemaphorePermit)>>>,
 }
 
 type Directory = Arc<RwLock<HashMap<String, ReverseNodeEntry>>>;
@@ -21,6 +21,7 @@ pub struct TrackerServer {
     directory: Directory,
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
+    nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
 }
 
 impl TrackerServer {
@@ -36,6 +37,7 @@ impl TrackerServer {
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_TRACKER_CONNECTIONS,
             )),
+            nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
 
@@ -60,9 +62,9 @@ impl TrackerServer {
             };
             let dir = self.directory.clone();
             let pow_difficulty = self.pow_difficulty;
+            let registry = self.nonce_registry.clone();
             tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(e) = handle_connection(stream, dir, pow_difficulty).await {
+                if let Err(e) = handle_connection(stream, dir, pow_difficulty, registry, permit).await {
                     warn!("Tracker connection from {} failed: {}", addr, e);
                 }
             });
@@ -74,6 +76,8 @@ async fn handle_connection(
     stream: TcpStream,
     directory: Directory,
     pow_difficulty: u32,
+    nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut reader = BufReader::new(stream);
@@ -146,6 +150,17 @@ async fn handle_connection(
                 return Ok(());
             }
 
+            if nonce_registry.check_and_record(&node_id, nonce, now) {
+                warn!(
+                    "Rejected REGISTER_REVERSE for node {} (PoW replay detected)",
+                    node_id
+                );
+                use tokio::io::AsyncWriteExt;
+                let mut s = reader.into_inner();
+                let _ = s.write_all(b"ERROR_POW_REPLAY\n").await;
+                return Ok(());
+            }
+
             let mut dir = directory.write().await;
             if let Some(existing) = dir.get(&node_id) {
                 if !existing.auth_token.is_empty() && existing.auth_token != auth_token {
@@ -172,7 +187,7 @@ async fn handle_connection(
                 auth_token,
                 streams: Arc::new(Mutex::new(Vec::new())),
             });
-            entry.streams.lock().await.push(raw_stream);
+            entry.streams.lock().await.push((raw_stream, permit));
         } else {
             warn!("Rejected malformed REGISTER_REVERSE (missing PoW credentials)");
             use tokio::io::AsyncWriteExt;
@@ -207,7 +222,7 @@ async fn handle_connection(
 
                 let popped_stream = entry.streams.lock().await.pop();
 
-                if let Some(mut target_stream) = popped_stream {
+                if let Some((mut target_stream, target_permit)) = popped_stream {
                     info!("Bridging connection to authorized Node: {}", node_id);
                     let mut client_stream = reader.into_inner();
                     // Tell the client we are ready
@@ -215,6 +230,7 @@ async fn handle_connection(
                     client_stream.write_all(b"OK\n").await?;
                     let _ =
                         tokio::io::copy_bidirectional(&mut client_stream, &mut target_stream).await;
+                    drop(target_permit);
                 } else {
                     use tokio::io::AsyncWriteExt;
                     reader.into_inner().write_all(b"ERROR_NO_STREAMS\n").await?;
@@ -265,7 +281,9 @@ mod tests {
         let dir_clone = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         // 1. Send unauthenticated registration without PoW
@@ -281,7 +299,9 @@ mod tests {
         let dir_clone2 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener2.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone2, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone2, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut client2 = TcpStream::connect(addr2).await.unwrap();
@@ -304,7 +324,9 @@ mod tests {
         let dir_clone3 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener3.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone3, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone3, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut attacker = TcpStream::connect(addr3).await.unwrap();
@@ -322,7 +344,9 @@ mod tests {
         let dir_clone4 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener4.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone4, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone4, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
@@ -339,7 +363,9 @@ mod tests {
         let dir_clone5 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener5.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone5, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone5, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut discoverer = TcpStream::connect(addr5).await.unwrap();
@@ -362,7 +388,9 @@ mod tests {
         let dir_clone6 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener6.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone6, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone6, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut auth_client = TcpStream::connect(addr6).await.unwrap();
@@ -380,7 +408,9 @@ mod tests {
         let dir_clone7 = directory.clone();
         tokio::spawn(async move {
             let (stream, _) = listener7.accept().await.unwrap();
-            let _ = handle_connection(stream, dir_clone7, test_difficulty).await;
+            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
+            let _ = handle_connection(stream, dir_clone7, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
         });
 
         let mut spammer = TcpStream::connect(addr7).await.unwrap();

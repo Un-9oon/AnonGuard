@@ -1,6 +1,7 @@
 [package]
 name = "anonguard"
 version = "0.2.0"
+rust-version = "1.81"
 edition = "2021"
 authors = ["AnonGuard Research Group"]
 description = "Cross-Layer Anonymity and Anti-Attribution Engine with Zero-Leak Guarantees"
