@@ -10,7 +10,9 @@ fn bench_pow(c: &mut Criterion) {
     let timestamp: u64 = 1600000000;
 
     group.bench_function("solve_pow_20", |b| {
-        b.iter(|| solve_pow_bounded(black_box("test_domain"), black_box(timestamp), difficulty).unwrap())
+        b.iter(|| {
+            solve_pow_bounded(black_box("test_domain"), black_box(timestamp), difficulty).unwrap()
+        })
     });
 
     let nonce = solve_pow_bounded("test_domain", timestamp, difficulty).unwrap();
