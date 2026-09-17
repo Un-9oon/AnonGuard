@@ -70,7 +70,10 @@ impl DirectoryAuthority {
             return Err("Invalid or insufficient Proof-of-Work challenge solution".to_string());
         }
 
-        if self.nonce_registry.check_and_record(&descriptor.node_id, descriptor.pow_nonce, now) {
+        if self
+            .nonce_registry
+            .check_and_record(&descriptor.node_id, descriptor.pow_nonce, now)
+        {
             return Err("PoW replay attack detected".to_string());
         }
 
@@ -143,15 +146,18 @@ impl DirectoryAuthority {
                 let _permit = permit;
                 let handshake_res = tokio::time::timeout(
                     tokio::time::Duration::from_secs(15),
-                    SecureTransportSession::server_handshake(stream, Some(&signing_key))
-                ).await;
-                
+                    SecureTransportSession::server_handshake(stream, Some(&signing_key)),
+                )
+                .await;
+
                 match handshake_res {
                     Ok(Ok(mut session)) => {
                         while let Ok(Ok(frame)) = tokio::time::timeout(
                             tokio::time::Duration::from_secs(15),
-                            session.read_frame()
-                        ).await {
+                            session.read_frame(),
+                        )
+                        .await
+                        {
                             let text = String::from_utf8_lossy(&frame);
                             if text.starts_with("GET_CONSENSUS") {
                                 let relays = active_relays.read().await;
@@ -182,7 +188,11 @@ impl DirectoryAuthority {
                                             now,
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
-                                        } else if registry.check_and_record(&desc.node_id, desc.pow_nonce, now) {
+                                        } else if registry.check_and_record(
+                                            &desc.node_id,
+                                            desc.pow_nonce,
+                                            now,
+                                        ) {
                                             let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
                                             if existing.identity_key_ed25519
@@ -217,7 +227,10 @@ impl DirectoryAuthority {
                         warn!("Authority secure handshake from {} failed: {}", addr, e);
                     }
                     Err(_) => {
-                        warn!("Authority secure handshake from {} timed out (Slowloris defense)", addr);
+                        warn!(
+                            "Authority secure handshake from {} timed out (Slowloris defense)",
+                            addr
+                        );
                     }
                 }
             });

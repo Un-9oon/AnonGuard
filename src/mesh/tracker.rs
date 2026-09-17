@@ -64,7 +64,9 @@ impl TrackerServer {
             let pow_difficulty = self.pow_difficulty;
             let registry = self.nonce_registry.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(stream, dir, pow_difficulty, registry, permit).await {
+                if let Err(e) =
+                    handle_connection(stream, dir, pow_difficulty, registry, permit).await
+                {
                     warn!("Tracker connection from {} failed: {}", addr, e);
                 }
             });
@@ -283,7 +285,14 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         // 1. Send unauthenticated registration without PoW
@@ -301,7 +310,14 @@ mod tests {
             let (stream, _) = listener2.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone2, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone2,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut client2 = TcpStream::connect(addr2).await.unwrap();
@@ -326,7 +342,14 @@ mod tests {
             let (stream, _) = listener3.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone3, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone3,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut attacker = TcpStream::connect(addr3).await.unwrap();
@@ -346,7 +369,14 @@ mod tests {
             let (stream, _) = listener4.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone4, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone4,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
@@ -365,7 +395,14 @@ mod tests {
             let (stream, _) = listener5.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone5, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone5,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut discoverer = TcpStream::connect(addr5).await.unwrap();
@@ -390,7 +427,14 @@ mod tests {
             let (stream, _) = listener6.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone6, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone6,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut auth_client = TcpStream::connect(addr6).await.unwrap();
@@ -410,7 +454,14 @@ mod tests {
             let (stream, _) = listener7.accept().await.unwrap();
             let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
             let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(stream, dir_clone7, test_difficulty, test_registry, test_sem.acquire_owned().await.unwrap()).await;
+            let _ = handle_connection(
+                stream,
+                dir_clone7,
+                test_difficulty,
+                test_registry,
+                test_sem.acquire_owned().await.unwrap(),
+            )
+            .await;
         });
 
         let mut spammer = TcpStream::connect(addr7).await.unwrap();

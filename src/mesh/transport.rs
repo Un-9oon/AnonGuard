@@ -180,8 +180,17 @@ impl SecureTransportSession {
     /// Reads and decrypts a length-prefixed encrypted frame.
     pub async fn read_frame(&mut self) -> io::Result<Vec<u8>> {
         let mut len_bytes = [0u8; 4];
-        if tokio::time::timeout(tokio::time::Duration::from_secs(15), self.stream.read_exact(&mut len_bytes)).await.is_err() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame header"));
+        if tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            self.stream.read_exact(&mut len_bytes),
+        )
+        .await
+        .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout waiting for frame header",
+            ));
         }
         let len = u32::from_be_bytes(len_bytes) as usize;
 
@@ -194,8 +203,17 @@ impl SecureTransportSession {
         }
 
         let mut buf = vec![0u8; len];
-        if tokio::time::timeout(tokio::time::Duration::from_secs(15), self.stream.read_exact(&mut buf)).await.is_err() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame payload"));
+        if tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            self.stream.read_exact(&mut buf),
+        )
+        .await
+        .is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout waiting for frame payload",
+            ));
         }
         self.recv_cipher.apply_keystream(&mut buf);
         Ok(buf)

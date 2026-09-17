@@ -179,21 +179,22 @@ impl GatewayServer {
                             return;
                         }
 
-                        let (target_host, target_port) =
-                            match tokio::time::timeout(
-                                tokio::time::Duration::from_secs(10),
-                                crate::gateway::chain::read_socks5_request(&mut client)
-                            ).await {
-                                Ok(Ok(target)) => target,
-                                Ok(Err(e)) => {
-                                    warn!("Relay Mode: SOCKS5 handshake failed: {}", e);
-                                    return;
-                                }
-                                Err(_) => {
-                                    warn!("Relay Mode: SOCKS5 handshake timed out (Slowloris defense)");
-                                    return;
-                                }
-                            };
+                        let (target_host, target_port) = match tokio::time::timeout(
+                            tokio::time::Duration::from_secs(10),
+                            crate::gateway::chain::read_socks5_request(&mut client),
+                        )
+                        .await
+                        {
+                            Ok(Ok(target)) => target,
+                            Ok(Err(e)) => {
+                                warn!("Relay Mode: SOCKS5 handshake failed: {}", e);
+                                return;
+                            }
+                            Err(_) => {
+                                warn!("Relay Mode: SOCKS5 handshake timed out (Slowloris defense)");
+                                return;
+                            }
+                        };
 
                         let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
                         match exit_policy
