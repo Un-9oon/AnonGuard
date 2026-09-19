@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+
+env:
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   build-linux:
@@ -20,18 +24,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Debian Package
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
+
+      - name: Build Debian Package & Release Binary with SBOM
         run: |
           chmod +x scripts/build_deb.sh
+          cargo auditable build --release
           ./scripts/build_deb.sh
 
-      - name: Create Linux Tarball
+      - name: Create Linux Tarball & Checksums
         run: |
           mkdir -p target/package_linux
           cp target/release/anonguard-daemon target/package_linux/
           cp contrib/anonguard.default.conf target/package_linux/config.toml
           cp README.md target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
+          cd dist && sha256sum anonguard-linux-amd64.tar.gz > anonguard-linux-amd64.tar.gz.sha256
 
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4
@@ -49,10 +58,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build Release Binary
-        run: cargo build --release
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
 
-      - name: Package Windows Zip
+      - name: Build Release Binary with SBOM
+        run: cargo auditable build --release
+
+      - name: Package Windows Zip & Checksums
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force
@@ -61,6 +73,7 @@ jobs:
           Copy-Item contrib/anonguard.default.conf target/package_windows/config.toml
           Copy-Item README.md target/package_windows/
           Compress-Archive -Path target/package_windows/* -DestinationPath dist/anonguard-windows-amd64.zip
+          Get-FileHash dist/anonguard-windows-amd64.zip -Algorithm SHA256 | Format-List > dist/anonguard-windows-amd64.zip.sha256
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -80,12 +93,15 @@ jobs:
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
 
-      - name: Build Apple Silicon (ARM64) and Intel (x86_64)
-        run: |
-          cargo build --release --target aarch64-apple-darwin
-          cargo build --release --target x86_64-apple-darwin
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
 
-      - name: Create Universal Binary with Lipo
+      - name: Build Apple Silicon (ARM64) and Intel (x86_64) with SBOM
+        run: |
+          cargo auditable build --release --target aarch64-apple-darwin
+          cargo auditable build --release --target x86_64-apple-darwin
+
+      - name: Create Universal Binary with Lipo & Checksums
         run: |
           mkdir -p dist target/package_macos
           lipo -create -output target/package_macos/anonguard-daemon \
@@ -95,6 +111,7 @@ jobs:
           cp contrib/anonguard.default.conf target/package_macos/config.toml
           cp README.md target/package_macos/
           tar -czvf dist/anonguard-macos-universal.tar.gz -C target/package_macos .
+          cd dist && shasum -a 256 anonguard-macos-universal.tar.gz > anonguard-macos-universal.tar.gz.sha256
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
@@ -103,12 +120,15 @@ jobs:
           path: dist/*
 
   publish-release:
-    name: Publish GitHub Release
+    name: Publish GitHub Release & Sign Artifacts
     needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Download all built artifacts
         uses: actions/download-artifact@v4
@@ -118,6 +138,23 @@ jobs:
 
       - name: Display Release Files
         run: ls -lh release_assets/
+
+      - name: Generate SHA256SUMS Manifest
+        run: |
+          cd release_assets
+          sha256sum *.tar.gz *.zip *.deb > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
+
+      - name: Sign Release Assets with Cosign
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cd release_assets
+          for file in *.tar.gz *.zip *.deb; do
+            if [ -f "$file" ]; then
+              cosign sign-blob --yes "$file" --bundle "$file.sigstore.json" || true
+            fi
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
