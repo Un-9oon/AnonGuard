@@ -15,6 +15,10 @@ crate-type = ["cdylib", "rlib"]
 name = "anonguard-daemon"
 path = "src/main.rs"
 
+[[bin]]
+name = "anonymity-set-calc"
+path = "tools/anonymity_set_calc.rs"
+
 [[bench]]
 name = "crypto_bench"
 harness = false
