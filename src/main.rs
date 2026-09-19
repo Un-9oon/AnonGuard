@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
-
 use anonguard::core::GuardConfig;
 use anonguard::gateway::GatewayServer;
 use anonguard::kernel::KillSwitchController;
@@ -198,12 +197,14 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
     }
     // Belt-and-suspenders: set permissions explicitly in case umask interfered
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        error!("FATAL: Cannot set permissions on identity key file {:?}: {}", path, e);
+        error!(
+            "FATAL: Cannot set permissions on identity key file {:?}: {}",
+            path, e
+        );
         std::process::exit(1);
     }
     key
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -391,7 +392,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let pool_clone = pool.clone();
             let auth_endpoints = config.directory_authorities.clone();
             let auth_keys = trusted_authorities.clone();
-            let quorum_thresh = if args.quorum_threshold == 0 && !config.directory_authorities.is_empty() {
+            let quorum_thresh = if args.quorum_threshold == 0
+                && !config.directory_authorities.is_empty()
+            {
                 warn!("--quorum-threshold 0 is unsafe when --authorities is set; clamping to 1");
                 1
             } else {
@@ -464,8 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 >(
                                                     &frame
                                                 ) {
-                                                    fetched_docs
-                                                        .push((endpoint.clone(), doc));
+                                                    fetched_docs.push((endpoint.clone(), doc));
                                                 }
                                             }
                                         }
@@ -493,8 +495,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // every document that agrees on content. A malicious/stale authority whose
                     // relay view disagrees just starts (or joins) a different, smaller group —
                     // its signature never contaminates a group it doesn't actually attest to.
-                    let mut merged_by_digest: HashMap<[u8; 32], anonguard::mesh::ConsensusDocument> =
-                        HashMap::new();
+                    let mut merged_by_digest: HashMap<
+                        [u8; 32],
+                        anonguard::mesh::ConsensusDocument,
+                    > = HashMap::new();
                     for (_endpoint, doc) in &fetched_docs {
                         let digest = doc.compute_digest();
                         merged_by_digest

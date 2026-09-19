@@ -91,7 +91,9 @@ impl ProxyPool {
         // Full replace: clear old consensus entries and repopulate from fresh document
         let mut list = self.nodes.write().await;
         let mut id_keys = self.identity_keys.write().await;
-        list.retain(|_, n| !n.raw_url.starts_with("socks5://") && !n.raw_url.starts_with("reverse://"));
+        list.retain(|_, n| {
+            !n.raw_url.starts_with("socks5://") && !n.raw_url.starts_with("reverse://")
+        });
         id_keys.clear();
 
         let mut loaded = 0;
@@ -203,7 +205,8 @@ impl ProxyPool {
         max_hops: usize,
         enforce_diversity: bool,
     ) -> Vec<ProxyNode> {
-        self.get_diverse_onion_chain_with_exit(min_hops, max_hops, enforce_diversity, true).await
+        self.get_diverse_onion_chain_with_exit(min_hops, max_hops, enforce_diversity, true)
+            .await
     }
 
     /// Internal builder with explicit exit-enforcement flag.
@@ -217,7 +220,11 @@ impl ProxyPool {
         let list = self.nodes.read().await;
         let all_healthy: Vec<ProxyNode> = {
             let v: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
-            if v.is_empty() { list.values().cloned().collect() } else { v }
+            if v.is_empty() {
+                list.values().cloned().collect()
+            } else {
+                v
+            }
         };
 
         if all_healthy.is_empty() {
@@ -244,20 +251,30 @@ impl ProxyPool {
         };
 
         if require_exit_at_last && exit_nodes.is_empty() {
-            tracing::warn!("No exit-capable relays available in the pool — cannot build a valid circuit");
+            tracing::warn!(
+                "No exit-capable relays available in the pool — cannot build a valid circuit"
+            );
             return Vec::new();
         }
 
         // Build the non-exit portion of the chain (path_len - 1 middle hops)
-        let middle_count = if require_exit_at_last { path_len.saturating_sub(1) } else { path_len };
+        let middle_count = if require_exit_at_last {
+            path_len.saturating_sub(1)
+        } else {
+            path_len
+        };
         let mut pool_for_middles = if require_exit_at_last {
             middle_nodes
         } else {
             // When not requiring exit at last, all nodes are eligible everywhere
             let list_vals: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
-            if list_vals.is_empty() { list.values().cloned().collect() } else { list_vals }
+            if list_vals.is_empty() {
+                list.values().cloned().collect()
+            } else {
+                list_vals
+            }
         };
-        
+
         {
             let mut rng = rand::thread_rng();
             pool_for_middles.shuffle(&mut rng);
@@ -269,10 +286,13 @@ impl ProxyPool {
         if middle_count > 0 {
             let mut guard_state = self.guard_state.write().await;
             let mut guard_node = None;
-            
+
             // Look for an existing healthy guard in our pinned state
             for g_id in &guard_state.guards {
-                if let Some(n) = pool_for_middles.iter().find(|n| format!("{}:{}", n.host, n.port) == *g_id) {
+                if let Some(n) = pool_for_middles
+                    .iter()
+                    .find(|n| format!("{}:{}", n.host, n.port) == *g_id)
+                {
                     guard_node = Some(n.clone());
                     break;
                 }
@@ -280,7 +300,9 @@ impl ProxyPool {
 
             if let Some(guard) = guard_node {
                 selected.push(guard.clone());
-                pool_for_middles.retain(|n| format!("{}:{}", n.host, n.port) != format!("{}:{}", guard.host, guard.port));
+                pool_for_middles.retain(|n| {
+                    format!("{}:{}", n.host, n.port) != format!("{}:{}", guard.host, guard.port)
+                });
             } else {
                 // Assign a new pinned guard and save to disk
                 if let Some(new_guard) = pool_for_middles.first().cloned() {
@@ -325,7 +347,8 @@ impl ProxyPool {
             // Pick the first exit node that passes diversity (if enforced)
             for exit_candidate in exit_pool {
                 if enforce_diversity {
-                    let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
+                    let mut test_hosts: Vec<&str> =
+                        selected.iter().map(|n| n.host.as_str()).collect();
                     test_hosts.push(&exit_candidate.host);
                     if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
                         selected.push(exit_candidate);

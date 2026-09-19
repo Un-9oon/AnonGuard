@@ -199,11 +199,10 @@ impl SecureTransportSession {
     /// Wire format: 4-byte BE length of (ciphertext || 16-byte tag) || ciphertext || tag.
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
         let counter = self.send_counter;
-        self.send_counter = self.send_counter.checked_add(1).ok_or_else(|| {
-            io::Error::other(
-                "send nonce counter exhausted — rotate session key",
-            )
-        })?;
+        self.send_counter = self
+            .send_counter
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("send nonce counter exhausted — rotate session key"))?;
 
         let nonce = make_nonce(counter);
         let ciphertext = self
@@ -229,7 +228,9 @@ impl SecureTransportSession {
             self.stream.read_exact(&mut len_bytes),
         )
         .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame header"))??;
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame header")
+        })??;
 
         // Length on wire is ciphertext + 16-byte tag
         let ct_len = u32::from_be_bytes(len_bytes) as usize;
@@ -252,11 +253,10 @@ impl SecureTransportSession {
         })??;
 
         let counter = self.recv_counter;
-        self.recv_counter = self.recv_counter.checked_add(1).ok_or_else(|| {
-            io::Error::other(
-                "recv nonce counter exhausted — rotate session key",
-            )
-        })?;
+        self.recv_counter = self
+            .recv_counter
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("recv nonce counter exhausted — rotate session key"))?;
 
         let nonce = make_nonce(counter);
         let plaintext = self

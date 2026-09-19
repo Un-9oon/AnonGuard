@@ -35,9 +35,7 @@ fn normalize_ip_for_cap(ip: IpAddr) -> IpAddr {
         IpAddr::V6(v6) => {
             let seg = v6.segments();
             // Zero out segments 4-8 (keep only the first 48 bits = 3 segments)
-            IpAddr::V6(Ipv6Addr::new(
-                seg[0], seg[1], seg[2], 0, 0, 0, 0, 0,
-            ))
+            IpAddr::V6(Ipv6Addr::new(seg[0], seg[1], seg[2], 0, 0, 0, 0, 0))
         }
     }
 }
@@ -101,8 +99,10 @@ impl GatewayServer {
 
     /// Starts the asynchronous listener loop with global and per-IP connection bounds.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.pool.init_guard_state(self.config.guard_state_path.clone()).await;
-        
+        self.pool
+            .init_guard_state(self.config.guard_state_path.clone())
+            .await;
+
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!(
             listen_addr = %self.config.listen_addr,
@@ -191,7 +191,6 @@ impl GatewayServer {
                     tracker: ip_tracker,
                 };
 
-
                 if kill_switch.is_tripped() {
                     return;
                 }
@@ -202,7 +201,9 @@ impl GatewayServer {
                 let is_socks5 = match tokio::time::timeout(
                     tokio::time::Duration::from_secs(5),
                     client_stream.peek(&mut peek_buf),
-                ).await {
+                )
+                .await
+                {
                     Ok(Ok(_)) => peek_buf[0] == 0x05,
                     Ok(Err(_)) | Err(_) => {
                         warn!(client = %client_addr, "Client closed or timed out before sending first byte");
@@ -704,11 +705,13 @@ impl GatewayServer {
                                         }
                                     } else {
                                         // Handle as an Onion Relay Connection
-                                        let guarded_stream = GuardedSocket::new(stream, kill_switch.atomic_handle())
-                                            .begin_verification()
-                                            .mark_verified(); // Connection from tracker is trusted via registration
+                                        let guarded_stream =
+                                            GuardedSocket::new(stream, kill_switch.atomic_handle())
+                                                .begin_verification()
+                                                .mark_verified(); // Connection from tracker is trusted via registration
 
-                                        let exit_policy = crate::kernel::ExitPolicy::new(allow_private_exit);
+                                        let exit_policy =
+                                            crate::kernel::ExitPolicy::new(allow_private_exit);
                                         let _ = handle_onion_relay_connection(
                                             guarded_stream,
                                             kill_switch.atomic_handle(),
@@ -717,7 +720,8 @@ impl GatewayServer {
                                             &identity_key,
                                             true, // require_auth via the onion handshake
                                             pool.clone(),
-                                        ).await;
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -897,12 +901,12 @@ pub async fn build_telescopic_circuit(
         return Err(format!(
             "Circuit chain too short: {} hops (minimum is 3 for anonymity)",
             chain.len()
-        ).into());
+        )
+        .into());
     }
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut circuit = OnionCircuit::new(circuit_id);
-
 
     // 1. Hop 0 (Guard) in-band CREATE/CREATED handshake
     let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
@@ -1132,7 +1136,9 @@ pub async fn handle_onion_relay_connection(
             if is_currently_exit_hop {
                 // Exit relay: downstream is the destination target server (raw TCP).
                 let ds_w = ds_write.as_mut().expect("checked is_some above");
-                let ds_rx = ds_data_rx.as_mut().expect("set alongside ds_write for exit hop");
+                let ds_rx = ds_data_rx
+                    .as_mut()
+                    .expect("set alongside ds_write for exit hop");
                 tokio::select! {
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
@@ -1190,7 +1196,9 @@ pub async fn handle_onion_relay_connection(
             } else {
                 // Intermediate relay: downstream is another onion relay.
                 let ds_w = ds_write.as_mut().expect("checked is_some above");
-                let ds_rx = ds_cell_rx.as_mut().expect("set alongside ds_write for intermediate hop");
+                let ds_rx = ds_cell_rx
+                    .as_mut()
+                    .expect("set alongside ds_write for intermediate hop");
                 tokio::select! {
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
@@ -1265,11 +1273,12 @@ pub async fn handle_onion_relay_connection(
             }
         } else {
             // Awaiting initial EXTEND (as intermediate relay) or RELAY (as exit relay).
-            let Some(mut client_buf) = client_cell_rx.recv().await else { break; };
+            let Some(mut client_buf) = client_cell_rx.recv().await else {
+                break;
+            };
             match relay_hop.peel_forward(&mut client_buf) {
                 Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
-
-                        let extend_ok = async {
+                    let extend_ok = async {
                             let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
 
@@ -1294,8 +1303,12 @@ pub async fn handle_onion_relay_connection(
                     match extend_ok {
                         Ok((next_s, mut resp)) => {
                             let _ = relay_hop.wrap_backward_originate(&mut resp);
-                            if client_write.write_all(&resp).await.is_err() { break; }
-                            let guarded = GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified();
+                            if client_write.write_all(&resp).await.is_err() {
+                                break;
+                            }
+                            let guarded = GuardedSocket::new(next_s, kill_switch_arc.clone())
+                                .begin_verification()
+                                .mark_verified();
                             let (new_read, new_write) = tokio::io::split(guarded);
                             ds_cell_rx = Some(spawn_onion_cell_reader(new_read));
                             ds_write = Some(new_write);
@@ -1303,7 +1316,13 @@ pub async fn handle_onion_relay_connection(
                         }
                         Err(e) => {
                             error!("EXTEND failed on circuit {}: {}", relay_hop.circuit_id, e);
-                            if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, 0, CellCommand::Destroy, 0, &[]) {
+                            if let Ok(destroy_cell) = OnionCell::new(
+                                relay_hop.circuit_id,
+                                0,
+                                CellCommand::Destroy,
+                                0,
+                                &[],
+                            ) {
                                 let mut wire = destroy_cell.serialize();
                                 let _ = relay_hop.wrap_backward_originate(&mut wire);
                                 let _ = client_write.write_all(&wire).await;
@@ -1313,15 +1332,15 @@ pub async fn handle_onion_relay_connection(
                     }
                 }
                 Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
-
-                    if let Ok((target_h, target_p)) = crate::onion::circuit::decode_relay_target(&payload) {
+                    if let Ok((target_h, target_p)) =
+                        crate::onion::circuit::decode_relay_target(&payload)
+                    {
                         // V-11: Enforce is_exit check for Relay cells
                         if !is_exit_allowed && !pool.is_mesh_target(&target_h, target_p).await {
                             error!("Relay cell rejected: not an exit relay and target is not a known mesh node");
                             break;
                         }
                         match policy.resolve_and_connect(&target_h, target_p).await {
-
                             Ok(target_s) => {
                                 if let Ok(resp_cell) = OnionCell::new(
                                     relay_hop.circuit_id,
@@ -1332,11 +1351,19 @@ pub async fn handle_onion_relay_connection(
                                 ) {
                                     let mut resp = resp_cell.serialize();
                                     // Bug #10: break on crypto error
-                                    if relay_hop.wrap_backward_originate(&mut resp).is_err() { break; }
+                                    if relay_hop.wrap_backward_originate(&mut resp).is_err() {
+                                        break;
+                                    }
                                     if client_write.write_all(&resp).await.is_ok() {
                                         // Bug #13: don't log destination host/port
-                                        info!("Exit relay successfully bridged circuit {}", relay_hop.circuit_id);
-                                        let guarded = GuardedSocket::new(target_s, kill_switch_arc.clone()).begin_verification().mark_verified();
+                                        info!(
+                                            "Exit relay successfully bridged circuit {}",
+                                            relay_hop.circuit_id
+                                        );
+                                        let guarded =
+                                            GuardedSocket::new(target_s, kill_switch_arc.clone())
+                                                .begin_verification()
+                                                .mark_verified();
                                         let (new_read, new_write) = tokio::io::split(guarded);
                                         ds_data_rx = Some(spawn_raw_downstream_reader(new_read));
                                         ds_write = Some(new_write);

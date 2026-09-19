@@ -2,12 +2,12 @@
 
 pub mod authority;
 pub mod consensus;
+pub mod guards;
 pub mod node;
 pub mod pool;
 pub mod sybil;
 pub mod tracker;
 pub mod transport;
-pub mod guards;
 
 pub use authority::DirectoryAuthority;
 pub use consensus::{AuthoritySignature, ConsensusDocument, RelayDescriptor};

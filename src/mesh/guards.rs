@@ -29,7 +29,11 @@ impl GuardState {
         match fs::read_to_string(path) {
             Ok(content) => match serde_json::from_str::<GuardState>(&content) {
                 Ok(state) => {
-                    info!("Loaded {} persistent entry guards from {:?}", state.guards.len(), path);
+                    info!(
+                        "Loaded {} persistent entry guards from {:?}",
+                        state.guards.len(),
+                        path
+                    );
                     state
                 }
                 Err(e) => {
@@ -49,7 +53,10 @@ impl GuardState {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    error!("Failed to create directory for guard state {:?}: {}", parent, e);
+                    error!(
+                        "Failed to create directory for guard state {:?}: {}",
+                        parent, e
+                    );
                     return;
                 }
             }
@@ -59,7 +66,10 @@ impl GuardState {
             Ok(json) => {
                 let temp_path = path.with_extension("tmp");
                 if let Err(e) = fs::write(&temp_path, json) {
-                    error!("Failed to write temporary guard state to {:?}: {}", temp_path, e);
+                    error!(
+                        "Failed to write temporary guard state to {:?}: {}",
+                        temp_path, e
+                    );
                     return;
                 }
 
@@ -73,7 +83,10 @@ impl GuardState {
                 }
 
                 if let Err(e) = fs::rename(&temp_path, path) {
-                    error!("Failed to atomically replace guard state file {:?}: {}", path, e);
+                    error!(
+                        "Failed to atomically replace guard state file {:?}: {}",
+                        path, e
+                    );
                 } else {
                     info!("Saved persistent entry guards to {:?}", path);
                 }

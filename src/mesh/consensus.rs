@@ -370,7 +370,10 @@ mod tests {
         // it covers the exact same content.
         let mut merged = doc_from_zurich.clone();
         let added = merged.merge_signatures_from(&doc_from_reykjavik);
-        assert_eq!(added, 1, "Reykjavik's signature should merge in (same digest)");
+        assert_eq!(
+            added, 1,
+            "Reykjavik's signature should merge in (same digest)"
+        );
 
         // Now 2-of-3 quorum is genuinely satisfiable.
         assert!(merged.verify_quorum(&trusted_authorities, 2, 2000));

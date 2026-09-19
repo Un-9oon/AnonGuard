@@ -19,7 +19,6 @@ use crate::mesh::transport::SecureTransportSession;
 /// TTL for relay entries: relays not refreshed within 2 hours are evicted.
 const RELAY_TTL_SECS: u64 = 7200;
 
-
 pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
 
 pub struct DirectoryAuthority {
@@ -126,7 +125,10 @@ impl DirectoryAuthority {
         // Ensure the OS-level permissions are 0o600 even on existing files
         use std::os::unix::fs::PermissionsExt;
         if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-            error!("FATAL: Cannot set permissions on authority key file {:?}: {}", path, e);
+            error!(
+                "FATAL: Cannot set permissions on authority key file {:?}: {}",
+                path, e
+            );
             std::process::exit(1);
         }
     }
@@ -151,7 +153,6 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
-
 
     pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
         self.signing_key.verifying_key()
@@ -217,8 +218,10 @@ impl DirectoryAuthority {
             relays.retain(|id, r| {
                 let age = now.saturating_sub(r.registered_at);
                 if age > RELAY_TTL_SECS {
-                    info!("Authority [{}]: Evicting stale relay {} (age {}s > TTL {}s)",
-                        self.authority_id, id, age, RELAY_TTL_SECS);
+                    info!(
+                        "Authority [{}]: Evicting stale relay {} (age {}s > TTL {}s)",
+                        self.authority_id, id, age, RELAY_TTL_SECS
+                    );
                     false
                 } else {
                     true
@@ -238,7 +241,6 @@ impl DirectoryAuthority {
         consensus.sign_with_authority(&self.authority_id, &self.signing_key);
         consensus
     }
-
 
     /// Starts the asynchronous authority listener.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
