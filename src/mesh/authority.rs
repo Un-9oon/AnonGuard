@@ -21,6 +21,7 @@ const RELAY_TTL_SECS: u64 = 7200;
 
 pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
 
+#[derive(Clone)]
 pub struct DirectoryAuthority {
     pub authority_id: String,
     signing_key: SigningKey,
@@ -29,6 +30,7 @@ pub struct DirectoryAuthority {
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
+    pub peer_authorities: Vec<String>,
 }
 
 impl DirectoryAuthority {
@@ -56,7 +58,20 @@ impl DirectoryAuthority {
                 DEFAULT_MAX_AUTHORITY_CONNECTIONS,
             )),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
+            peer_authorities: Vec::new(),
         }
+    }
+
+    /// Creates a DirectoryAuthority with a list of peer authority addresses for reconciliation.
+    pub fn with_peer_authorities(
+        authority_id: String,
+        listen_addr: String,
+        pow_difficulty: u32,
+        peer_authorities: Vec<String>,
+    ) -> Self {
+        let mut auth = Self::with_difficulty(authority_id, listen_addr, pow_difficulty);
+        auth.peer_authorities = peer_authorities;
+        auth
     }
 
     /// Loads or creates the authority signing key from `key_path`, creating the file with
@@ -159,6 +174,7 @@ impl DirectoryAuthority {
                 DEFAULT_MAX_AUTHORITY_CONNECTIONS,
             )),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
+            peer_authorities: Vec::new(),
         }
     }
 
@@ -237,8 +253,7 @@ impl DirectoryAuthority {
             });
         }
 
-        let relays = self.active_relays.read().await;
-        let relay_list: Vec<RelayDescriptor> = relays.values().cloned().collect();
+        let relay_list = self.reconcile_relays().await;
 
         let bucketed_now = (now / 300) * 300;
         let mut consensus = ConsensusDocument::new(
@@ -249,6 +264,67 @@ impl DirectoryAuthority {
 
         consensus.sign_with_authority(&self.authority_id, &self.signing_key);
         consensus
+    }
+
+    /// Reconciles relay descriptors with peer authorities before consensus generation.
+    pub async fn reconcile_relays(&self) -> Vec<RelayDescriptor> {
+        let mut local_map: HashMap<String, RelayDescriptor> = {
+            let relays = self.active_relays.read().await;
+            relays.clone()
+        };
+
+        for peer in &self.peer_authorities {
+            if peer == &self.listen_addr {
+                continue;
+            }
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                Self::fetch_peer_relay_list(peer),
+            )
+            .await
+            {
+                Ok(Ok(peer_relays)) => {
+                    for desc in peer_relays {
+                        if desc.verify_identity() {
+                            local_map
+                                .entry(desc.node_id.clone())
+                                .and_modify(|existing| {
+                                    if desc.registered_at > existing.registered_at {
+                                        *existing = desc.clone();
+                                    }
+                                })
+                                .or_insert(desc);
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    warn!(
+                        "Authority [{}]: Failed to fetch relay list from peer {}: {}",
+                        self.authority_id, peer, e
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        "Authority [{}]: Timeout fetching relay list from peer {}",
+                        self.authority_id, peer
+                    );
+                }
+            }
+        }
+
+        local_map.into_values().collect()
+    }
+
+    async fn fetch_peer_relay_list(
+        peer_addr: &str,
+    ) -> Result<Vec<RelayDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
+        use tokio::net::TcpStream;
+        let stream = TcpStream::connect(peer_addr).await?;
+        let mut session = SecureTransportSession::client_handshake(stream, None).await?;
+        session.write_frame(b"GET_RELAY_LIST").await?;
+        let resp = session.read_frame().await?;
+        let list: Vec<RelayDescriptor> = serde_json::from_slice(&resp)?;
+        Ok(list)
     }
 
     /// Starts the asynchronous authority listener.
@@ -283,8 +359,8 @@ impl DirectoryAuthority {
                     continue;
                 }
             };
+            let auth_self = self.clone();
             let active_relays = self.active_relays.clone();
-            let auth_id = self.authority_id.clone();
             let signing_key = self.signing_key.clone();
             let pow_difficulty = self.pow_difficulty;
             let registry = self.nonce_registry.clone();
@@ -307,19 +383,14 @@ impl DirectoryAuthority {
                         {
                             let text = String::from_utf8_lossy(&frame);
                             if text.starts_with("GET_CONSENSUS") {
-                                let relays = active_relays.read().await;
-                                let relay_list: Vec<RelayDescriptor> =
-                                    relays.values().cloned().collect();
-                                let now = current_timestamp_secs();
-                                let bucketed_now = (now / 300) * 300;
-                                let mut consensus = ConsensusDocument::new(
-                                    bucketed_now,
-                                    bucketed_now + 3600,
-                                    relay_list,
-                                );
-                                consensus.sign_with_authority(&auth_id, &signing_key);
-
+                                let consensus = auth_self.generate_consensus().await;
                                 if let Ok(serialized) = serde_json::to_vec(&consensus) {
+                                    let _ = session.write_frame(&serialized).await;
+                                }
+                            } else if text.starts_with("GET_RELAY_LIST") {
+                                let relays = active_relays.read().await;
+                                let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
+                                if let Ok(serialized) = serde_json::to_vec(&list) {
                                     let _ = session.write_frame(&serialized).await;
                                 }
                             } else if let Some(json_part) = text.strip_prefix("REGISTER_RELAY ") {
