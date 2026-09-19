@@ -93,12 +93,12 @@ impl OnionCell {
     }
 
     pub fn parse(buf: &[u8; ONION_CELL_SIZE]) -> Result<Self, String> {
-        let circuit_id = u32::from_be_bytes(buf[0..4].try_into().unwrap());
-        let sequence_no = u32::from_be_bytes(buf[4..8].try_into().unwrap());
+        let circuit_id = u32::from_be_bytes(buf[0..4].try_into().expect("slice is 4 bytes"));
+        let sequence_no = u32::from_be_bytes(buf[4..8].try_into().expect("slice is 4 bytes"));
         let command = CellCommand::from_u8(buf[8])
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
-        let stream_id = u16::from_be_bytes(buf[9..11].try_into().unwrap());
-        let length = u16::from_be_bytes(buf[11..13].try_into().unwrap());
+        let stream_id = u16::from_be_bytes(buf[9..11].try_into().expect("slice is 2 bytes"));
+        let length = u16::from_be_bytes(buf[11..13].try_into().expect("slice is 2 bytes"));
         let mut payload = [0u8; PAYLOAD_SIZE];
         payload.copy_from_slice(&buf[13..1008]);
         let mut mac = [0u8; 16];

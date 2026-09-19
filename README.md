@@ -57,7 +57,7 @@ systemctl status anonguard
 2. Extract the archive.
 3. Open PowerShell or Command Prompt in the extracted folder:
 ```powershell
-.\anonguard-daemon.exe --listen 127.0.0.1:9050 --onion --quantum
+.\anonguard-daemon.exe --listen 127.0.0.1:9050 --onion --rmt-morphing
 ```
 4. Point your browser's SOCKS5 proxy to `127.0.0.1:9050`.
 
@@ -65,7 +65,7 @@ systemctl status anonguard
 Download the universal binary archive:
 ```bash
 tar -xzf anonguard-macos-universal.tar.gz
-./anonguard-daemon --listen 127.0.0.1:9050 --onion --quantum
+./anonguard-daemon --listen 127.0.0.1:9050 --onion --rmt-morphing
 ```
 
 ### 🛠️ Build `.deb` Locally From Source
@@ -174,7 +174,7 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 6. **OS-Level Traffic Leaks:** Linux kernel `nftables` output filter locks traffic strictly to the designated proxy port, automatically flushing on clean shutdown (`SIGINT` / `Ctrl+C`). This OS-level firewall backstop is **Linux-only**. macOS and Windows rely strictly on the fail-closed process-level kill switch.
 
 ### What AnonGuard Does NOT Protect Against:
-1. **Global Active Traffic-Timing Adversary:** If an adversary observes both ingress to the Guard and egress from the Exit simultaneously with synchronized millisecond-precision flow analysis, statistical timing confirmation remains theoretically possible.
+1. **Global Active Traffic-Timing & Manipulation Adversary:** If an active state-level adversary observes both ingress to the Guard and egress from the Exit simultaneously, and can manipulate (drop/delay/watermark) flows, they explicitly break the system. AnonGuard mitigates passive statistical timing confirmation via RMT morphing, but low-latency anonymity networks cannot protect against global active adversaries.
 2. **Endpoint Compromise:** Malware, browser exploits, or keyloggers on the client system operate outside network-level encryption boundaries.
 3. **Malicious Exit Relay Content Tampering:** Unencrypted HTTP traffic passing through an untrusted exit node can be modified by the exit operator. Always use TLS (HTTPS) on end-to-end connections.
 
@@ -195,25 +195,75 @@ AnonGuard eliminates single points of failure. The directory consensus is mainta
 
 ## CLI Reference
 
-| Flag | Default | Description |
-|---|---|---|
-| `--listen <ADDR>` | `127.0.0.1:9050` | Gateway bind address |
-| `--onion` | `false` | Enable 3-hop layered onion circuit routing |
-| `--quantum`, `--rmt` | `false` | Enable Statistical RMT Wigner-Surmise Traffic Morphing |
-| `--quantum-ensemble <goe\|gue>` | `goe` | Select Gaussian Orthogonal or Unitary ensemble |
-| `--authority` | `false` | Run as an Ed25519 Directory Authority node |
-| `--authority-id <ID>` | `auth-primary` | Directory authority identifier |
-| `--authorities <ADDRS>` | `""` | Comma-separated list of trusted authority endpoints |
-| `--authority-keys <KEYS>` | `""` | Key map for authority pinning (e.g. `auth1:HEX_KEY,auth2:HEX_KEY`) |
-| `--enforce-subnet-diversity` | `true` | Enforce `/16` CIDR subnet isolation in circuits |
-| `--chaos` | `false` | Enable Lorenz chaotic attractor jitter |
-| `--jitter` | `false` | Enable Poisson timing jitter |
-| `--relay` | `false` | Run as an AnonGuard relay node |
-| `--allow-open-socks5` | `false` | Permit unauthenticated plain SOCKS5 proxying on relay ports |
-| `--allow-private-exit` | `false` | Permit exit connections to private/loopback networks |
-| `--enable-firewall-killswitch` | `false` | Apply Linux kernel `nftables` output filter rules (flushed on clean exit). **Linux Only.** |
-| `--pow-difficulty <BITS>` | `20` | Registration PoW difficulty in leading zero bits (default: 20) |
-| `--reverse-relay` | `false` | Run volunteer relay behind NAT |
+```text
+AnonGuard Standalone Anonymity Gateway
+
+Usage: anonguard-daemon [OPTIONS]
+
+Options:
+  -l, --listen <LISTEN>
+          Local address to bind the gateway listener [default: 127.0.0.1:9050]
+  -p, --pool <POOL>
+          Path to a text file containing proxy endpoints (one per line)
+      --proxy <PROXY>
+          Inline proxy to load immediately (e.g. socks5://127.0.0.1:1080)
+      --jitter
+          Enable Poisson timing jitter to defeat NetFlow traffic correlation
+      --jitter-lambda <JITTER_LAMBDA>
+          Rate parameter (lambda) for Poisson timing jitter [default: 0.05]
+      --chaos
+          Enable Chaotic Attractor Morphing
+      --chaos-sigma <CHAOS_SIGMA>
+          [default: 10]
+      --chaos-rho <CHAOS_RHO>
+          [default: 28]
+      --chaos-beta <CHAOS_BETA>
+          [default: 2.666666]
+      --rmt-morphing
+          Enable Statistical Random Matrix Theory (RMT) Traffic Morphing (Wigner Surmise)
+      --rmt-ensemble <RMT_ENSEMBLE>
+          Statistical RMT Ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary) [default: goe]
+  -r, --relay
+          Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
+      --tracker
+          Run as a Directory Authority Tracker (legacy mode)
+      --authority
+          Run as a Cryptographic Directory Authority Node (M-of-N consensus)
+      --authority-id <AUTHORITY_ID>
+          Directory Authority Identifier (e.g. auth-zurich) [default: auth-primary]
+      --authorities <AUTHORITIES>
+          Comma-separated list of Directory Authority endpoints
+      --authority-keys <AUTHORITY_KEYS>
+          Comma-separated list of Directory Authority public keys (e.g. auth-primary:hex_key,...)
+      --quorum-threshold <QUORUM_THRESHOLD>
+          Quorum threshold for Directory Authority consensus [default: 1]
+      --onion
+          Enable 3-hop Layered Onion Encryption (Sphinx / Tor-style cell peeling)
+      --enforce-subnet-diversity
+          Enforce BGP /16 Subnet Diversity across circuit hops (Sybil resistance)
+      --reverse-relay
+          Run as a Reverse Relay Node (Volunteer mode behind NAT)
+      --announce <ANNOUNCE>
+          Tracker URL to announce this relay to (e.g. http://1.2.3.4:8080)
+      --allow-open-socks5
+          Allow open, unauthenticated plain SOCKS5 proxying when running in relay mode (off by default)
+      --allow-private-exit
+          Allow exit relays to connect to private/loopback networks (off by default to prevent SSRF)
+      --is-exit
+          
+      --enable-firewall-killswitch
+          Apply OS/kernel-level nftables firewall kill switch (Linux only, requires root/CAP_NET_ADMIN)
+      --pow-difficulty <POW_DIFFICULTY>
+          Registration PoW difficulty in leading zero bits (default 26, recommended 20+ for production) [default: 26]
+      --fetch-from <FETCH_FROM>
+          Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
+      --identity-key-path <IDENTITY_KEY_PATH>
+          Path to persist the relay's long-term Ed25519 identity key
+  -h, --help
+          Print help
+  -V, --version
+          Print version
+```
 
 ---
 

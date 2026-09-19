@@ -89,7 +89,7 @@ impl SecureTransportSession {
             signed_data.extend_from_slice(server_public.as_bytes());
 
             server_verifying_key
-                .verify(&signed_data, &signature)
+                .verify_strict(&signed_data, &signature)
                 .map_err(|_| {
                     io::Error::new(
                         io::ErrorKind::PermissionDenied,

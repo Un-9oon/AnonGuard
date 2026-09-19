@@ -1,4 +1,4 @@
-use crate::morphing::{LorenzAttractor, PoissonJitter, QuantumRmtEngine};
+use crate::morphing::{LorenzAttractor, PoissonJitter, RmtTimingEngine};
 use rand::Rng;
 use std::io::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub enum JitterEngine {
     Poisson(PoissonJitter),
     Chaos(LorenzAttractor),
-    Quantum(QuantumRmtEngine),
+    Rmt(RmtTimingEngine),
 }
 
 impl JitterEngine {
@@ -15,7 +15,7 @@ impl JitterEngine {
         match self {
             JitterEngine::Poisson(p) => p.apply().await,
             JitterEngine::Chaos(c) => c.apply_delay().await,
-            JitterEngine::Quantum(q) => {
+            JitterEngine::Rmt(q) => {
                 let delay = q.next_delay_us();
                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
             }
@@ -82,7 +82,7 @@ where
         }
     }
 
-    let j = jitter.unwrap();
+    let j = jitter.expect("jitter is checked above");
     let (mut a_read, mut a_write) = tokio::io::split(a);
     let (mut b_read, mut b_write) = tokio::io::split(b);
 
@@ -108,7 +108,7 @@ where
                                 }
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
-                            JitterEngine::Quantum(q) => {
+                            JitterEngine::Rmt(q) => {
                                 let target = q.next_chunk_size();
                                 std::cmp::min(target, data.len())
                             }
@@ -119,7 +119,7 @@ where
                         match &j1 {
                             JitterEngine::Poisson(p) => p.apply().await,
                             JitterEngine::Chaos(c) => c.apply_delay().await,
-                            JitterEngine::Quantum(q) => {
+                            JitterEngine::Rmt(q) => {
                                 let delay = q.next_delay_us();
                                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
                             }
@@ -156,7 +156,7 @@ where
                                 }
                             }
                             JitterEngine::Chaos(c) => c.sample_shard_size(data.len()),
-                            JitterEngine::Quantum(q) => {
+                            JitterEngine::Rmt(q) => {
                                 let target = q.next_chunk_size();
                                 std::cmp::min(target, data.len())
                             }
@@ -167,7 +167,7 @@ where
                         match &j2 {
                             JitterEngine::Poisson(p) => p.apply().await,
                             JitterEngine::Chaos(c) => c.apply_delay().await,
-                            JitterEngine::Quantum(q) => {
+                            JitterEngine::Rmt(q) => {
                                 let delay = q.next_delay_us();
                                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
                             }

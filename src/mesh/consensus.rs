@@ -83,7 +83,7 @@ impl RelayDescriptor {
         };
         let signature = Signature::from_bytes(sig_bytes);
         let signing_bytes = self.compute_signing_bytes();
-        verifying_key.verify(&signing_bytes, &signature).is_ok()
+        verifying_key.verify_strict(&signing_bytes, &signature).is_ok()
     }
 }
 
@@ -196,7 +196,7 @@ impl ConsensusDocument {
             if let Some(pubkey) = trusted_authorities.get(&sig.authority_id) {
                 if let Ok(sig_bytes) = sig.signature_bytes.as_slice().try_into() {
                     let ed_sig = Signature::from_bytes(sig_bytes);
-                    if pubkey.verify(&digest, &ed_sig).is_ok() {
+                    if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
                         valid_auth_count += 1;
                         verified_authorities.push(sig.authority_id.clone());
                     }

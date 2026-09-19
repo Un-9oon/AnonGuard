@@ -48,8 +48,8 @@ This document formalizes the operational trust boundaries, adversary capabilitie
 
 The following attack vectors are explicitly **out of scope** or represent fundamental limitations common to low-latency anonymity networks:
 
-1. **Global Passive Adversary (End-to-End Traffic Confirmation):**
-   If a state-level adversary simultaneously observes ingress traffic at the client's Guard and egress traffic at the destination Exit with synchronized microsecond timestamps, statistical traffic confirmation remains theoretically possible over large data transfers. AnonGuard significantly increases the required observation window via RMT jitter, but low-latency design precludes perfect resistance to full-network observers.
+1. **Global Active Adversary (End-to-End Traffic Confirmation & Manipulation):**
+   If a state-level active adversary simultaneously observes and can manipulate ingress traffic at the client's Guard and egress traffic at the destination Exit with synchronized microsecond timestamps, they can break the system. While statistical traffic confirmation remains theoretically possible for passive observers over large data transfers (where AnonGuard significantly increases the required observation window via RMT jitter), a global *active* adversary who injects watermarks or actively drops/delays packets will deterministically deanonymize circuits. Low-latency design precludes perfect resistance to full-network active observers.
 2. **Client Endpoint Compromise:**
    AnonGuard operates at L4–L7 network transport. It cannot protect against compromised operating systems, memory dumping, browser zero-days, or telemetry baked into proprietary browsers.
 3. **Exit Node Cleartext Modification (Plain HTTP):**

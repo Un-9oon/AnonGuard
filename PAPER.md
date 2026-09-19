@@ -38,6 +38,10 @@ We formalize two concurrent adversary classes:
   - Website fingerprinting using 1D Convolutional Neural Networks (Deep Fingerprinting) and Random Forests.
   - Sybil attacks: flooding the network with colluding relay nodes to control both entry and exit points.
 
+### Adversary $\mathcal{A}_{\text{global-active}}$: Global Active Adversary (Out of Scope)
+- **Capabilities:** Simultaneously observes and actively manipulates (drops, delays, injects watermarks) traffic at both the client's Guard and destination Exit with microsecond precision.
+- **Impact:** A global active adversary explicitly breaks the AnonGuard system. While AnonGuard mitigates passive timing correlation via RMT traffic morphing, low-latency design fundamentally precludes resistance to active, full-network flow manipulation and watermarking.
+
 ---
 
 ## 2. System Architecture
