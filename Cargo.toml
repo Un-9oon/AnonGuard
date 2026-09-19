@@ -19,6 +19,10 @@ path = "src/main.rs"
 name = "anonymity-set-calc"
 path = "tools/anonymity_set_calc.rs"
 
+[[bin]]
+name = "generate-traffic-dataset"
+path = "tools/traffic_classifier_eval/generate_dataset.rs"
+
 [[bench]]
 name = "crypto_bench"
 harness = false
