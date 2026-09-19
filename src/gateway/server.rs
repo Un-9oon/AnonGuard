@@ -159,7 +159,9 @@ impl GatewayServer {
                     );
                     desc.sign_with_key(&identity_key);
 
-                    let json_payload = serde_json::to_string(&desc).unwrap();
+                    let Ok(json_payload) = serde_json::to_string(&desc) else {
+                        continue;
+                    };
                     let request = format!("REGISTER_RELAY {}", json_payload);
 
                     for auth_url in &auths {
@@ -1216,9 +1218,9 @@ pub async fn handle_onion_relay_connection(
         if let Some(ref mut ds_w) = ds_write {
             if is_currently_exit_hop {
                 // Exit relay: downstream is the destination target server (raw TCP).
-                let ds_rx = ds_data_rx
-                    .as_mut()
-                    .expect("set alongside ds_write for exit hop");
+                let Some(ds_rx) = ds_data_rx.as_mut() else {
+                    break;
+                };
                 tokio::select! {
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
@@ -1280,9 +1282,9 @@ pub async fn handle_onion_relay_connection(
                 }
             } else {
                 // Intermediate relay: downstream is the next relay in the mesh (OnionCells).
-                let ds_rx = ds_cell_rx
-                    .as_mut()
-                    .expect("set alongside ds_write for intermediate hop");
+                let Some(ds_rx) = ds_cell_rx.as_mut() else {
+                    break;
+                };
                 tokio::select! {
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
@@ -1452,4 +1454,26 @@ pub async fn handle_onion_relay_connection(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_relay_loop_handles_missing_receivers_without_panic() {
+        let mut ds_data_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
+        let ds_rx = ds_data_rx.as_mut();
+        assert!(
+            ds_rx.is_none(),
+            "Unset receiver must safely evaluate to None without panicking"
+        );
+
+        let mut ds_cell_rx: Option<tokio::sync::mpsc::Receiver<[u8; ONION_CELL_SIZE]>> = None;
+        let ds_cell_ref = ds_cell_rx.as_mut();
+        assert!(
+            ds_cell_ref.is_none(),
+            "Unset cell receiver must safely evaluate to None without panicking"
+        );
+    }
 }

@@ -93,11 +93,15 @@ impl OnionCell {
     }
 
     pub fn parse(buf: &[u8; ONION_CELL_SIZE]) -> Result<Self, String> {
+        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[0..4] is guaranteed to be a 4-byte slice.
         let circuit_id = u32::from_be_bytes(buf[0..4].try_into().expect("slice is 4 bytes"));
+        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[4..8] is guaranteed to be a 4-byte slice.
         let sequence_no = u32::from_be_bytes(buf[4..8].try_into().expect("slice is 4 bytes"));
         let command = CellCommand::from_u8(buf[8])
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
+        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[9..11] is guaranteed to be a 2-byte slice.
         let stream_id = u16::from_be_bytes(buf[9..11].try_into().expect("slice is 2 bytes"));
+        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[11..13] is guaranteed to be a 2-byte slice.
         let length = u16::from_be_bytes(buf[11..13].try_into().expect("slice is 2 bytes"));
         let mut payload = [0u8; PAYLOAD_SIZE];
         payload.copy_from_slice(&buf[13..1008]);

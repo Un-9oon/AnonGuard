@@ -111,6 +111,7 @@ impl HopCryptState {
     /// HKDF-derived key (forward_aead_key) — never reused from forward_key/forward_mac.
     pub fn seal_forward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
         let cipher = ChaCha20Poly1305::new(&self.keys.forward_aead_key.into());
+        // SAFETY: ChaCha20Poly1305 in-place encryption over in-memory slices cannot fail because allocation is not required and nonce/key lengths (12 bytes/32 bytes) are fixed by type signatures.
         let tag = cipher
             .encrypt_in_place_detached(nonce.into(), header, pt_body)
             .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
@@ -132,6 +133,7 @@ impl HopCryptState {
 
     pub fn seal_backward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
         let cipher = ChaCha20Poly1305::new(&self.keys.backward_aead_key.into());
+        // SAFETY: ChaCha20Poly1305 in-place encryption over in-memory slices cannot fail because allocation is not required and nonce/key lengths (12 bytes/32 bytes) are fixed by type signatures.
         let tag = cipher
             .encrypt_in_place_detached(nonce.into(), header, pt_body)
             .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
