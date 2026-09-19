@@ -1,7 +1,5 @@
 //! Fixed-size 1024-byte OnionCell protocol with HMAC-SHA256 Authenticated MAC.
 
-use std::convert::TryInto;
-
 pub const ONION_CELL_SIZE: usize = 1024;
 pub const HEADER_SIZE: usize = 29;
 pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 995 bytes
@@ -93,16 +91,12 @@ impl OnionCell {
     }
 
     pub fn parse(buf: &[u8; ONION_CELL_SIZE]) -> Result<Self, String> {
-        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[0..4] is guaranteed to be a 4-byte slice.
-        let circuit_id = u32::from_be_bytes(buf[0..4].try_into().expect("slice is 4 bytes"));
-        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[4..8] is guaranteed to be a 4-byte slice.
-        let sequence_no = u32::from_be_bytes(buf[4..8].try_into().expect("slice is 4 bytes"));
+        let circuit_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let sequence_no = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
         let command = CellCommand::from_u8(buf[8])
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
-        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[9..11] is guaranteed to be a 2-byte slice.
-        let stream_id = u16::from_be_bytes(buf[9..11].try_into().expect("slice is 2 bytes"));
-        // SAFETY: buf is a fixed-size 1024-byte array; slicing buf[11..13] is guaranteed to be a 2-byte slice.
-        let length = u16::from_be_bytes(buf[11..13].try_into().expect("slice is 2 bytes"));
+        let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
+        let length = u16::from_be_bytes([buf[11], buf[12]]);
         let mut payload = [0u8; PAYLOAD_SIZE];
         payload.copy_from_slice(&buf[13..1008]);
         let mut mac = [0u8; 16];
