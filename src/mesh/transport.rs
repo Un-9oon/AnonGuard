@@ -120,9 +120,9 @@ impl SecureTransportSession {
         let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), true);
 
         let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
         let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
 
         Ok(Self {
             stream,
@@ -175,9 +175,9 @@ impl SecureTransportSession {
         let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), false);
 
         let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
         let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
 
         Ok(Self {
             stream,
@@ -200,8 +200,7 @@ impl SecureTransportSession {
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
         let counter = self.send_counter;
         self.send_counter = self.send_counter.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 "send nonce counter exhausted — rotate session key",
             )
         })?;
@@ -210,7 +209,7 @@ impl SecureTransportSession {
         let ciphertext = self
             .send_cipher
             .encrypt(&nonce, payload)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD encrypt error: {e}")))?;
+            .map_err(|e| io::Error::other(format!("AEAD encrypt error: {e}")))?;
 
         // ciphertext already includes the 16-byte Poly1305 tag appended by the AEAD
         let ct_len = ciphertext.len() as u32;
@@ -235,7 +234,7 @@ impl SecureTransportSession {
         // Length on wire is ciphertext + 16-byte tag
         let ct_len = u32::from_be_bytes(len_bytes) as usize;
         // Sanity check: plaintext is ct_len - 16; enforce MAX_FRAME_LEN on plaintext
-        if ct_len < 16 || ct_len > MAX_FRAME_LEN + 16 {
+        if !(16..=MAX_FRAME_LEN + 16).contains(&ct_len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Frame size out of bounds",
@@ -254,8 +253,7 @@ impl SecureTransportSession {
 
         let counter = self.recv_counter;
         self.recv_counter = self.recv_counter.checked_add(1).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
+            io::Error::other(
                 "recv nonce counter exhausted — rotate session key",
             )
         })?;
