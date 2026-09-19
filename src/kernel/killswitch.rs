@@ -71,6 +71,7 @@ impl KillSwitchController {
 
         if failures.len() >= self.trip_threshold {
             if !self.tripped.swap(true, Ordering::SeqCst) {
+                crate::observability::inc_killswitch_trips();
                 tracing::error!(
                     reason = reason,
                     trip_threshold = self.trip_threshold,

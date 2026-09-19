@@ -144,7 +144,11 @@ pub fn verify_pow(
     let hash = hasher.finalize();
 
     // 3. Verify leading zero bits
-    count_leading_zero_bits(&hash) >= difficulty_bits
+    let valid = count_leading_zero_bits(&hash) >= difficulty_bits;
+    if !valid {
+        crate::observability::inc_sybil_pow_rejected();
+    }
+    valid
 }
 
 /// Solves a Proof-of-Work challenge for a given node identity.

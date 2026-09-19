@@ -298,12 +298,14 @@ impl DirectoryAuthority {
                     }
                 }
                 Ok(Err(e)) => {
+                    crate::observability::inc_quorum_reconciliation_failures();
                     warn!(
                         "Authority [{}]: Failed to fetch relay list from peer {}: {}",
                         self.authority_id, peer, e
                     );
                 }
                 Err(_) => {
+                    crate::observability::inc_quorum_reconciliation_failures();
                     warn!(
                         "Authority [{}]: Timeout fetching relay list from peer {}",
                         self.authority_id, peer

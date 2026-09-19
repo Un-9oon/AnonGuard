@@ -10,6 +10,7 @@ pub mod gateway;
 pub mod kernel;
 pub mod mesh;
 pub mod morphing;
+pub mod observability;
 pub mod onion;
 
 pub use crate::core::{

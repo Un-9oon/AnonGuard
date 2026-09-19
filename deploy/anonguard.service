@@ -13,9 +13,10 @@ ExecStart=/usr/local/bin/anonguard-daemon --relay --is-exit --listen 0.0.0.0:905
 # Bug #14: flush nftables rules on graceful stop so no stale drop rules remain
 ExecStopPost=/usr/bin/nft delete table inet anonguard_filter
 
-# Prevent logging to disk to protect user anonymity
-StandardOutput=null
-StandardError=null
+# Logging Configuration: Default relies on systemd journald capture for observability.
+# For forensic-hardening zero log retention posture, uncomment the two lines below:
+# StandardOutput=null
+# StandardError=null
 
 # Forensic & Security Hardening Sandboxing
 ProtectSystem=strict

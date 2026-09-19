@@ -48,4 +48,4 @@ This guide covers deploying AnonGuard directly onto a hardened Linux system (bar
 
 ## Why deploy natively?
 - **Zero Network Fingerprinting:** No Docker NAT or bridge modifying your MTU/TTL packets, blending perfectly into normal internet traffic.
-- **Forensic Protection:** The `systemd` configuration explicitly drops privileges, strictly isolates the filesystem (`ProtectSystem=strict`), and routes stdout/stderr to `/dev/null` preventing JSON log accumulation on disk.
+- **Forensic & Observability Controls:** The `systemd` configuration explicitly drops privileges, strictly isolates the filesystem (`ProtectSystem=strict`), and defaults to standard `journald` log capture. Operators desiring a zero log retention posture can uncomment `StandardOutput=null` / `StandardError=null` in `anonguard.service`. Production observability metrics can be exposed via `--metrics-addr 127.0.0.1:9052` (Prometheus text format).
