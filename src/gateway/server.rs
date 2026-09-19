@@ -136,7 +136,7 @@ impl GatewayServer {
                     let port = config
                         .listen_addr
                         .split(':')
-                        .last()
+                        .next_back()
                         .unwrap_or("9050")
                         .parse()
                         .unwrap_or(9050);
@@ -1335,7 +1335,7 @@ pub async fn handle_onion_relay_connection(
                 }) => {
                     let payload = &client_buf[13..13 + len];
                     let extend_ok = async {
-                            let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
+                            let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
 
                             if hop_index != relay_hop.hop_index + 1 {
@@ -1400,7 +1400,7 @@ pub async fn handle_onion_relay_connection(
                 }) => {
                     let payload = &client_buf[13..13 + len];
                     if let Ok((target_h, target_p)) =
-                        crate::onion::circuit::decode_relay_target(&payload)
+                        crate::onion::circuit::decode_relay_target(payload)
                     {
                         // V-11: Enforce is_exit check for Relay cells
                         if !is_exit_allowed && !pool.is_mesh_target(&target_h, target_p).await {

@@ -48,7 +48,7 @@ impl SecureTransportSession {
         mut stream: TcpStream,
         pinned_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> io::Result<Self> {
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        use ed25519_dalek::{Signature, VerifyingKey};
 
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);

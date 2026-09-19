@@ -43,6 +43,8 @@ fn bench_aead(c: &mut Criterion) {
             backward_key,
             forward_mac: mac_key,
             backward_mac: mac_key,
+            forward_aead_key: [0u8; 32],
+            backward_aead_key: [0u8; 32],
         },
         0,
     );

@@ -10,7 +10,10 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const DEFAULT_POW_DIFFICULTY: u32 = 26; // 28 leading zero bits (default production difficulty)
+/// Default registration PoW difficulty: the number of *leading zero bits* required in
+/// SHA-256(node_id || timestamp || nonce). 26 bits → ~67 million expected hash operations.
+/// Verified against `count_leading_zero_bits` which counts individual bits, not nibbles.
+pub const DEFAULT_POW_DIFFICULTY: u32 = 26;
 pub const MAX_TIMESTAMP_DRIFT_SECS: u64 = 300; // 5 minutes window (reduced from 10 to limit replay)
 
 #[derive(Debug, PartialEq, Eq)]
@@ -78,8 +81,16 @@ impl NonceRegistry {
     /// Checks if a nonce has been seen before for the given node_id.
     /// If not seen, records it and returns false ("not a replay").
     /// If already seen, returns true ("replay detected").
+    ///
+    /// Uses poison-recovering lock access rather than `.unwrap()` because this is a
+    /// Sybil-defense hot path. A panic while the lock is held (in any thread) must not
+    /// permanently disable replay detection — a disabled registry would silently allow
+    /// nonce replay attacks, which is worse than operating on state that was mid-update.
     pub fn check_and_record(&self, node_id: &str, nonce: u64, current_time: u64) -> bool {
-        let mut seen = self.seen.lock().unwrap();
+        let mut seen = self
+            .seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Purge expired entries (outside 2x the drift window for safety)
         let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
@@ -320,6 +331,38 @@ mod tests {
         assert_eq!(
             err_bracket,
             SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8])
+        );
+    }
+
+    /// Regression test for G2: NonceRegistry must survive mutex poisoning.
+    ///
+    /// Without the `unwrap_or_else(|p| p.into_inner())` fix, a thread panicking
+    /// while holding `self.seen` would permanently poison the mutex. Every subsequent
+    /// call to `check_and_record` would then panic too, silently disabling replay
+    /// detection and allowing nonce replay attacks.
+    #[test]
+    fn test_nonce_registry_survives_mutex_poisoning() {
+        use std::sync::Arc;
+        let registry = Arc::new(NonceRegistry::new());
+        let registry_clone = registry.clone();
+
+        // Poison the mutex by panicking while holding the lock.
+        let result = std::panic::catch_unwind(move || {
+            let _guard = registry_clone.seen.lock().unwrap();
+            panic!("deliberate panic to poison the NonceRegistry mutex");
+        });
+        assert!(result.is_err(), "catch_unwind should have caught the panic");
+
+        // After poisoning, check_and_record must not panic and must still
+        // correctly detect the first call as not-a-replay and second as replay.
+        let now = current_timestamp_secs();
+        assert!(
+            !registry.check_and_record("node-a", 42, now),
+            "first call: not a replay"
+        );
+        assert!(
+            registry.check_and_record("node-a", 42, now),
+            "second call: replay detected"
         );
     }
 }

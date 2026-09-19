@@ -3,7 +3,7 @@
 //! Replaces single-point-of-failure trackers with a cryptographically signed,
 //! M-of-N quorum consensus protocol modeled after Tor Directory Authorities.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

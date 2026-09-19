@@ -128,6 +128,12 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_POW_DIFFICULTY)]
     pow_difficulty: u32,
 
+    /// Number of connection failures per second required to trip the kill switch.
+    /// Lower values are more sensitive (fewer false-negatives but more false-positive trips);
+    /// higher values give a larger window before fail-closed engages.
+    #[arg(long, default_value_t = 5)]
+    killswitch_trip_threshold: usize,
+
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
     #[arg(long)]
     fetch_from: Option<String>,
@@ -595,7 +601,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    let kill_switch = KillSwitchController::new();
+    let kill_switch = KillSwitchController::with_threshold(
+        args.killswitch_trip_threshold,
+        std::time::Duration::from_secs(1),
+    );
     let relay_identity_key =
         std::sync::Arc::new(load_or_create_identity_key(&config.identity_key_path));
     let gateway = GatewayServer::new(config, pool, kill_switch, relay_identity_key);

@@ -40,8 +40,8 @@ fn poc_replay_window_gap_off_by_one() {
         cells.push(w);
     }
     // in-order delivery of counters 1,2,3
-    for i in 0..3 {
-        deliver(&mut client, &cells[i]).expect("in-order cell rejected");
+    for cell in cells.iter().take(3) {
+        deliver(&mut client, cell).expect("in-order cell rejected");
     }
     // cells 4 and 5 are dropped in transit (e.g. by a malicious middle relay); 6 arrives
     deliver(&mut client, &cells[5]).expect("cell 6 rejected");

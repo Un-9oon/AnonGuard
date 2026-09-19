@@ -41,6 +41,8 @@ fn test_n02_circuit_id_validation() {
         backward_key: [2u8; 32],
         forward_mac: [3u8; 32],
         backward_mac: [4u8; 32],
+        forward_aead_key: [5u8; 32],
+        backward_aead_key: [6u8; 32],
     };
     client_circuit.add_hop(keys).unwrap();
 
@@ -82,6 +84,8 @@ fn test_n02_circuit_id_validation() {
         backward_key: [2u8; 32],
         forward_mac: [3u8; 32],
         backward_mac: [4u8; 32],
+        forward_aead_key: [5u8; 32],
+        backward_aead_key: [6u8; 32],
     };
     let mut relay = RelayCircuitHop::new(0xc0ffee01, relay_keys, 0);
 
@@ -122,6 +126,8 @@ fn test_n04_no_double_increment() {
         backward_key: [2u8; 32],
         forward_mac: [3u8; 32],
         backward_mac: [4u8; 32],
+        forward_aead_key: [5u8; 32],
+        backward_aead_key: [6u8; 32],
     };
     let mut relay = RelayCircuitHop::new(0xc0ffee01, keys, 0);
 
