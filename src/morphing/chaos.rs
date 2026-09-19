@@ -42,7 +42,10 @@ impl LorenzAttractor {
 
     /// Steps the chaotic system forward using Euler's method and returns (X, Y).
     fn step(&self) -> (f64, f64) {
-        let mut s = self.state.lock().expect("mutex poisoned");
+        let mut s = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dx = s.sigma * (s.y - s.x);
         let dy = s.x * (s.rho - s.z) - s.y;
         let dz = s.x * s.y - s.beta * s.z;

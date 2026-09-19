@@ -82,6 +82,7 @@ where
         }
     }
 
+    // SAFETY: jitter.is_none() check on line 61 returned early, so jitter is guaranteed to be Some(...) here.
     let j = jitter.unwrap();
     let (mut a_read, mut a_write) = tokio::io::split(a);
     let (mut b_read, mut b_write) = tokio::io::split(b);
