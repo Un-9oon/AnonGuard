@@ -4,7 +4,8 @@
 
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+
 
 use anonguard::core::GuardConfig;
 use anonguard::gateway::GatewayServer;
@@ -144,20 +145,64 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
 
 fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::SigningKey {
     use std::io::Write;
-    if let Ok(bytes) = std::fs::read(path) {
-        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
-            return ed25519_dalek::SigningKey::from_bytes(&arr);
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.exists() {
+        match std::fs::read(path) {
+            Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+                Ok(arr) => return ed25519_dalek::SigningKey::from_bytes(&arr),
+                Err(_) => {
+                    error!(
+                        "FATAL: Identity key file {:?} is corrupt (expected 32 bytes, got {}). \
+                        Delete it to generate a fresh key — existing relays will need to \
+                        re-handshake after the change.",
+                        path,
+                        bytes.len()
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                error!("FATAL: Cannot read identity key file {:?}: {}", path, e);
+                std::process::exit(1);
+            }
         }
     }
+
+    // Key file does not exist — create it with strict permissions
     let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            error!("FATAL: Cannot create key directory {:?}: {}", parent, e);
+            std::process::exit(1);
+        }
     }
-    if let Ok(mut f) = std::fs::File::create(path) {
-        let _ = f.write_all(&key.to_bytes());
+    let mut f = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            error!("FATAL: Cannot create identity key file {:?}: {}", path, e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = f.write_all(&key.to_bytes()) {
+        error!("FATAL: Cannot write identity key file {:?}: {}", path, e);
+        std::process::exit(1);
+    }
+    // Belt-and-suspenders: set permissions explicitly in case umask interfered
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        error!("FATAL: Cannot set permissions on identity key file {:?}: {}", path, e);
+        std::process::exit(1);
     }
     key
 }
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -345,7 +390,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let pool_clone = pool.clone();
             let auth_endpoints = config.directory_authorities.clone();
             let mut auth_keys = trusted_authorities.clone();
-            let quorum_thresh = args.quorum_threshold;
+            let quorum_thresh = if args.quorum_threshold == 0 && !config.directory_authorities.is_empty() {
+                warn!("--quorum-threshold 0 is unsafe when --authorities is set; clamping to 1");
+                1
+            } else {
+                args.quorum_threshold
+            };
 
             tokio::spawn(async move {
                 loop {
@@ -376,7 +426,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 {
                                     Ok(mut session) => {
                                         if let Some(peer_vk) = session.peer_verifying_key() {
-                                            // Strictly reject any peer key that is not in the trusted authority set if authority keys were configured
+                                            // Strictly reject any peer key that is not in the trusted authority set if authority keys were configured.
+                                            // Never auto-insert (trust-first-seen) — callers must supply --authority-keys.
                                             if !auth_keys.is_empty()
                                                 && !auth_keys.values().any(|vk| vk == &peer_vk)
                                             {
@@ -385,12 +436,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                     "Rejected Directory Authority: peer key is not in --authority-keys"
                                                 );
                                                 continue;
-                                            }
-
-                                            if auth_keys.is_empty() {
-                                                auth_keys.insert(endpoint.clone(), peer_vk);
-                                                auth_keys
-                                                    .insert("auth-primary".to_string(), peer_vk);
                                             }
                                         }
 
@@ -505,15 +550,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         res = async {
             if args.reverse_relay {
                 if let Some(tracker_url) = args.announce {
-                    // Generate a random Node ID
-                    let node_id = format!(
-                        "Node_{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis()
-                            % 10000
-                    );
+                    // Generate a cryptographically random Node ID (fix #15: was ms%10000 — too short)
+                    let node_id = format!("node-{:016x}", rand::random::<u64>());
                     gateway.run_reverse_relay(&tracker_url, &node_id).await
                 } else {
                     tracing::error!("--announce <tracker_url> is required for --reverse-relay");
@@ -525,6 +563,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } => res,
         _ = tokio::signal::ctrl_c() => {
             info!("Received shutdown signal (Ctrl+C), terminating gracefully...");
+            Ok(())
+        }
+        _ = async {
+            #[cfg(target_os = "linux")]
+            {
+                use tokio::signal::unix::{signal, SignalKind};
+                if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                    sig.recv().await;
+                } else {
+                    // If we can't register SIGTERM, just block forever so the other arms fire
+                    std::future::pending::<()>().await;
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            std::future::pending::<()>().await;
+        } => {
+            info!("Received SIGTERM, terminating gracefully...");
             Ok(())
         }
     };

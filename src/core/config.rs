@@ -58,6 +58,8 @@ pub struct GuardConfig {
     pub pow_difficulty: u32,
     /// Path to persist the relay's long-term Ed25519 identity key
     pub identity_key_path: std::path::PathBuf,
+    /// Path to persist the client's Entry Guards (Hop 0 pins)
+    pub guard_state_path: std::path::PathBuf,
 }
 
 impl Default for GuardConfig {
@@ -94,6 +96,7 @@ impl Default for GuardConfig {
             enable_firewall_killswitch: false,
             pow_difficulty: 20,
             identity_key_path: std::path::PathBuf::from("/etc/anonguard/identity.key"),
+            guard_state_path: std::path::PathBuf::from("/etc/anonguard/guards.json"),
         }
     }
 }

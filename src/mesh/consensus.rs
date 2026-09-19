@@ -114,6 +114,11 @@ impl ConsensusDocument {
     }
 
     /// Computes the deterministic SHA-256 digest of the consensus content (excluding signatures).
+    ///
+    /// Every variable-length field is length-prefixed (4-byte BE) before its content so that
+    /// concatenation of different field values cannot produce the same byte sequence.
+    /// `pow_nonce` and `registered_at` are included so those fields are covered by authority
+    /// signatures and cannot be altered after signing.
     pub fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(self.valid_after.to_be_bytes());
@@ -124,12 +129,23 @@ impl ConsensusDocument {
         sorted_relays.sort_by(|a, b| a.node_id.cmp(&b.node_id));
 
         for r in &sorted_relays {
-            hasher.update(r.node_id.as_bytes());
-            hasher.update(r.host.as_bytes());
+            // Length-prefix every variable-length field to prevent digest collisions
+            // e.g. ("relay-1","10.0.0.5") vs ("relay-11","0.0.0.5") are now distinct
+            let node_id_bytes = r.node_id.as_bytes();
+            hasher.update((node_id_bytes.len() as u32).to_be_bytes());
+            hasher.update(node_id_bytes);
+
+            let host_bytes = r.host.as_bytes();
+            hasher.update((host_bytes.len() as u32).to_be_bytes());
+            hasher.update(host_bytes);
+
             hasher.update(r.port.to_be_bytes());
             hasher.update(r.onion_key_x25519);
             hasher.update(r.identity_key_ed25519);
             hasher.update([if r.is_exit { 1 } else { 0 }]);
+            // Include pow_nonce and registered_at so they are covered by the authority signature
+            hasher.update(r.pow_nonce.to_be_bytes());
+            hasher.update(r.registered_at.to_be_bytes());
         }
 
         let result = hasher.finalize();
@@ -150,12 +166,19 @@ impl ConsensusDocument {
 
     /// Verifies that the consensus has valid signatures from at least `quorum_threshold`
     /// recognized Directory Authorities.
+    ///
+    /// `quorum_threshold` of 0 is always rejected — an unsigned consensus must never be accepted.
     pub fn verify_quorum(
         &self,
         trusted_authorities: &HashMap<String, VerifyingKey>,
         quorum_threshold: usize,
         current_time: u64,
     ) -> bool {
+        // Reject threshold 0: an unsigned/empty-signature consensus must never pass
+        if quorum_threshold == 0 {
+            return false;
+        }
+
         // 1. Check validity window
         if current_time < self.valid_after || current_time > self.valid_until {
             return false;

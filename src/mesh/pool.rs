@@ -1,8 +1,8 @@
 //! High-concurrency proxy pool with auto-rotation on block.
 
+use indexmap::IndexMap;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -14,28 +14,42 @@ use crate::mesh::node::ProxyNode;
 
 #[derive(Clone)]
 pub struct ProxyPool {
-    nodes: Arc<RwLock<Vec<ProxyNode>>>,
+    /// Keyed by "host:port" — inserting the same key overwrites, preventing duplicates (#6).
+    nodes: Arc<RwLock<IndexMap<String, ProxyNode>>>,
     cursor: Arc<AtomicUsize>,
     /// Maps "host:port" -> Ed25519 identity key from the directory consensus.
     /// Only populated when nodes are loaded via `load_from_consensus`.
-    identity_keys: Arc<RwLock<HashMap<String, [u8; 32]>>>,
+    identity_keys: Arc<RwLock<IndexMap<String, [u8; 32]>>>,
+    /// Persistent entry guard state for the client.
+    guard_state: Arc<RwLock<crate::mesh::guards::GuardState>>,
+    /// Path to the persistent entry guards file.
+    guard_state_path: Arc<RwLock<Option<std::path::PathBuf>>>,
 }
 
 impl ProxyPool {
     pub fn new() -> Self {
         Self {
-            nodes: Arc::new(RwLock::new(Vec::new())),
+            nodes: Arc::new(RwLock::new(IndexMap::new())),
             cursor: Arc::new(AtomicUsize::new(0)),
-            identity_keys: Arc::new(RwLock::new(HashMap::new())),
+            identity_keys: Arc::new(RwLock::new(IndexMap::new())),
+            guard_state: Arc::new(RwLock::new(crate::mesh::guards::GuardState::new())),
+            guard_state_path: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Adds a proxy from string representation.
+    pub async fn init_guard_state(&self, path: std::path::PathBuf) {
+        let state = crate::mesh::guards::GuardState::load(&path);
+        *self.guard_state.write().await = state;
+        *self.guard_state_path.write().await = Some(path);
+    }
+
+    /// Adds a proxy from string representation, deduplicating by host:port.
     pub async fn add_proxy(&self, raw: &str) -> Result<(), String> {
         let mut node = ProxyNode::parse(raw)?;
         node.enforce_remote_dns();
+        let key = format!("{}:{}", node.host, node.port);
         let mut list = self.nodes.write().await;
-        list.push(node);
+        list.insert(key, node);
         Ok(())
     }
 
@@ -61,8 +75,8 @@ impl ProxyPool {
     /// strictly enforcing Directory Authority signature quorum, timestamp validity,
     /// and individual relay Ed25519 identity bindings.
     ///
-    /// Also records the `identity_key_ed25519` for each relay so the onion circuit
-    /// builder can verify the handshake against the pinned consensus key.
+    /// Performs a **full replace** of consensus-sourced entries so stale relays are
+    /// evicted on each refresh cycle (fixes #6 pool never evicts).
     pub async fn load_from_consensus(
         &self,
         doc: &crate::mesh::consensus::ConsensusDocument,
@@ -74,8 +88,13 @@ impl ProxyPool {
             return Err("Directory consensus document quorum verification failed".to_string());
         }
 
-        let mut loaded = 0;
+        // Full replace: clear old consensus entries and repopulate from fresh document
+        let mut list = self.nodes.write().await;
         let mut id_keys = self.identity_keys.write().await;
+        list.retain(|_, n| !n.raw_url.starts_with("socks5://") && !n.raw_url.starts_with("reverse://"));
+        id_keys.clear();
+
+        let mut loaded = 0;
         for relay in &doc.relays {
             if !relay.verify_identity() {
                 continue; // Skip relays with invalid or missing cryptographic identity signatures
@@ -85,10 +104,14 @@ impl ProxyPool {
             } else {
                 format!("socks5://{}:{}", relay.host, relay.port)
             };
-            if self.add_proxy(&scheme).await.is_ok() {
+            if let Ok(mut node) = ProxyNode::parse(&scheme) {
+                node.enforce_remote_dns();
+                // Carry the is_exit flag from the consensus descriptor into the ProxyNode
+                node.is_exit = relay.is_exit;
+                let key = format!("{}:{}", node.host, node.port);
                 // Store identity key keyed by "host:port" for circuit handshake binding
-                let key_id = format!("{}:{}", relay.host, relay.port);
-                id_keys.insert(key_id, relay.identity_key_ed25519);
+                id_keys.insert(key.clone(), relay.identity_key_ed25519);
+                list.insert(key, node);
                 loaded += 1;
             }
         }
@@ -126,24 +149,26 @@ impl ProxyPool {
         // Try up to count times to find an alive node
         for _ in 0..count {
             let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % count;
-            if list[idx].is_alive {
-                return Some(list[idx].clone());
+            if let Some(node) = list.get_index(idx).map(|(_, v)| v) {
+                if node.is_alive {
+                    return Some(node.clone());
+                }
             }
         }
 
         // Fallback: return any node if all are marked down
         let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % count;
-        Some(list[idx].clone())
+        list.get_index(idx).map(|(_, v)| v.clone())
     }
 
     /// Retrieves a random chain of unique healthy proxies
     pub async fn get_random_chain(&self, min_hops: usize, max_hops: usize) -> Vec<ProxyNode> {
         let list = self.nodes.read().await;
-        let mut healthy: Vec<ProxyNode> = list.iter().filter(|n| n.is_alive).cloned().collect();
+        let mut healthy: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
 
         // Fallback if all are marked dead (for testing/fault tolerance)
         if healthy.is_empty() {
-            healthy = list.clone();
+            healthy = list.values().cloned().collect();
         }
 
         if healthy.is_empty() {
@@ -167,61 +192,159 @@ impl ProxyPool {
 
     /// Retrieves a random chain of proxies that strictly enforces BGP /16 subnet diversity
     /// to defeat Sybil attacks and correlation by colluding single-provider nodes.
+    ///
+    /// When `require_exit_at_last` is true (the default for onion routing), the final hop
+    /// is chosen only from relays that carry `is_exit == true` in the consensus descriptor.
+    /// This enforces Bug #4 (V-02): a circuit is rejected at build time rather than silently
+    /// using a non-exit relay as the exit hop.
     pub async fn get_diverse_onion_chain(
         &self,
         min_hops: usize,
         max_hops: usize,
         enforce_diversity: bool,
     ) -> Vec<ProxyNode> {
+        self.get_diverse_onion_chain_with_exit(min_hops, max_hops, enforce_diversity, true).await
+    }
+
+    /// Internal builder with explicit exit-enforcement flag.
+    pub async fn get_diverse_onion_chain_with_exit(
+        &self,
+        min_hops: usize,
+        max_hops: usize,
+        enforce_diversity: bool,
+        require_exit_at_last: bool,
+    ) -> Vec<ProxyNode> {
         let list = self.nodes.read().await;
-        let mut healthy: Vec<ProxyNode> = list.iter().filter(|n| n.is_alive).cloned().collect();
+        let all_healthy: Vec<ProxyNode> = {
+            let v: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
+            if v.is_empty() { list.values().cloned().collect() } else { v }
+        };
 
-        if healthy.is_empty() {
-            healthy = list.clone();
-        }
-
-        if healthy.is_empty() {
+        if all_healthy.is_empty() {
             return Vec::new();
         }
 
-        let mut rng = rand::thread_rng();
-        let max_possible = healthy.len().min(max_hops);
-        let min_possible = min_hops.min(max_possible);
+        let path_len = {
+            let mut rng = rand::thread_rng();
+            let max_possible = all_healthy.len().min(max_hops);
+            let min_possible = min_hops.min(max_possible);
 
-        let path_len = if min_possible < max_possible {
-            rng.gen_range(min_possible..=max_possible)
-        } else {
-            min_possible.max(1).min(healthy.len())
+            if min_possible < max_possible {
+                rng.gen_range(min_possible..=max_possible)
+            } else {
+                min_possible.max(1).min(all_healthy.len())
+            }
         };
 
-        healthy.shuffle(&mut rng);
+        // Separate exit-capable and non-exit relay pools
+        let (exit_nodes, middle_nodes): (Vec<ProxyNode>, Vec<ProxyNode>) = if require_exit_at_last {
+            all_healthy.into_iter().partition(|n| n.is_exit)
+        } else {
+            (all_healthy.clone(), all_healthy)
+        };
 
-        if !enforce_diversity {
-            return healthy.into_iter().take(path_len).collect();
+        if require_exit_at_last && exit_nodes.is_empty() {
+            tracing::warn!("No exit-capable relays available in the pool — cannot build a valid circuit");
+            return Vec::new();
+        }
+
+        // Build the non-exit portion of the chain (path_len - 1 middle hops)
+        let middle_count = if require_exit_at_last { path_len.saturating_sub(1) } else { path_len };
+        let mut pool_for_middles = if require_exit_at_last {
+            middle_nodes
+        } else {
+            // When not requiring exit at last, all nodes are eligible everywhere
+            let list_vals: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
+            if list_vals.is_empty() { list.values().cloned().collect() } else { list_vals }
+        };
+        
+        {
+            let mut rng = rand::thread_rng();
+            pool_for_middles.shuffle(&mut rng);
         }
 
         let mut selected: Vec<ProxyNode> = Vec::new();
-        for candidate in healthy {
-            if selected.len() >= path_len {
-                break;
+
+        // 1. Pick or assign Persistent Entry Guard (Hop 0)
+        if middle_count > 0 {
+            let mut guard_state = self.guard_state.write().await;
+            let mut guard_node = None;
+            
+            // Look for an existing healthy guard in our pinned state
+            for g_id in &guard_state.guards {
+                if let Some(n) = pool_for_middles.iter().find(|n| format!("{}:{}", n.host, n.port) == *g_id) {
+                    guard_node = Some(n.clone());
+                    break;
+                }
             }
 
-            let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
-            test_hosts.push(&candidate.host);
-
-            if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
-                selected.push(candidate);
+            if let Some(guard) = guard_node {
+                selected.push(guard.clone());
+                pool_for_middles.retain(|n| format!("{}:{}", n.host, n.port) != format!("{}:{}", guard.host, guard.port));
+            } else {
+                // Assign a new pinned guard and save to disk
+                if let Some(new_guard) = pool_for_middles.first().cloned() {
+                    let g_id = format!("{}:{}", new_guard.host, new_guard.port);
+                    guard_state.guards.push(g_id);
+                    if guard_state.guards.len() > 3 {
+                        guard_state.guards.remove(0); // Keep max 3 persistent guards to prevent bloating
+                    }
+                    if let Some(path) = self.guard_state_path.read().await.as_ref() {
+                        guard_state.save(path);
+                    }
+                    selected.push(new_guard.clone());
+                    pool_for_middles.remove(0);
+                }
             }
         }
 
-        // If strict diversity filtered too aggressively, fall back to whatever diverse nodes we gathered
+        // 2. Select remaining middle hops
+        if !enforce_diversity {
+            let remaining = middle_count.saturating_sub(selected.len());
+            selected.extend(pool_for_middles.into_iter().take(remaining));
+        } else {
+            for candidate in pool_for_middles {
+                if selected.len() >= middle_count {
+                    break;
+                }
+                let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
+                test_hosts.push(&candidate.host);
+                if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
+                    selected.push(candidate);
+                }
+            }
+        }
+
+        // Append the exit hop
+        if require_exit_at_last {
+            let mut exit_pool = exit_nodes;
+            {
+                let mut rng = rand::thread_rng();
+                exit_pool.shuffle(&mut rng);
+            }
+            // Pick the first exit node that passes diversity (if enforced)
+            for exit_candidate in exit_pool {
+                if enforce_diversity {
+                    let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
+                    test_hosts.push(&exit_candidate.host);
+                    if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
+                        selected.push(exit_candidate);
+                        break;
+                    }
+                } else {
+                    selected.push(exit_candidate);
+                    break;
+                }
+            }
+        }
+
         selected
     }
 
     /// Rotates away from a blocked proxy and returns a fresh healthy node.
     pub async fn rotate_on_block(&self, blocked_url: &str) -> Option<ProxyNode> {
         let mut list = self.nodes.write().await;
-        for node in list.iter_mut() {
+        for node in list.values_mut() {
             if node.raw_url == blocked_url {
                 node.failure_count += 1;
                 if node.failure_count >= 3 {
@@ -242,7 +365,7 @@ impl ProxyPool {
         self.nodes
             .read()
             .await
-            .iter()
+            .values()
             .filter(|n| n.is_alive)
             .count()
     }

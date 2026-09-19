@@ -6,14 +6,19 @@
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::mesh::consensus::{ConsensusDocument, RelayDescriptor};
 use crate::mesh::sybil::{current_timestamp_secs, verify_pow, DEFAULT_POW_DIFFICULTY};
 use crate::mesh::transport::SecureTransportSession;
+
+/// TTL for relay entries: relays not refreshed within 2 hours are evicted.
+const RELAY_TTL_SECS: u64 = 7200;
+
 
 pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
 
@@ -28,10 +33,14 @@ pub struct DirectoryAuthority {
 }
 
 impl DirectoryAuthority {
+    /// Creates a new DirectoryAuthority with an ephemeral signing key (useful for tests).
     pub fn new(authority_id: String, listen_addr: String) -> Self {
         Self::with_difficulty(authority_id, listen_addr, DEFAULT_POW_DIFFICULTY)
     }
 
+    /// Creates a new DirectoryAuthority, always generating a fresh ephemeral key.
+    ///
+    /// For production use, prefer `with_persistent_key` which loads or creates a stable key.
     pub fn with_difficulty(authority_id: String, listen_addr: String, pow_difficulty: u32) -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
         Self {
@@ -46,6 +55,103 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
+
+    /// Loads or creates the authority signing key from `key_path`, creating the file with
+    /// mode 0o600 (owner-read/write only) if it does not already exist.
+    ///
+    /// Treats a corrupt key file or an unwritable path as **fatal** — logs the error and
+    /// calls `std::process::exit(1)`.  Silently generating a new key on corruption would
+    /// invalidate all pinned consensus documents already distributed to relays.
+    pub fn load_or_create_signing_key(key_path: impl AsRef<Path>) -> SigningKey {
+        use std::io::Read;
+
+        let path = key_path.as_ref();
+        if path.exists() {
+            // Load existing key
+            let mut file = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("FATAL: Cannot open authority key file {:?}: {}", path, e);
+                    std::process::exit(1);
+                }
+            };
+            let mut bytes = Vec::new();
+            if let Err(e) = file.read_to_end(&mut bytes) {
+                error!("FATAL: Cannot read authority key file {:?}: {}", path, e);
+                std::process::exit(1);
+            }
+            let arr: [u8; 32] = match bytes.as_slice().try_into() {
+                Ok(a) => a,
+                Err(_) => {
+                    error!(
+                        "FATAL: Authority key file {:?} is corrupt (expected 32 bytes, got {}). \
+                        Delete the file to generate a fresh key, but note this will invalidate \
+                        all previously distributed consensus documents.",
+                        path,
+                        bytes.len()
+                    );
+                    std::process::exit(1);
+                }
+            };
+            SigningKey::from_bytes(&arr)
+        } else {
+            // Create new key and persist it at 0o600
+            let key = SigningKey::generate(&mut OsRng);
+            Self::write_key_file(path, key.as_bytes());
+            key
+        }
+    }
+
+    fn write_key_file(path: &Path, bytes: &[u8; 32]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                error!("FATAL: Cannot create authority key file {:?}: {}", path, e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = file.write_all(bytes) {
+            error!("FATAL: Cannot write authority key file {:?}: {}", path, e);
+            std::process::exit(1);
+        }
+        // Ensure the OS-level permissions are 0o600 even on existing files
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            error!("FATAL: Cannot set permissions on authority key file {:?}: {}", path, e);
+            std::process::exit(1);
+        }
+    }
+
+    /// Creates a DirectoryAuthority with a persistent signing key loaded from `key_path`.
+    pub fn with_persistent_key(
+        authority_id: String,
+        listen_addr: String,
+        pow_difficulty: u32,
+        key_path: impl AsRef<Path>,
+    ) -> Self {
+        let signing_key = Self::load_or_create_signing_key(key_path);
+        Self {
+            authority_id,
+            signing_key,
+            listen_addr,
+            active_relays: Arc::new(RwLock::new(HashMap::new())),
+            pow_difficulty,
+            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_AUTHORITY_CONNECTIONS,
+            )),
+            nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
+        }
+    }
+
 
     pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
         self.signing_key.verifying_key()
@@ -101,10 +207,27 @@ impl DirectoryAuthority {
     }
 
     /// Generates and signs the current consensus document.
+    ///
+    /// Evicts relay entries that have not refreshed within `RELAY_TTL_SECS` (2 hours)
+    /// before building the consensus — prevents unbounded map growth under relay churn (#5).
     pub async fn generate_consensus(&self) -> ConsensusDocument {
+        let now = current_timestamp_secs();
+        {
+            let mut relays = self.active_relays.write().await;
+            relays.retain(|id, r| {
+                let age = now.saturating_sub(r.registered_at);
+                if age > RELAY_TTL_SECS {
+                    info!("Authority [{}]: Evicting stale relay {} (age {}s > TTL {}s)",
+                        self.authority_id, id, age, RELAY_TTL_SECS);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
         let relays = self.active_relays.read().await;
         let relay_list: Vec<RelayDescriptor> = relays.values().cloned().collect();
-        let now = current_timestamp_secs();
 
         let mut consensus = ConsensusDocument::new(
             now,
@@ -115,6 +238,7 @@ impl DirectoryAuthority {
         consensus.sign_with_authority(&self.authority_id, &self.signing_key);
         consensus
     }
+
 
     /// Starts the asynchronous authority listener.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

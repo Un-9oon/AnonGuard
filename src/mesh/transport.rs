@@ -1,20 +1,43 @@
 //! Authenticated Cryptographic Framing for Secure Node & Directory Transport.
 //!
-//! Replaces raw plaintext HTTP with Ephemeral X25519 Key Agreement
-//! and ChaCha20 authenticated streaming frames.
+//! Replaces raw plaintext HTTP with Ephemeral X25519 Key Agreement and
+//! ChaCha20-Poly1305 AEAD streaming frames.
+//!
+//! # Security (#8 fix)
+//! `write_frame` and `read_frame` previously used raw ChaCha20 with no authentication,
+//! allowing a network attacker to silently flip bits in frames without detection.
+//! This version uses ChaCha20-Poly1305 AEAD with a per-frame monotonic nonce counter,
+//! preventing both bit-flipping and frame replay.
+//!
+//! Frame format on the wire:
+//!   4-byte big-endian ciphertext length (= plaintext len + 16 tag bytes)
+//!   <ciphertext || 16-byte Poly1305 tag>
 
-use chacha20::cipher::{KeyIvInit, StreamCipher};
-use chacha20::ChaCha20;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use rand::rngs::OsRng;
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+/// Maximum allowed plaintext frame size (10 MB).
+const MAX_FRAME_LEN: usize = 10 * 1024 * 1024;
+
+fn make_nonce(counter: u64) -> Nonce {
+    let mut n = [0u8; 12];
+    n[4..12].copy_from_slice(&counter.to_be_bytes());
+    Nonce::from(n)
+}
+
 pub struct SecureTransportSession {
     stream: TcpStream,
-    send_cipher: ChaCha20,
-    recv_cipher: ChaCha20,
+    send_cipher: ChaCha20Poly1305,
+    recv_cipher: ChaCha20Poly1305,
+    /// Monotonic send counter — encoded in nonce, wraps to Err on overflow.
+    send_counter: u64,
+    /// Monotonic recv counter — encoded in nonce, wraps to Err on overflow.
+    recv_counter: u64,
     peer_verifying_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
@@ -93,17 +116,20 @@ impl SecureTransportSession {
 
         let shared_secret = client_secret.diffie_hellman(&server_public);
 
-        // Derive client_send and client_recv keys
+        // Derive client_send and client_recv AEAD keys
         let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), true);
 
-        let nonce = [0u8; 12];
-        let send_cipher = ChaCha20::new(&send_key.into(), &nonce.into());
-        let recv_cipher = ChaCha20::new(&recv_key.into(), &nonce.into());
+        let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+        let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
 
         Ok(Self {
             stream,
             send_cipher,
             recv_cipher,
+            send_counter: 0,
+            recv_counter: 0,
             peer_verifying_key,
         })
     }
@@ -145,17 +171,20 @@ impl SecureTransportSession {
 
         let shared_secret = server_secret.diffie_hellman(&client_public);
 
-        // Derive server_send and server_recv keys (inverted roles)
+        // Derive server_send and server_recv AEAD keys (inverted roles)
         let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), false);
 
-        let nonce = [0u8; 12];
-        let send_cipher = ChaCha20::new(&send_key.into(), &nonce.into());
-        let recv_cipher = ChaCha20::new(&recv_key.into(), &nonce.into());
+        let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
+        let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD key error: {e}")))?;
 
         Ok(Self {
             stream,
             send_cipher,
             recv_cipher,
+            send_counter: 0,
+            recv_counter: 0,
             peer_verifying_key: None,
         })
     }
@@ -165,58 +194,84 @@ impl SecureTransportSession {
         self.peer_verifying_key
     }
 
-    /// Encrypts and writes a length-prefixed encrypted frame.
+    /// Encrypts and writes a length-prefixed AEAD-authenticated frame.
+    ///
+    /// Wire format: 4-byte BE length of (ciphertext || 16-byte tag) || ciphertext || tag.
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
-        let len = payload.len() as u32;
-        let mut encrypted = payload.to_vec();
-        self.send_cipher.apply_keystream(&mut encrypted);
+        let counter = self.send_counter;
+        self.send_counter = self.send_counter.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "send nonce counter exhausted — rotate session key",
+            )
+        })?;
 
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&encrypted).await?;
+        let nonce = make_nonce(counter);
+        let ciphertext = self
+            .send_cipher
+            .encrypt(&nonce, payload)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("AEAD encrypt error: {e}")))?;
+
+        // ciphertext already includes the 16-byte Poly1305 tag appended by the AEAD
+        let ct_len = ciphertext.len() as u32;
+        self.stream.write_all(&ct_len.to_be_bytes()).await?;
+        self.stream.write_all(&ciphertext).await?;
         self.stream.flush().await?;
         Ok(())
     }
 
-    /// Reads and decrypts a length-prefixed encrypted frame.
+    /// Reads and decrypts a length-prefixed AEAD-authenticated frame.
+    ///
+    /// Returns `InvalidData` if authentication fails — the caller must close the connection.
     pub async fn read_frame(&mut self) -> io::Result<Vec<u8>> {
         let mut len_bytes = [0u8; 4];
-        if tokio::time::timeout(
+        tokio::time::timeout(
             tokio::time::Duration::from_secs(15),
             self.stream.read_exact(&mut len_bytes),
         )
         .await
-        .is_err()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Timeout waiting for frame header",
-            ));
-        }
-        let len = u32::from_be_bytes(len_bytes) as usize;
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame header"))??;
 
-        if len > 10 * 1024 * 1024 {
-            // 10MB sanity frame limit
+        // Length on wire is ciphertext + 16-byte tag
+        let ct_len = u32::from_be_bytes(len_bytes) as usize;
+        // Sanity check: plaintext is ct_len - 16; enforce MAX_FRAME_LEN on plaintext
+        if ct_len < 16 || ct_len > MAX_FRAME_LEN + 16 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Frame too large",
+                "Frame size out of bounds",
             ));
         }
 
-        let mut buf = vec![0u8; len];
-        if tokio::time::timeout(
+        let mut ct_buf = vec![0u8; ct_len];
+        tokio::time::timeout(
             tokio::time::Duration::from_secs(15),
-            self.stream.read_exact(&mut buf),
+            self.stream.read_exact(&mut ct_buf),
         )
         .await
-        .is_err()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Timeout waiting for frame payload",
-            ));
-        }
-        self.recv_cipher.apply_keystream(&mut buf);
-        Ok(buf)
+        .map_err(|_| {
+            io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame payload")
+        })??;
+
+        let counter = self.recv_counter;
+        self.recv_counter = self.recv_counter.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                "recv nonce counter exhausted — rotate session key",
+            )
+        })?;
+
+        let nonce = make_nonce(counter);
+        let plaintext = self
+            .recv_cipher
+            .decrypt(&nonce, ct_buf.as_slice())
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "AEAD authentication failed — possible tampering or replay",
+                )
+            })?;
+
+        Ok(plaintext)
     }
 
     pub fn into_inner(self) -> TcpStream {
@@ -334,5 +389,52 @@ mod tests {
             SecureTransportSession::client_handshake(client_stream2, Some(&wrong_key)).await;
         assert!(client_res.is_err());
         server_handle2.await.unwrap();
+    }
+
+    /// Verify that bit-flipping a ciphertext frame is rejected by AEAD authentication.
+    #[tokio::test]
+    async fn test_aead_rejects_tampered_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server: complete the handshake, then send a valid-length frame with corrupted ciphertext
+        let server_handle = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (stream, _) = listener.accept().await.unwrap();
+            // Complete real handshake so client_handshake() succeeds
+            let mut session = SecureTransportSession::server_handshake(stream, None)
+                .await
+                .unwrap();
+
+            // Encrypt a normal frame to get a valid-length ciphertext...
+            let msg = b"hello";
+            session.write_frame(msg).await.unwrap();
+
+            // ...then extract the underlying stream and send a second frame that is
+            // identical-length but completely corrupted bytes, bypassing the AEAD layer
+            let mut raw_stream = session.into_inner();
+            // Frame 2: same length as a 5-byte plaintext (5 + 16 = 21 bytes ciphertext)
+            let ct_len: u32 = 21;
+            raw_stream.write_all(&ct_len.to_be_bytes()).await.unwrap();
+            raw_stream.write_all(&[0xDE; 21]).await.unwrap();
+            raw_stream.flush().await.unwrap();
+        });
+
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let mut client_session = SecureTransportSession::client_handshake(client_stream, None)
+            .await
+            .unwrap();
+
+        // First frame should decrypt correctly
+        let first = client_session.read_frame().await.unwrap();
+        assert_eq!(first.as_slice(), b"hello");
+
+        // Second frame has corrupted ciphertext — must be rejected with InvalidData
+        let result = client_session.read_frame().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        server_handle.await.unwrap();
     }
 }

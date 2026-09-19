@@ -7,7 +7,11 @@ Type=simple
 User=anonguard
 Group=anonguard
 # Default assumes deployment as a middle/exit node on standard ports. Adjust args as needed.
-ExecStart=/usr/local/bin/anonguard-daemon --role exit --listen 0.0.0.0:9050
+# Bug #14: fixed --role exit (non-existent flag) -> --relay --is-exit
+ExecStart=/usr/local/bin/anonguard-daemon --relay --is-exit --listen 0.0.0.0:9050
+
+# Bug #14: flush nftables rules on graceful stop so no stale drop rules remain
+ExecStopPost=/usr/bin/nft delete table inet anonguard_filter
 
 # Prevent logging to disk to protect user anonymity
 StandardOutput=null

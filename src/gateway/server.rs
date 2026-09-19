@@ -21,9 +21,26 @@ use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
+
+/// Normalizes an IP address for per-IP counting.
+/// IPv6 addresses are masked to /48 so that a single operator cannot bypass the
+/// per-IP cap by allocating thousands of addresses from their /48 allocation.
+/// IPv4 addresses are returned unchanged.
+fn normalize_ip_for_cap(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // Zero out segments 4-8 (keep only the first 48 bits = 3 segments)
+            IpAddr::V6(Ipv6Addr::new(
+                seg[0], seg[1], seg[2], 0, 0, 0, 0, 0,
+            ))
+        }
+    }
+}
 
 pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 pub const MAX_CONCURRENT_PER_IP: u32 = 64;
@@ -84,6 +101,8 @@ impl GatewayServer {
 
     /// Starts the asynchronous listener loop with global and per-IP connection bounds.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.pool.init_guard_state(self.config.guard_state_path.clone()).await;
+        
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!(
             listen_addr = %self.config.listen_addr,
@@ -117,9 +136,11 @@ impl GatewayServer {
             };
 
             // 2. Per-IP connection ceiling (prevent single-client connection flooding)
+            // IPv6: key on /48 prefix to prevent cap bypass via large allocations
+            let client_ip_key = normalize_ip_for_cap(client_ip);
             {
                 let mut ip_map = self.ip_connections.write().await;
-                let count = ip_map.entry(client_ip).or_insert(0);
+                let count = ip_map.entry(client_ip_key).or_insert(0);
                 if *count >= MAX_CONCURRENT_PER_IP {
                     warn!(
                         client = %client_addr,
@@ -166,17 +187,28 @@ impl GatewayServer {
                     }
                 }
                 let _ip_guard = IpGuard {
-                    ip: client_ip,
+                    ip: client_ip_key,
                     tracker: ip_tracker,
                 };
+
 
                 if kill_switch.is_tripped() {
                     return;
                 }
 
                 let mut peek_buf = [0u8; 1];
-                let is_socks5 =
-                    client_stream.peek(&mut peek_buf).await.is_ok() && peek_buf[0] == 0x05;
+                // Bug #5: add timeout around peek() — without it, a client that never sends
+                // a byte keeps the connection open indefinitely (Slowloris against the gateway)
+                let is_socks5 = match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(5),
+                    client_stream.peek(&mut peek_buf),
+                ).await {
+                    Ok(Ok(_)) => peek_buf[0] == 0x05,
+                    Ok(Err(_)) | Err(_) => {
+                        warn!(client = %client_addr, "Client closed or timed out before sending first byte");
+                        return;
+                    }
+                };
 
                 let mut client = GuardedSocket::new(client_stream, kill_switch.atomic_handle())
                     .begin_verification()
@@ -215,10 +247,9 @@ impl GatewayServer {
                             .await
                         {
                             Ok(mut target_stream) => {
-                                info!(
-                                    "Relay Mode: Forwarding traffic to {}:{}",
-                                    target_host, target_port
-                                );
+                                // Bug #13: don't log target_host:target_port — destination is sensitive
+                                info!("Relay Mode: Forwarding traffic to connected destination");
+
                                 let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
                                     .await;
                                 let _ = morph_bidirectional_guarded(
@@ -592,6 +623,9 @@ impl GatewayServer {
             let kill_switch = self.kill_switch.clone();
             let pow_difficulty = self.config.pow_difficulty;
             let allow_private_exit = self.config.allow_private_exit;
+            let allow_open_socks5 = self.config.allow_open_socks5;
+            let identity_key = self.relay_identity_key.clone();
+            let pool = self.pool.clone();
 
             tokio::spawn(async move {
                 loop {
@@ -615,50 +649,75 @@ impl GatewayServer {
                                 format!("REGISTER_REVERSE {} {} {} {}\n", nid, token, now, nonce);
                             if stream.write_all(payload.as_bytes()).await.is_ok() {
                                 // Wait for the tracker to send data (meaning a client has connected to this stream)
-                                // We peek 1 byte to see if data arrived. If so, it's a SOCKS5 client!
+                                // We peek 1 byte to see if it's SOCKS5 (0x05) or Onion Protocol (anything else)
                                 let mut buf = [0u8; 1];
                                 if stream.peek(&mut buf).await.is_ok() {
                                     info!("Reverse Relay: Received incoming client connection from tracker!");
 
-                                    // Process exactly like a Relay Mode client
-                                    let (target_host, target_port) =
-                                        match crate::gateway::chain::intercept_socks5_request(
-                                            &mut stream,
-                                        )
-                                        .await
-                                        {
-                                            Ok(res) => res,
-                                            Err(e) => {
-                                                error!("Reverse Relay: Failed to intercept client SOCKS5 handshake: {}", e);
-                                                continue; // reconnect to refill pool
-                                            }
-                                        };
+                                    let is_socks5 = buf[0] == 0x05;
 
-                                    let exit_policy =
-                                        crate::kernel::ExitPolicy::new(allow_private_exit);
-                                    match exit_policy
-                                        .resolve_and_connect(&target_host, target_port)
-                                        .await
-                                    {
-                                        Ok(mut target_stream) => {
-                                            info!(
-                                                "Reverse Relay: Forwarding traffic to {}:{}",
-                                                target_host, target_port
-                                            );
-                                            let _ = morph_bidirectional_guarded(
+                                    if is_socks5 {
+                                        if !allow_open_socks5 {
+                                            warn!("Reverse Relay: Rejected unauthenticated plain SOCKS5 proxy request (anti-abuse policy)");
+                                            continue;
+                                        }
+
+                                        // Process exactly like a Relay Mode client for open SOCKS5
+                                        let (target_host, target_port) =
+                                            match crate::gateway::chain::intercept_socks5_request(
                                                 &mut stream,
-                                                &mut target_stream,
-                                                jitter.clone(),
-                                                Some(kill_switch.clone()),
                                             )
-                                            .await;
+                                            .await
+                                            {
+                                                Ok(res) => res,
+                                                Err(e) => {
+                                                    error!("Reverse Relay: Failed to intercept client SOCKS5 handshake: {}", e);
+                                                    continue; // reconnect to refill pool
+                                                }
+                                            };
+
+                                        let exit_policy =
+                                            crate::kernel::ExitPolicy::new(allow_private_exit);
+                                        match exit_policy
+                                            .resolve_and_connect(&target_host, target_port)
+                                            .await
+                                        {
+                                            Ok(mut target_stream) => {
+                                                info!(
+                                                    "Reverse Relay: Forwarding traffic to {}:{}",
+                                                    target_host, target_port
+                                                );
+                                                let _ = morph_bidirectional_guarded(
+                                                    &mut stream,
+                                                    &mut target_stream,
+                                                    jitter.clone(),
+                                                    Some(kill_switch.clone()),
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Reverse Relay: Target {}:{} blocked or unreachable: {}",
+                                                    target_host, target_port, e
+                                                );
+                                            }
                                         }
-                                        Err(e) => {
-                                            error!(
-                                                "Reverse Relay: Target {}:{} blocked or unreachable: {}",
-                                                target_host, target_port, e
-                                            );
-                                        }
+                                    } else {
+                                        // Handle as an Onion Relay Connection
+                                        let guarded_stream = GuardedSocket::new(stream, kill_switch.atomic_handle())
+                                            .begin_verification()
+                                            .mark_verified(); // Connection from tracker is trusted via registration
+
+                                        let exit_policy = crate::kernel::ExitPolicy::new(allow_private_exit);
+                                        let _ = handle_onion_relay_connection(
+                                            guarded_stream,
+                                            kill_switch.atomic_handle(),
+                                            jitter.clone(),
+                                            Some(exit_policy),
+                                            &*identity_key,
+                                            true, // require_auth via the onion handshake
+                                            pool.clone(),
+                                        ).await;
                                     }
                                 }
                             }
@@ -833,9 +892,17 @@ pub async fn build_telescopic_circuit(
     target_host: &str,
     target_port: u16,
 ) -> Result<OnionCircuit, Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Bug #4: enforce minimum 3 hops (Guard → Middle → Exit)
+    if chain.len() < 3 {
+        return Err(format!(
+            "Circuit chain too short: {} hops (minimum is 3 for anonymity)",
+            chain.len()
+        ).into());
+    }
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut circuit = OnionCircuit::new(circuit_id);
+
 
     // 1. Hop 0 (Guard) in-band CREATE/CREATED handshake
     let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
@@ -1026,7 +1093,8 @@ pub async fn handle_onion_relay_connection(
                                     &[],
                                 ) {
                                     let mut wire = destroy_cell.serialize();
-                                    let _ = relay_hop.wrap_backward_originate(&mut wire);
+                                    // Bug #10: break on crypto error rather than silently succeeding
+                                    if relay_hop.wrap_backward_originate(&mut wire).is_err() { break; }
                                     let _ = client.write_all(&wire).await;
                                 }
                                 break;
@@ -1041,7 +1109,8 @@ pub async fn handle_onion_relay_connection(
                                     &[],
                                 ) {
                                     let mut wire = destroy_cell.serialize();
-                                    let _ = relay_hop.wrap_backward_originate(&mut wire);
+                                    // Bug #10: break on crypto error rather than silently succeeding
+                                    if relay_hop.wrap_backward_originate(&mut wire).is_err() { break; }
                                     let _ = client.write_all(&wire).await;
                                 }
                                 break;
@@ -1057,7 +1126,8 @@ pub async fn handle_onion_relay_connection(
                             break;
                         };
                         let mut wire = return_cell.serialize();
-                        let _ = relay_hop.wrap_backward_originate(&mut wire);
+                        // Bug #10: break on crypto error rather than silently discarding
+                        if relay_hop.wrap_backward_originate(&mut wire).is_err() { break; }
                         if let Some(ref j) = jitter {
                             j.apply_delay().await;
                         }
@@ -1127,7 +1197,8 @@ pub async fn handle_onion_relay_connection(
                     }
                     res = ds.read_exact(&mut ds_buf) => {
                         if res.is_err() { break; }
-                        let _ = relay_hop.wrap_backward_relay(&mut ds_buf);
+                        // Bug #10: break on crypto error rather than silently forwarding
+                        if relay_hop.wrap_backward_relay(&mut ds_buf).is_err() { break; }
                         if let Some(ref j) = jitter {
                             j.apply_delay().await;
                         }
@@ -1204,16 +1275,19 @@ pub async fn handle_onion_relay_connection(
                                             b"CONNECTED",
                                         ) {
                                             let mut resp = resp_cell.serialize();
-                                            let _ = relay_hop.wrap_backward_originate(&mut resp);
+                                            // Bug #10: break on crypto error
+                                            if relay_hop.wrap_backward_originate(&mut resp).is_err() { break; }
                                             if client.write_all(&resp).await.is_ok() {
-                                                info!("Exit relay successfully bridged circuit {} to target {}:{}", relay_hop.circuit_id, target_h, target_p);
+                                                // Bug #13: don't log destination host/port
+                                                info!("Exit relay successfully bridged circuit {}", relay_hop.circuit_id);
                                                 downstream = Some(GuardedSocket::new(target_s, kill_switch_arc.clone()).begin_verification().mark_verified());
                                                 is_currently_exit_hop = true;
                                             }
                                         }
                                     }
-                                    Err(e) => {
-                                        error!("Exit relay blocked or failed to connect to destination target {}:{}: {}", target_h, target_p, e);
+                                    Err(_e) => {
+                                        // Bug #13: don't log destination host/port
+                                        error!("Exit relay blocked or failed to connect to destination");
                                         break;
                                     }
                                 }

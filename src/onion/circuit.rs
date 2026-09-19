@@ -201,10 +201,14 @@ impl ReplayWindow {
                     diff
                 )));
             }
-            if diff >= 64 {
+            // Shift by (diff + 1): moves past the gap (leaving those bits as zero)
+            // and sets bit 0 for the newly arrived packet.
+            // Previously this was `<< diff` which incorrectly set bit 0 at the gap
+            // boundary, allowing replay of the first sequence in the gap.
+            if diff >= 63 {
                 self.window = 1;
             } else {
-                self.window = (self.window << diff) | 1;
+                self.window = (self.window << (diff + 1)) | 1;
             }
             self.next_expected = counter + 1;
         }

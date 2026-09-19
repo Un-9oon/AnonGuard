@@ -39,6 +39,9 @@ pub struct ProxyNode {
     pub latency_ms: Option<f64>,
     pub is_alive: bool,
     pub failure_count: u32,
+    /// Whether this relay is permitted to act as a circuit exit node.
+    /// Set from the consensus descriptor; false for text-file sourced nodes.
+    pub is_exit: bool,
 }
 
 impl ProxyNode {
@@ -96,6 +99,7 @@ impl ProxyNode {
             latency_ms: None,
             is_alive: true,
             failure_count: 0,
+            is_exit: false,
         })
     }
 
