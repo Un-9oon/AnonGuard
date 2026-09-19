@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
+use tracing::{error, info};
 
 #[derive(Clone)]
 pub struct KillSwitchController {
@@ -112,6 +113,37 @@ impl Default for KillSwitchController {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailClosedGuarantee {
+    KernelLevel,
+    ApplicationLayerOnly,
+}
+
+/// Evaluates the available fail-closed guarantee level based on OS platform capability.
+///
+/// If `strict_fail_closed` is true and `is_linux` is false (or kernel enforcement is unavailable),
+/// returns an error to prevent silent fallback to application-layer-only enforcement.
+pub fn check_fail_closed_guarantee(
+    is_linux: bool,
+    strict_fail_closed: bool,
+) -> Result<FailClosedGuarantee, String> {
+    if is_linux {
+        info!("Fail-closed enforcement: KERNEL-LEVEL (Linux nftables)");
+        Ok(FailClosedGuarantee::KernelLevel)
+    } else {
+        let warn_msg = "Fail-closed enforcement: APPLICATION-LAYER ONLY — a compromised or buggy process could bypass this on this platform";
+        if strict_fail_closed {
+            error!(
+                "STRICT FAIL-CLOSED ERROR: --strict-fail-closed was requested, but kernel-level enforcement is not available on non-Linux platforms."
+            );
+            Err("Strict fail-closed enforcement failed: kernel-level nftables/netns isolation is not available on this platform.".to_string())
+        } else {
+            info!("{}", warn_msg);
+            Ok(FailClosedGuarantee::ApplicationLayerOnly)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +211,32 @@ mod tests {
             ks5.is_tripped(),
             "default controller must trip on 5th failure"
         );
+    }
+
+    /// Test for Task 2: strict fail-closed on non-Linux platform must return an error.
+    #[test]
+    fn test_strict_fail_closed_non_linux_refuses_to_start() {
+        // Non-Linux platform + strict_fail_closed = true -> must return Err
+        let res_strict = check_fail_closed_guarantee(false, true);
+        assert!(
+            res_strict.is_err(),
+            "strict fail-closed must return error on non-Linux platform"
+        );
+        let err_msg = res_strict.unwrap_err();
+        assert!(
+            err_msg.contains("Strict fail-closed enforcement failed"),
+            "error message should explain kernel-level unavailability, got: {err_msg}"
+        );
+
+        // Non-Linux platform + strict_fail_closed = false -> returns Ok(ApplicationLayerOnly)
+        let res_non_strict = check_fail_closed_guarantee(false, false);
+        assert_eq!(
+            res_non_strict.unwrap(),
+            FailClosedGuarantee::ApplicationLayerOnly
+        );
+
+        // Linux platform + strict_fail_closed = true -> returns Ok(KernelLevel)
+        let res_linux = check_fail_closed_guarantee(true, true);
+        assert_eq!(res_linux.unwrap(), FailClosedGuarantee::KernelLevel);
     }
 }

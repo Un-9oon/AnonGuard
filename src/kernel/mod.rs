@@ -8,6 +8,6 @@ pub mod netns;
 
 pub use dns::{build_socks5h_connect_frame, TargetAddress};
 pub use exit_policy::{is_exit_target_permitted, ExitPolicy};
-pub use killswitch::KillSwitchController;
+pub use killswitch::{check_fail_closed_guarantee, FailClosedGuarantee, KillSwitchController};
 #[cfg(target_os = "linux")]
 pub use netns::NetnsConfig;

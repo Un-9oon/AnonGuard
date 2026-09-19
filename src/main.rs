@@ -141,6 +141,10 @@ struct Args {
     /// Path to persist the relay's long-term Ed25519 identity key
     #[arg(long)]
     identity_key_path: Option<PathBuf>,
+
+    /// Refuse to start if hardware/kernel-level fail-closed enforcement (Linux nftables) is unavailable
+    #[arg(long, default_value_t = false)]
+    strict_fail_closed: bool,
 }
 
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
@@ -221,6 +225,14 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+
+    if let Err(err) = anonguard::kernel::check_fail_closed_guarantee(
+        cfg!(target_os = "linux"),
+        args.strict_fail_closed,
+    ) {
+        error!("{}", err);
+        std::process::exit(1);
+    }
 
     info!(
         version = "0.2.0",
