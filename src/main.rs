@@ -58,7 +58,11 @@ struct Args {
     rmt_morphing: bool,
 
     /// Statistical RMT ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary)
-    #[arg(long = "rmt-ensemble", visible_alias = "quantum-ensemble", default_value = "goe")]
+    #[arg(
+        long = "rmt-ensemble",
+        visible_alias = "quantum-ensemble",
+        default_value = "goe"
+    )]
     rmt_ensemble: String,
 
     /// Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
@@ -299,10 +303,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let firewall_enabled = false;
 
     if args.authority {
-        let authority = anonguard::mesh::DirectoryAuthority::with_difficulty(
+        let authority = anonguard::mesh::DirectoryAuthority::with_persistent_key(
             args.authority_id,
             args.listen,
             args.pow_difficulty,
+            config.identity_key_path,
         );
         let res = tokio::select! {
             r = authority.run() => r,

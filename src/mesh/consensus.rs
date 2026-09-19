@@ -83,7 +83,9 @@ impl RelayDescriptor {
         };
         let signature = Signature::from_bytes(sig_bytes);
         let signing_bytes = self.compute_signing_bytes();
-        verifying_key.verify_strict(&signing_bytes, &signature).is_ok()
+        verifying_key
+            .verify_strict(&signing_bytes, &signature)
+            .is_ok()
     }
 }
 

@@ -42,6 +42,10 @@ impl DirectoryAuthority {
     /// For production use, prefer `with_persistent_key` which loads or creates a stable key.
     pub fn with_difficulty(authority_id: String, listen_addr: String, pow_difficulty: u32) -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
+        info!(
+            "Authority public key (hex): {}",
+            hex::encode(signing_key.verifying_key().to_bytes())
+        );
         Self {
             authority_id,
             signing_key,
@@ -141,6 +145,10 @@ impl DirectoryAuthority {
         key_path: impl AsRef<Path>,
     ) -> Self {
         let signing_key = Self::load_or_create_signing_key(key_path);
+        info!(
+            "Authority public key (hex): {}",
+            hex::encode(signing_key.verifying_key().to_bytes())
+        );
         Self {
             authority_id,
             signing_key,
@@ -232,9 +240,10 @@ impl DirectoryAuthority {
         let relays = self.active_relays.read().await;
         let relay_list: Vec<RelayDescriptor> = relays.values().cloned().collect();
 
+        let bucketed_now = (now / 300) * 300;
         let mut consensus = ConsensusDocument::new(
-            now,
-            now + 3600, // Valid for 1 hour
+            bucketed_now,
+            bucketed_now + 3600, // Valid for 1 hour
             relay_list,
         );
 
@@ -249,6 +258,18 @@ impl DirectoryAuthority {
             "Directory Authority [{}] listening securely on {}",
             self.authority_id, self.listen_addr
         );
+
+        let active_relays_eviction = self.active_relays.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = current_timestamp_secs();
+                let mut relays = active_relays_eviction.write().await;
+                // Evict relays that haven't registered in the last 15 minutes (900 seconds)
+                relays.retain(|_, desc| now.saturating_sub(desc.registered_at) < 900);
+            }
+        });
 
         loop {
             let (stream, addr) = listener.accept().await?;
@@ -290,8 +311,12 @@ impl DirectoryAuthority {
                                 let relay_list: Vec<RelayDescriptor> =
                                     relays.values().cloned().collect();
                                 let now = current_timestamp_secs();
-                                let mut consensus =
-                                    ConsensusDocument::new(now, now + 3600, relay_list);
+                                let bucketed_now = (now / 300) * 300;
+                                let mut consensus = ConsensusDocument::new(
+                                    bucketed_now,
+                                    bucketed_now + 3600,
+                                    relay_list,
+                                );
                                 consensus.sign_with_authority(&auth_id, &signing_key);
 
                                 if let Ok(serialized) = serde_json::to_vec(&consensus) {

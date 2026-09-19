@@ -1,9 +1,10 @@
-//! Layered Onion Circuit Routing, Multi-hop Key Agreement, and AEAD Peeling.
-//!
-//! Security: Every hop handshake is identity-bound via Ed25519 signature over the ephemeral
-//! X25519 public keys, linking DH to the relay's long-term identity key pinned in the consensus.
-//! Data is protected by ChaCha20-Poly1305 AEAD for the addressed hop, and ChaCha20 stream cipher
-//! for routing layers, using an explicit stateless nonce derived from the cell's sequence number.
+use subtle::ConstantTimeEq;
+// Layered Onion Circuit Routing, Multi-hop Key Agreement, and AEAD Peeling.
+//
+// Security: Every hop handshake is identity-bound via Ed25519 signature over the ephemeral
+// X25519 public keys, linking DH to the relay's long-term identity key pinned in the consensus.
+// Data is protected by ChaCha20-Poly1305 AEAD for the addressed hop, and ChaCha20 stream cipher
+// for routing layers, using an explicit stateless nonce derived from the cell's sequence number.
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
@@ -103,7 +104,7 @@ pub struct HopCryptState {
     pub keys: HopKeys,
 }
 
-use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInPlace};
+use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit};
 
 impl HopCryptState {
     /// AEAD-seals the addressed hop's payload using a dedicated, independently
@@ -194,8 +195,11 @@ pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> Result<HopKeys, CircuitError
     // key material inside the cipher. These are independently HKDF-derived instead.
     hk.expand(b"AnonGuard-Forward-AEAD-Key-v5", &mut keys.forward_aead_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Backward-AEAD-Key-v5", &mut keys.backward_aead_key)
-        .map_err(|_| CircuitError::KeyDerivationFailed)?;
+    hk.expand(
+        b"AnonGuard-Backward-AEAD-Key-v5",
+        &mut keys.backward_aead_key,
+    )
+    .map_err(|_| CircuitError::KeyDerivationFailed)?;
 
     Ok(keys)
 }
@@ -397,7 +401,7 @@ impl RelayCircuitHop {
         }
     }
 
-        pub fn peel_forward(
+    pub fn peel_forward(
         &mut self,
         raw: &mut [u8; ONION_CELL_SIZE],
     ) -> Result<PeelOutcome, CircuitError> {
@@ -427,12 +431,16 @@ impl RelayCircuitHop {
         };
 
         if tag_matches {
-
             if seq < self.expected_recv_seq {
-                return Err(CircuitError::AntiReplayRejection(format!("Stale sequence {}", seq)));
+                return Err(CircuitError::AntiReplayRejection(format!(
+                    "Stale sequence {}",
+                    seq
+                )));
             }
             if seq - self.expected_recv_seq > MAX_SEQ_GAP {
-                return Err(CircuitError::AntiReplayRejection("Sequence gap too large".to_string()));
+                return Err(CircuitError::AntiReplayRejection(
+                    "Sequence gap too large".to_string(),
+                ));
             }
             self.expected_recv_seq = seq + 1;
 
@@ -783,11 +791,15 @@ mod aead_key_derivation_tests {
         // Tampered header (AAD) must be rejected.
         let mut tampered = buf;
         let bad_header = [0xBBu8; 8];
-        assert!(crypt.open_forward(&nonce, &bad_header, &mut tampered, &tag).is_err());
+        assert!(crypt
+            .open_forward(&nonce, &bad_header, &mut tampered, &tag)
+            .is_err());
 
         // Tampered ciphertext must be rejected.
         let mut tampered_ct = buf;
         tampered_ct[0] ^= 0x01;
-        assert!(crypt.open_forward(&nonce, &header, &mut tampered_ct, &tag).is_err());
+        assert!(crypt
+            .open_forward(&nonce, &header, &mut tampered_ct, &tag)
+            .is_err());
     }
 }

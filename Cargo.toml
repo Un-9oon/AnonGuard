@@ -52,6 +52,7 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], option
 hmac = "0.12"
 hkdf = "0.12"
 indexmap = "2"
+hex = "0.4.3"
 
 [features]
 default = []

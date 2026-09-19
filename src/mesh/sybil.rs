@@ -85,9 +85,14 @@ impl NonceRegistry {
         let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
         seen.retain(|_, ts| *ts > expiry_threshold);
 
-        if seen.len() > 100_000 {
-            // Hard bound reached to prevent OOM
-            return true; // Deny new PoW temporarily
+        if seen.len() >= 100_000 {
+            // Hard bound reached to prevent OOM. Cap by removing oldest entries (10%).
+            let mut entries: Vec<_> = seen.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            entries.sort_unstable_by_key(|(_, v)| *v);
+            let to_remove = entries.len() / 10;
+            for (k, _) in entries.into_iter().take(to_remove) {
+                seen.remove(&k);
+            }
         }
 
         let key = (node_id.to_string(), nonce);

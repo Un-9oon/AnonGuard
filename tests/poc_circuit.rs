@@ -47,9 +47,15 @@ fn poc_replay_window_gap_off_by_one() {
     deliver(&mut client, &cells[5]).expect("cell 6 rejected");
 
     let replay_1 = deliver(&mut client, &cells[0]);
-    println!("replay of already-delivered counter 1 after gap: {:?}", replay_1);
+    println!(
+        "replay of already-delivered counter 1 after gap: {:?}",
+        replay_1
+    );
     let late_4 = deliver(&mut client, &cells[3]);
-    println!("legit never-seen counter 4 arriving late:       {:?}", late_4);
+    println!(
+        "legit never-seen counter 4 arriving late:       {:?}",
+        late_4
+    );
 
     assert!(replay_1.is_err(), "replay should be rejected");
     assert!(late_4.is_ok(), "legit cell should be accepted");

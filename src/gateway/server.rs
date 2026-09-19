@@ -14,7 +14,7 @@ use crate::morphing::{
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 use crate::onion::circuit::{
     build_create_cell, decode_extend_payload, encode_extend_payload, handle_create_cell,
-    process_created_cell, OnionCircuit, PeelResult,
+    process_created_cell, OnionCircuit, PeelOutcome,
 };
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use rand::rngs::OsRng;
@@ -66,9 +66,7 @@ impl GatewayServer {
             } else {
                 RmtEnsemble::GOE
             };
-            Some(JitterEngine::Rmt(RmtTimingEngine::new(
-                ensemble, 1.5, 1024,
-            )))
+            Some(JitterEngine::Rmt(RmtTimingEngine::new(ensemble, 1.5, 1024)))
         } else if config.enable_chaos {
             Some(JitterEngine::Chaos(LorenzAttractor::new(
                 config.chaos_sigma,
@@ -110,6 +108,90 @@ impl GatewayServer {
             DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             MAX_CONCURRENT_PER_IP
         );
+
+        if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
+            let auths = self.config.directory_authorities.clone();
+            let identity_key = self.relay_identity_key.clone();
+            let config = self.config.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 mins
+                loop {
+                    let now = crate::mesh::sybil::current_timestamp_secs();
+                    let pub_key_bytes = identity_key.verifying_key().to_bytes();
+                    let node_id = hex::encode(&pub_key_bytes[0..8]); // stable node_id based on key
+
+                    let pow_nonce = match crate::mesh::sybil::solve_pow_bounded(
+                        &node_id,
+                        now,
+                        config.pow_difficulty,
+                    ) {
+                        Some(n) => n,
+                        None => {
+                            warn!("Failed to solve PoW for registration, will retry later");
+                            interval.tick().await;
+                            continue;
+                        }
+                    };
+
+                    let port = config
+                        .listen_addr
+                        .split(':')
+                        .last()
+                        .unwrap_or("9050")
+                        .parse()
+                        .unwrap_or(9050);
+                    let host = config
+                        .listen_addr
+                        .split(':')
+                        .next()
+                        .unwrap_or("127.0.0.1")
+                        .to_string();
+
+                    let mut desc = crate::mesh::consensus::RelayDescriptor::new(
+                        node_id,
+                        host,
+                        port,
+                        [0u8; 32],
+                        pub_key_bytes,
+                        config.is_exit,
+                        pow_nonce,
+                        now,
+                    );
+                    desc.sign_with_key(&identity_key);
+
+                    let json_payload = serde_json::to_string(&desc).unwrap();
+                    let request = format!("REGISTER_RELAY {}", json_payload);
+
+                    for auth_url in &auths {
+                        let auth_host_port = auth_url.trim_start_matches("http://");
+                        if let Ok(stream) = tokio::net::TcpStream::connect(auth_host_port).await {
+                            if let Ok(mut session) =
+                                crate::mesh::transport::SecureTransportSession::client_handshake(
+                                    stream, None,
+                                )
+                                .await
+                            {
+                                let _ = session.write_frame(request.as_bytes()).await;
+                                if let Ok(Ok(msg)) = tokio::time::timeout(
+                                    tokio::time::Duration::from_secs(5),
+                                    session.read_frame(),
+                                )
+                                .await
+                                {
+                                    info!(
+                                        "Registered with auth {}: {}",
+                                        auth_url,
+                                        String::from_utf8_lossy(&msg)
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    interval.tick().await;
+                }
+            });
+        }
 
         loop {
             // If kill switch is active, do not accept new connections
@@ -1141,14 +1223,19 @@ pub async fn handle_onion_relay_connection(
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
-                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Data, payload)) => {
-                                if ds_w.write_all(&payload).await.is_err() {
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Data, len }) => {
+                                let payload = &client_buf[13..13+len];
+                                if ds_w.write_all(payload).await.is_err() {
                                     break;
                                 }
                             }
-                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Destroy, _)) => break,
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Destroy, .. }) => break,
                             _ => {}
                         }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                        error!("Idle circuit timeout (exit mode)");
+                        break;
                     }
                     data = ds_rx.recv() => {
                         // `None` covers both a clean EOF (`Ok(0)`) and a read error on the
@@ -1200,20 +1287,24 @@ pub async fn handle_onion_relay_connection(
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
-                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, _payload)) => {
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Extend, .. }) => {
                                 error!("EXTEND rejected: relay is already an intermediate hop");
                                 break;
                             }
-                            Ok(PeelResult::ForwardDownstream(forward_buf)) => {
+                            Ok(PeelOutcome::ForwardDownstream) => {
                                 if let Some(ref j) = jitter {
                                     j.apply_delay().await;
                                 }
-                                if ds_w.write_all(&*forward_buf).await.is_err() {
+                                if ds_w.write_all(&client_buf).await.is_err() {
                                     break;
                                 }
                             }
                             _ => {}
                         }
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                        error!("Idle circuit timeout (intermediate mode)");
+                        break;
                     }
                     cell = ds_rx.recv() => {
                         let Some(mut ds_buf) = cell else { break; };
@@ -1230,11 +1321,19 @@ pub async fn handle_onion_relay_connection(
             }
         } else {
             // Awaiting initial EXTEND (as intermediate relay) or RELAY (as exit relay).
-            let Some(mut client_buf) = client_cell_rx.recv().await else {
+            let Ok(Some(mut client_buf)) =
+                tokio::time::timeout(tokio::time::Duration::from_secs(60), client_cell_rx.recv())
+                    .await
+            else {
+                error!("Idle circuit timeout (awaiting setup)");
                 break;
             };
             match relay_hop.peel_forward(&mut client_buf) {
-                Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
+                Ok(PeelOutcome::AddressedToThisRelay {
+                    command: CellCommand::Extend,
+                    len,
+                }) => {
+                    let payload = &client_buf[13..13 + len];
                     let extend_ok = async {
                             let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
@@ -1295,7 +1394,11 @@ pub async fn handle_onion_relay_connection(
                         }
                     }
                 }
-                Ok(PeelResult::AddressedToThisRelay(CellCommand::Relay, payload)) => {
+                Ok(PeelOutcome::AddressedToThisRelay {
+                    command: CellCommand::Relay,
+                    len,
+                }) => {
+                    let payload = &client_buf[13..13 + len];
                     if let Ok((target_h, target_p)) =
                         crate::onion::circuit::decode_relay_target(&payload)
                     {

@@ -9,7 +9,7 @@ pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{
     build_create_cell, decode_extend_payload, derive_hop_keys, encode_extend_payload,
     handle_create_cell, perform_client_relay_handshake, process_created_cell, HopCryptState,
-    OnionCircuit, PeelResult, RelayCircuitHop,
+    OnionCircuit, PeelOutcome, RelayCircuitHop,
 };
 
 #[cfg(test)]
@@ -61,11 +61,11 @@ mod tests {
 
         let peel_1 = relay_guard.peel_forward(&mut wire_buffer_1).unwrap();
         let (_target_host_1, _target_port_1, middle_pub_for_relay, _hop1) = match peel_1 {
-            PeelResult::AddressedToThisRelay(cmd, payload) => {
+            PeelOutcome::AddressedToThisRelay(cmd, payload) => {
                 assert_eq!(cmd, CellCommand::Extend);
                 decode_extend_payload(&payload).unwrap()
             }
-            PeelResult::ForwardDownstream(_) => panic!("Guard must consume EXTEND cell!"),
+            PeelOutcome::ForwardDownstream(_) => panic!("Guard must consume EXTEND cell!"),
         };
 
         let create_cell_1 = build_create_cell(circuit_id, &middle_pub_for_relay, 1).unwrap();
@@ -104,17 +104,17 @@ mod tests {
 
         let peel_2_guard = relay_guard.peel_forward(&mut wire_buffer_2).unwrap();
         let mut to_middle = match peel_2_guard {
-            PeelResult::ForwardDownstream(buf) => *buf,
+            PeelOutcome::ForwardDownstream(buf) => *buf,
             _ => panic!("Guard must forward downstream!"),
         };
 
         let peel_2_middle = relay_middle.peel_forward(&mut to_middle).unwrap();
         let (_target_host_2, _target_port_2, exit_pub_for_relay, _hop2) = match peel_2_middle {
-            PeelResult::AddressedToThisRelay(cmd, payload) => {
+            PeelOutcome::AddressedToThisRelay(cmd, payload) => {
                 assert_eq!(cmd, CellCommand::Extend);
                 decode_extend_payload(&payload).unwrap()
             }
-            PeelResult::ForwardDownstream(_) => panic!("Middle must consume EXTEND cell!"),
+            PeelOutcome::ForwardDownstream(_) => panic!("Middle must consume EXTEND cell!"),
         };
 
         let create_cell_2 = build_create_cell(circuit_id, &exit_pub_for_relay, 2).unwrap();
@@ -149,23 +149,23 @@ mod tests {
 
         let p0 = relay_guard.peel_forward(&mut client_send_buf).unwrap();
         let mut to_m = match p0 {
-            PeelResult::ForwardDownstream(b) => *b,
+            PeelOutcome::ForwardDownstream(b) => *b,
             _ => panic!("Expected forward downstream from guard"),
         };
 
         let p1 = relay_middle.peel_forward(&mut to_m).unwrap();
         let mut to_e = match p1 {
-            PeelResult::ForwardDownstream(b) => *b,
+            PeelOutcome::ForwardDownstream(b) => *b,
             _ => panic!("Expected forward downstream from middle"),
         };
 
         let p2 = relay_exit.peel_forward(&mut to_e).unwrap();
         match p2 {
-            PeelResult::AddressedToThisRelay(cmd, data) => {
+            PeelOutcome::AddressedToThisRelay(cmd, data) => {
                 assert_eq!(cmd, CellCommand::Data);
                 assert_eq!(data.as_slice(), payload);
             }
-            PeelResult::ForwardDownstream(_) => panic!("Exit must consume authenticated data"),
+            PeelOutcome::ForwardDownstream(_) => panic!("Exit must consume authenticated data"),
         }
     }
 
@@ -265,13 +265,13 @@ mod tests {
         // Peel through guard and middle (these are stream layers, not AEAD)
         let p0 = relay_guard.peel_forward(&mut wire).unwrap();
         let mut to_middle = match p0 {
-            PeelResult::ForwardDownstream(b) => *b,
+            PeelOutcome::ForwardDownstream(b) => *b,
             _ => panic!("Guard should forward downstream"),
         };
 
         let p1 = relay_middle.peel_forward(&mut to_middle).unwrap();
         let mut to_exit = match p1 {
-            PeelResult::ForwardDownstream(b) => *b,
+            PeelOutcome::ForwardDownstream(b) => *b,
             _ => panic!("Middle should forward downstream"),
         };
 
@@ -282,7 +282,7 @@ mod tests {
         // peel_forward() should either return ForwardDownstream or Err, but NOT AddressedToThisRelay.
         let result = relay_exit.peel_forward(&mut to_exit);
         match result {
-            Ok(PeelResult::AddressedToThisRelay(_, data)) => {
+            Ok(PeelOutcome::AddressedToThisRelay(_, data)) => {
                 // If it somehow accepted, the data must NOT match the original
                 assert_ne!(
                     data.as_slice(),
@@ -290,7 +290,7 @@ mod tests {
                     "CRITICAL: Tampered cell was accepted with original payload — AEAD integrity broken!"
                 );
             }
-            Ok(PeelResult::ForwardDownstream(_)) => {
+            Ok(PeelOutcome::ForwardDownstream(_)) => {
                 // Expected: AEAD failed, cell treated as not-for-this-relay and forwarded
             }
             Err(_) => {
@@ -336,7 +336,7 @@ mod tests {
         let p1 = relay.peel_forward(&mut raw1).unwrap();
         assert!(matches!(
             p1,
-            PeelResult::AddressedToThisRelay(CellCommand::Data, _)
+            PeelOutcome::AddressedToThisRelay(CellCommand::Data, _)
         ));
 
         // Attempting to send stale/replayed sequence 1 must be rejected by anti-replay counter
@@ -369,23 +369,23 @@ mod tests {
 
         let peel_guard = relay_guard.peel_forward(&mut wire_buffer).unwrap();
         let mut to_middle = match peel_guard {
-            PeelResult::ForwardDownstream(buf) => *buf,
+            PeelOutcome::ForwardDownstream(buf) => *buf,
             _ => panic!("Expected forward downstream from guard"),
         };
 
         let peel_middle = relay_middle.peel_forward(&mut to_middle).unwrap();
         let mut to_exit = match peel_middle {
-            PeelResult::ForwardDownstream(buf) => *buf,
+            PeelOutcome::ForwardDownstream(buf) => *buf,
             _ => panic!("Expected forward downstream from middle"),
         };
 
         let peel_exit = relay_exit.peel_forward(&mut to_exit).unwrap();
         match peel_exit {
-            PeelResult::AddressedToThisRelay(cmd, data) => {
+            PeelOutcome::AddressedToThisRelay(cmd, data) => {
                 assert_eq!(cmd, CellCommand::Data);
                 assert_eq!(data.as_slice(), secret_payload);
             }
-            PeelResult::ForwardDownstream(_) => {
+            PeelOutcome::ForwardDownstream(_) => {
                 panic!("Exit node should have consumed the cell!")
             }
         }
