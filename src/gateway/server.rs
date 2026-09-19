@@ -119,21 +119,20 @@ impl GatewayServer {
                 continue;
             }
 
-            let (client_stream, client_addr) = listener.accept().await?;
-            let client_ip = client_addr.ip();
-
             // 1. Global connection ceiling (prevent file descriptor/memory exhaustion)
-            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
+            // Use acquire_owned().await BEFORE accept() to provide true backpressure to the OS backlog
+            let permit = match self.connection_semaphore.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => {
                     warn!(
-                        client = %client_addr,
-                        "[AnonGuard DoS Defense] Dropped connection: global concurrent limit ({}) reached",
-                        DEFAULT_MAX_CONCURRENT_CONNECTIONS
+                        "[AnonGuard DoS Defense] Connection semaphore closed, stopping accept loop"
                     );
-                    continue;
+                    break Ok(());
                 }
             };
+
+            let (client_stream, client_addr) = listener.accept().await?;
+            let client_ip = client_addr.ip();
 
             // 2. Per-IP connection ceiling (prevent single-client connection flooding)
             // IPv6: key on /48 prefix to prevent cap bypass via large allocations
@@ -1132,10 +1131,9 @@ pub async fn handle_onion_relay_connection(
     let mut ds_data_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
 
     loop {
-        if ds_write.is_some() {
+        if let Some(ref mut ds_w) = ds_write {
             if is_currently_exit_hop {
                 // Exit relay: downstream is the destination target server (raw TCP).
-                let ds_w = ds_write.as_mut().expect("checked is_some above");
                 let ds_rx = ds_data_rx
                     .as_mut()
                     .expect("set alongside ds_write for exit hop");
@@ -1194,8 +1192,7 @@ pub async fn handle_onion_relay_connection(
                     }
                 }
             } else {
-                // Intermediate relay: downstream is another onion relay.
-                let ds_w = ds_write.as_mut().expect("checked is_some above");
+                // Intermediate relay: downstream is the next relay in the mesh (OnionCells).
                 let ds_rx = ds_cell_rx
                     .as_mut()
                     .expect("set alongside ds_write for intermediate hop");
@@ -1203,49 +1200,9 @@ pub async fn handle_onion_relay_connection(
                     cell = client_cell_rx.recv() => {
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
-                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, payload)) => {
-
-                                let extend_ok = async {
-                                    let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
-                                        .map_err(|e| format!("bad EXTEND payload: {e}"))?;
-
-                                    // V-11: Enforce is_exit check for non-mesh targets
-                                    if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {
-                                        return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
-                                    }
-
-                                    let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
-
-                                        .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
-                                    let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
-                                        .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
-                                    next_s.write_all(&c_cell.serialize()).await
-                                        .map_err(|e| format!("failed to write CREATE to next hop: {e}"))?;
-                                    let mut resp = [0u8; ONION_CELL_SIZE];
-                                    next_s.read_exact(&mut resp).await
-                                        .map_err(|e| format!("no CREATED response from next hop: {e}"))?;
-                                    Ok::<_, String>((next_s, resp))
-                                }.await;
-
-                                match extend_ok {
-                                    Ok((next_s, mut resp)) => {
-                                        let _ = relay_hop.wrap_backward_originate(&mut resp);
-                                        if client_write.write_all(&resp).await.is_err() { break; }
-                                        let guarded = GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified();
-                                        let (new_read, new_write) = tokio::io::split(guarded);
-                                        ds_cell_rx = Some(spawn_onion_cell_reader(new_read));
-                                        ds_write = Some(new_write);
-                                    }
-                                    Err(e) => {
-                                        error!("EXTEND failed on circuit {}: {}", relay_hop.circuit_id, e);
-                                        if let Ok(destroy_cell) = OnionCell::new(relay_hop.circuit_id, 0, CellCommand::Destroy, 0, &[]) {
-                                            let mut wire = destroy_cell.serialize();
-                                            let _ = relay_hop.wrap_backward_originate(&mut wire);
-                                            let _ = client_write.write_all(&wire).await;
-                                        }
-                                        break;
-                                    }
-                                }
+                            Ok(PeelResult::AddressedToThisRelay(CellCommand::Extend, _payload)) => {
+                                error!("EXTEND rejected: relay is already an intermediate hop");
+                                break;
                             }
                             Ok(PeelResult::ForwardDownstream(forward_buf)) => {
                                 if let Some(ref j) = jitter {
@@ -1281,6 +1238,13 @@ pub async fn handle_onion_relay_connection(
                     let extend_ok = async {
                             let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(&payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
+
+                            if hop_index != relay_hop.hop_index + 1 {
+                                return Err(format!("EXTEND rejected: requested hop_index {} does not match expected {}", hop_index, relay_hop.hop_index + 1));
+                            }
+                            if hop_index >= crate::onion::circuit::MAX_HOPS {
+                                return Err(format!("EXTEND rejected: max chain depth {} exceeded", crate::onion::circuit::MAX_HOPS));
+                            }
 
                             // V-11: Enforce is_exit check for non-mesh targets
                             if !is_exit_allowed && !pool.is_mesh_target(&next_h, next_p).await {

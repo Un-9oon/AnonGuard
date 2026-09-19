@@ -19,7 +19,7 @@ use hmac::{Hmac, Mac};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 
-const MAX_HOPS: usize = 3;
+pub const MAX_HOPS: usize = 3;
 const BWD_COUNTER_BITS: u32 = 30;
 const BWD_COUNTER_MASK: u32 = (1 << BWD_COUNTER_BITS) - 1;
 const MAX_SEQ_GAP: u32 = 1000;

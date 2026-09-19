@@ -85,6 +85,11 @@ impl NonceRegistry {
         let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
         seen.retain(|_, ts| *ts > expiry_threshold);
 
+        if seen.len() > 100_000 {
+            // Hard bound reached to prevent OOM
+            return true; // Deny new PoW temporarily
+        }
+
         let key = (node_id.to_string(), nonce);
         if seen.contains_key(&key) {
             return true; // Replay detected
