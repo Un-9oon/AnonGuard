@@ -13,5 +13,6 @@ This document outlines architectural decisions, trade-offs, and future considera
 - **Future Item**: A dedicated window-based flow control protocol at the cell layer to handle granular stream congestion without blocking the entire circuit multiplexer.
 
 ## Cell Formats
-- **Fixed Cells (Current)**: AnonGuard uses fixed 1024-byte cells, heavily inspired by Tor (which uses 512 bytes). This minimizes metadata leakage through packet lengths but adds padding overhead.
+- **Fixed Cells (Current)**: AnonGuard uses fixed 2048-byte cells (upgraded from 1024 bytes to accommodate post-quantum ML-KEM-768 public keys and ciphertexts during circuit establishment). This minimizes metadata leakage through packet lengths but adds padding overhead.
+- **Hybrid Post-Quantum Key Exchange**: Handshake cells (`CREATE`/`CREATED`, `EXTEND`/`EXTENDED`) perform hybrid key agreement combining classical X25519 ECDH (32B) with post-quantum ML-KEM-768 / FIPS 203 (1184B public key, 1088B ciphertext). Hop session keys are derived from the 64-byte concatenated secret `$S = S_{\text{X25519}} \| S_{\text{ML-KEM-768}}$`.
 - **Variable-Length Cells (Future)**: We are considering variable-length cells or cell-batching to improve raw bandwidth for bulk downloads. This is an acknowledged trade-off between strict Traffic Analysis (TA) defense and usability.

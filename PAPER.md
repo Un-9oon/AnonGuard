@@ -10,7 +10,7 @@
 Modern threat-intelligence platforms, nation-state surveillance networks, and AI-enhanced Web Application Firewalls (WAFs) employ multi-layer attribution techniques that defeat conventional single-layer privacy tools. Traditional proxies and VPNs fail against dual-stack IPv6 fallback leaks, local DNS resolution exposure, transport-level fail-open behavior, and TLS ClientHello fingerprinting (JA3/JA4). Furthermore, passive network adversaries deploy convolutional neural networks and random forest classifiers on packet flow sequences (website fingerprinting) to de-anonymize encrypted traffic even across onion routers.
 
 We present **AnonGuard**, an autonomous, defense-in-depth anonymity architecture. AnonGuard integrates:
-1. **Authenticated Layered Onion Cryptography**: A constant 1024-byte cell protocol utilizing in-band telescopic X25519 Diffie-Hellman key agreement, ChaCha20 stream encryption, and constant-time keyed HMAC-SHA256 MAC authentication per hop, eliminating polynomial MAC key-reuse vulnerabilities and ensuring no relay observes both origin and destination.
+1. **Authenticated Layered Onion Cryptography**: A constant 2048-byte cell protocol utilizing in-band telescopic hybrid X25519 Diffie-Hellman + ML-KEM-768 (FIPS 203) key agreement, ChaCha20 stream encryption, and constant-time keyed HMAC-SHA256 MAC authentication per hop, eliminating polynomial MAC key-reuse vulnerabilities and ensuring no relay observes both origin and destination.
 2. **Distributed Multi-Authority Consensus**: An $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures, with cryptographic identity key binding preventing relay impersonation.
 3. **Sybil Resistance Engine**: Computational Proof-of-Work (PoW) registration challenges coupled with strict BGP `/16` CIDR subnet prefix isolation across circuit paths.
 4. **Statistical Random Matrix Theory (RMT) Traffic Morphing**: Inter-packet delays and chunk sizes mapped to the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE) using the Wigner Surmise, driving mutual information down to $0.00$ bits and disrupting deep learning flow classifiers in $O(1)$ constant time (requiring no quantum hardware).
@@ -51,8 +51,8 @@ AnonGuard operates across four integrated subsystems:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ 1. Multi-Hop Layered Onion Subsystem                        │
-│    - Constant 1024-byte OnionCell Protocol                  │
-│    - X25519 Ephemeral Key Agreement + ChaCha20 Stream Peeling│
+│    - Constant 2048-byte OnionCell Protocol                  │
+│    - Hybrid X25519 + ML-KEM-768 Key Agreement + ChaCha20    │
 │    - Forward Peeling (Guard -> Mid -> Exit) & Return Wrapping│
 ├─────────────────────────────────────────────────────────────┤
 │ 2. Sybil Defense & Consensus Mesh                           │
@@ -83,13 +83,13 @@ AnonGuard operates across four integrated subsystems:
 To prevent intermediate relays from inspecting stream contents, AnonGuard enforces a constant-size cell framing protocol with integrated anti-replay sequence counters:
 
 ### Cell Specification
-- **Cell Size:** Strictly fixed at 1024 bytes ($C = 1024$).
+- **Cell Size:** Strictly fixed at 2048 bytes ($C = 2048$).
 - **Header (29 bytes):** `CircuitID` (4B) $\|$ `SequenceNo` (4B) $\|$ `Command` (1B) $\|$ `StreamID` (2B) $\|$ `Length` (2B) $\|$ `HMAC-SHA256 MAC` (16B).
-- **Payload (995 bytes):** Padded with deterministic pseudorandom noise.
+- **Payload (2019 bytes):** Padded with deterministic pseudorandom noise.
 
 ### Key Agreement, Peeling & Anti-Replay Verification
 For each 3-hop circuit $(R_1, R_2, R_3)$:
-1. Client establishes ephemeral shared secrets $(S_1, S_2, S_3)$ via X25519 Diffie-Hellman.
+1. Client establishes hybrid ephemeral shared secrets $(S_1, S_2, S_3)$ via X25519 ECDH concatenated with ML-KEM-768 (FIPS 203) decapsulation ($S_i = S_{i, \text{X25519}} \,\|\, S_{i, \text{ML-KEM-768}}$).
 2. Symmetric forward, backward, and HMAC-SHA256 MAC keys are derived:
    $$K_{f, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Forward-Key-v2"})$$
    $$K_{b, i} = \text{SHA256}(S_i \,\|\, \text{"AnonGuard-Backward-Key-v2"})$$

@@ -1,8 +1,8 @@
 //! Fixed-size 1024-byte OnionCell protocol with HMAC-SHA256 Authenticated MAC.
 
-pub const ONION_CELL_SIZE: usize = 1024;
+pub const ONION_CELL_SIZE: usize = 2048;
 pub const HEADER_SIZE: usize = 29;
-pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 995 bytes
+pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 2019 bytes
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -35,7 +35,7 @@ impl CellCommand {
     }
 }
 
-/// A constant-size 1024-byte cell with a 16-byte HMAC-SHA256 MAC tag and sequence number preventing replay and bit-flipping attacks.
+/// A constant-size 2048-byte cell with a 16-byte HMAC-SHA256 MAC tag and sequence number preventing replay and bit-flipping attacks.
 #[derive(Clone)]
 pub struct OnionCell {
     pub circuit_id: u32,
@@ -85,8 +85,8 @@ impl OnionCell {
         buf[8] = self.command as u8;
         buf[9..11].copy_from_slice(&self.stream_id.to_be_bytes());
         buf[11..13].copy_from_slice(&self.length.to_be_bytes());
-        buf[13..1008].copy_from_slice(&self.payload);
-        buf[1008..1024].copy_from_slice(&self.mac);
+        buf[13..13 + PAYLOAD_SIZE].copy_from_slice(&self.payload);
+        buf[ONION_CELL_SIZE - 16..ONION_CELL_SIZE].copy_from_slice(&self.mac);
         buf
     }
 
@@ -98,9 +98,9 @@ impl OnionCell {
         let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
         let length = u16::from_be_bytes([buf[11], buf[12]]);
         let mut payload = [0u8; PAYLOAD_SIZE];
-        payload.copy_from_slice(&buf[13..1008]);
+        payload.copy_from_slice(&buf[13..13 + PAYLOAD_SIZE]);
         let mut mac = [0u8; 16];
-        mac.copy_from_slice(&buf[1008..1024]);
+        mac.copy_from_slice(&buf[ONION_CELL_SIZE - 16..ONION_CELL_SIZE]);
 
         Ok(Self {
             circuit_id,

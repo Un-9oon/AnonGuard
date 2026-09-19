@@ -11,6 +11,10 @@ use chacha20::ChaCha20;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
+use ml_kem::{
+    kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
+    Ciphertext, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
+};
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
@@ -168,10 +172,9 @@ impl HopCryptState {
     }
 }
 
-/// Key derivation function turning an X25519 shared secret into forward, backward, and MAC keys.
+/// Key derivation function turning an X25519 + ML-KEM-768 hybrid secret into forward, backward, and MAC keys.
 /// Uses RFC 5869 HKDF-SHA256 with domain-separated info labels for key commitment.
-/// IKM is the uniform 32-byte X25519 shared secret; salt is empty (uniform input).
-pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> Result<HopKeys, CircuitError> {
+pub fn derive_hop_keys(shared_secret: &[u8]) -> Result<HopKeys, CircuitError> {
     let hk = Hkdf::<Sha256>::new(None, shared_secret);
 
     let mut keys = HopKeys {
@@ -316,7 +319,7 @@ impl OnionCircuit {
 
         if let Some(target_hop) = self.hops.last() {
             let (header, body) = raw.split_at_mut(8);
-            let (pt, mac_buf) = body.split_at_mut(1000);
+            let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
 
             let tag = target_hop.seal_forward(&nonce, header, pt);
             mac_buf.copy_from_slice(&tag);
@@ -364,7 +367,7 @@ impl OnionCircuit {
 
         let target_hop = &self.hops[hop_index];
         let (header, body) = raw.split_at_mut(8);
-        let (ct, mac_buf) = body.split_at_mut(1000);
+        let (ct, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
 
         let mut tag = [0u8; 16];
         tag.copy_from_slice(mac_buf);
@@ -427,7 +430,7 @@ impl RelayCircuitHop {
         let mut tag = [0u8; 16];
         let tag_matches = {
             let (header, body) = raw.split_at_mut(8);
-            let (pt, mac_buf) = body.split_at_mut(1000);
+            let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
             tag.copy_from_slice(mac_buf);
             self.crypt.open_forward(&nonce, header, pt, &tag).is_ok()
         };
@@ -497,7 +500,7 @@ impl RelayCircuitHop {
         let nonce = build_nonce(2, self.circuit_id, seq);
 
         let (header, body) = raw.split_at_mut(8);
-        let (pt, mac_buf) = body.split_at_mut(1000);
+        let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
 
         let tag = self.crypt.seal_backward(&nonce, header, pt);
         mac_buf.copy_from_slice(&tag);
@@ -505,15 +508,17 @@ impl RelayCircuitHop {
     }
 }
 
-/// Builds a CREATE cell carrying the client's ephemeral X25519 public key.
+/// Builds a CREATE cell carrying the client's ephemeral X25519 public key and ML-KEM-768 public key.
 pub fn build_create_cell(
     circuit_id: u32,
     client_pub: &X25519PublicKey,
+    client_mlkem_pub: &EncapsulationKey<MlKem768Params>,
     hop_index: usize,
 ) -> Result<OnionCell, CircuitError> {
-    let mut payload = [0u8; 33];
+    let mut payload = [0u8; 1 + 32 + 1184];
     payload[0] = hop_index as u8;
     payload[1..33].copy_from_slice(client_pub.as_bytes());
+    payload[33..1217].copy_from_slice(client_mlkem_pub.as_bytes().as_slice());
     OnionCell::new(circuit_id, 0, CellCommand::Create, 0, &payload).map_err(CircuitError::General)
 }
 
@@ -527,7 +532,7 @@ pub fn handle_create_cell(
             create_cell.command
         )));
     }
-    if create_cell.length < 33 {
+    if create_cell.length < 1217 {
         return Err(CircuitError::PayloadTooShort);
     }
     let hop_index = create_cell.payload[0] as usize;
@@ -535,35 +540,53 @@ pub fn handle_create_cell(
         return Err(CircuitError::HopIndexOutOfRange(hop_index));
     }
 
-    let client_pub_bytes: [u8; 32] = create_cell.payload[1..33]
-        .try_into()
-        .map_err(|_| CircuitError::ParseError("Failed to extract client public key".to_string()))?;
+    let client_pub_bytes: [u8; 32] = create_cell.payload[1..33].try_into().map_err(|_| {
+        CircuitError::ParseError("Failed to extract client X25519 public key".to_string())
+    })?;
     let client_pub = X25519PublicKey::from(client_pub_bytes);
+
+    let client_mlkem_pub_bytes: [u8; 1184] =
+        create_cell.payload[33..1217].try_into().map_err(|_| {
+            CircuitError::ParseError("Failed to extract client ML-KEM public key".to_string())
+        })?;
+    let client_mlkem_pub =
+        EncapsulationKey::<MlKem768Params>::from_bytes((&client_mlkem_pub_bytes).into());
 
     let relay_secret = EphemeralSecret::random_from_rng(OsRng);
     let relay_pub = X25519PublicKey::from(&relay_secret);
 
-    let shared = relay_secret.diffie_hellman(&client_pub);
+    let x25519_shared = relay_secret.diffie_hellman(&client_pub);
     // Non-contributory DH rejection (V-03)
-    if shared.as_bytes() == &[0u8; 32] {
+    if x25519_shared.as_bytes() == &[0u8; 32] {
         return Err(CircuitError::General(
             "Non-contributory DH key rejected".to_string(),
         ));
     }
 
-    let keys = derive_hop_keys(shared.as_bytes())?;
+    let (mlkem_ct, mlkem_shared) = client_mlkem_pub
+        .encapsulate(&mut OsRng)
+        .map_err(|_| CircuitError::General("ML-KEM encapsulation failed".to_string()))?;
+
+    let mut hybrid_secret = [0u8; 64];
+    hybrid_secret[0..32].copy_from_slice(x25519_shared.as_bytes());
+    hybrid_secret[32..64].copy_from_slice(mlkem_shared.as_slice());
+
+    let keys = derive_hop_keys(&hybrid_secret)?;
 
     let identity_pub = relay_identity_key.verifying_key();
-    let mut preimage = Vec::with_capacity(6 + 32 + 32);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v1");
+    let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
+    preimage.extend_from_slice(b"AnonGuard-handshake-v2");
     preimage.extend_from_slice(relay_pub.as_bytes());
-    preimage.extend_from_slice(client_pub_bytes.as_ref());
+    preimage.extend_from_slice(&client_pub_bytes);
+    preimage.extend_from_slice(&client_mlkem_pub_bytes);
+    preimage.extend_from_slice(mlkem_ct.as_slice());
     let handshake_sig: Signature = relay_identity_key.sign(&preimage);
 
-    let mut created_payload = [0u8; 128];
+    let mut created_payload = [0u8; 32 + 32 + 64 + 1088];
     created_payload[0..32].copy_from_slice(relay_pub.as_bytes());
     created_payload[32..64].copy_from_slice(identity_pub.as_bytes());
     created_payload[64..128].copy_from_slice(&handshake_sig.to_bytes());
+    created_payload[128..1216].copy_from_slice(mlkem_ct.as_slice());
 
     let created_cell = OnionCell::new(
         create_cell.circuit_id,
@@ -578,10 +601,13 @@ pub fn handle_create_cell(
     Ok((relay_hop, created_cell))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn process_created_cell(
     created_cell: &OnionCell,
     client_secret: EphemeralSecret,
     client_pub_bytes: &[u8; 32],
+    client_mlkem_dk: &DecapsulationKey<MlKem768Params>,
+    client_mlkem_pub_bytes: &[u8; 1184],
     pinned_identity_key: &[u8; 32],
     _cid: u32,
     _hop_index: usize,
@@ -593,7 +619,7 @@ pub fn process_created_cell(
             created_cell.command
         )));
     }
-    if created_cell.length < 128 {
+    if created_cell.length < 1216 {
         return Err(CircuitError::PayloadTooShort);
     }
 
@@ -607,6 +633,9 @@ pub fn process_created_cell(
     let sig_bytes: [u8; 64] = created_cell.payload[64..128].try_into().map_err(|_| {
         CircuitError::ParseError("Failed to extract handshake signature".to_string())
     })?;
+    let mlkem_ct_bytes: [u8; 1088] = created_cell.payload[128..1216]
+        .try_into()
+        .map_err(|_| CircuitError::ParseError("Failed to extract ML-KEM ciphertext".to_string()))?;
 
     // V-03: all-zero pin rejected
     if pinned_identity_key == &[0u8; 32] {
@@ -625,10 +654,12 @@ pub fn process_created_cell(
     })?;
     let signature = Signature::from_bytes(&sig_bytes);
 
-    let mut preimage = Vec::with_capacity(6 + 32 + 32);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v1");
+    let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
+    preimage.extend_from_slice(b"AnonGuard-handshake-v2");
     preimage.extend_from_slice(&relay_eph_pub_bytes);
     preimage.extend_from_slice(client_pub_bytes);
+    preimage.extend_from_slice(client_mlkem_pub_bytes);
+    preimage.extend_from_slice(&mlkem_ct_bytes);
 
     verifying_key
         .verify_strict(&preimage, &signature)
@@ -637,21 +668,31 @@ pub fn process_created_cell(
         })?;
 
     let relay_eph_pub = X25519PublicKey::from(relay_eph_pub_bytes);
-    let shared = client_secret.diffie_hellman(&relay_eph_pub);
+    let x25519_shared = client_secret.diffie_hellman(&relay_eph_pub);
     // V-03: non-contributory DH rejection
-    if shared.as_bytes() == &[0u8; 32] {
+    if x25519_shared.as_bytes() == &[0u8; 32] {
         return Err(CircuitError::General(
             "Non-contributory DH key rejected".to_string(),
         ));
     }
 
-    derive_hop_keys(shared.as_bytes())
+    let mlkem_ct = Ciphertext::<MlKem768>::from(mlkem_ct_bytes);
+    let mlkem_shared = client_mlkem_dk
+        .decapsulate(&mlkem_ct)
+        .map_err(|_| CircuitError::General("ML-KEM decapsulation failed".to_string()))?;
+
+    let mut hybrid_secret = [0u8; 64];
+    hybrid_secret[0..32].copy_from_slice(x25519_shared.as_bytes());
+    hybrid_secret[32..64].copy_from_slice(mlkem_shared.as_slice());
+
+    derive_hop_keys(&hybrid_secret)
 }
 
 pub fn encode_extend_payload(
     next_host: &str,
     next_port: u16,
     client_pub: &X25519PublicKey,
+    client_mlkem_pub: &EncapsulationKey<MlKem768Params>,
     hop_index: usize,
 ) -> Result<Vec<u8>, CircuitError> {
     let host_bytes = next_host.as_bytes();
@@ -661,24 +702,34 @@ pub fn encode_extend_payload(
         ));
     }
 
-    let mut payload = Vec::with_capacity(1 + 1 + host_bytes.len() + 2 + 32);
+    let mut payload = Vec::with_capacity(1 + 1 + host_bytes.len() + 2 + 32 + 1184);
     payload.push(hop_index as u8);
     payload.push(host_bytes.len() as u8);
     payload.extend_from_slice(host_bytes);
     payload.extend_from_slice(&next_port.to_be_bytes());
     payload.extend_from_slice(client_pub.as_bytes());
+    payload.extend_from_slice(client_mlkem_pub.as_bytes().as_slice());
     Ok(payload)
 }
 
 pub fn decode_extend_payload(
     payload: &[u8],
-) -> Result<(String, u16, X25519PublicKey, usize), CircuitError> {
-    if payload.len() < 1 + 1 + 2 + 32 {
+) -> Result<
+    (
+        String,
+        u16,
+        X25519PublicKey,
+        EncapsulationKey<MlKem768Params>,
+        usize,
+    ),
+    CircuitError,
+> {
+    if payload.len() < 1 + 1 + 2 + 32 + 1184 {
         return Err(CircuitError::PayloadTooShort);
     }
     let hop_index = payload[0] as usize;
     let host_len = payload[1] as usize;
-    if payload.len() < 1 + 1 + host_len + 2 + 32 {
+    if payload.len() < 1 + 1 + host_len + 2 + 32 + 1184 {
         return Err(CircuitError::PayloadTooShort);
     }
 
@@ -694,7 +745,12 @@ pub fn decode_extend_payload(
         .map_err(|_| CircuitError::ParseError("Failed to read public key".to_string()))?;
     let client_pub = X25519PublicKey::from(pub_bytes);
 
-    Ok((host, port, client_pub, hop_index))
+    let mlkem_bytes: [u8; 1184] = payload[2 + host_len + 2 + 32..2 + host_len + 2 + 32 + 1184]
+        .try_into()
+        .map_err(|_| CircuitError::ParseError("Failed to read ML-KEM public key".to_string()))?;
+    let client_mlkem_pub = EncapsulationKey::<MlKem768Params>::from_bytes((&mlkem_bytes).into());
+
+    Ok((host, port, client_pub, client_mlkem_pub, hop_index))
 }
 
 pub fn encode_relay_target(target_host: &str, target_port: u16) -> Result<Vec<u8>, CircuitError> {
@@ -731,15 +787,27 @@ pub fn decode_relay_target(payload: &[u8]) -> Result<(String, u16), CircuitError
 pub fn perform_client_relay_handshake() -> (HopKeys, HopKeys) {
     let client_secret = EphemeralSecret::random_from_rng(OsRng);
     let client_public = X25519PublicKey::from(&client_secret);
+    let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
 
     let relay_secret = EphemeralSecret::random_from_rng(OsRng);
     let relay_public = X25519PublicKey::from(&relay_secret);
 
-    let client_shared = client_secret.diffie_hellman(&relay_public);
-    let relay_shared = relay_secret.diffie_hellman(&client_public);
+    let client_x25519_shared = client_secret.diffie_hellman(&relay_public);
+    let relay_x25519_shared = relay_secret.diffie_hellman(&client_public);
 
-    let client_keys = derive_hop_keys(client_shared.as_bytes()).unwrap();
-    let relay_keys = derive_hop_keys(relay_shared.as_bytes()).unwrap();
+    let (ct, relay_mlkem_shared) = client_mlkem_ek.encapsulate(&mut OsRng).unwrap();
+    let client_mlkem_shared = client_mlkem_dk.decapsulate(&ct).unwrap();
+
+    let mut client_hybrid = [0u8; 64];
+    client_hybrid[0..32].copy_from_slice(client_x25519_shared.as_bytes());
+    client_hybrid[32..64].copy_from_slice(client_mlkem_shared.as_slice());
+
+    let mut relay_hybrid = [0u8; 64];
+    relay_hybrid[0..32].copy_from_slice(relay_x25519_shared.as_bytes());
+    relay_hybrid[32..64].copy_from_slice(relay_mlkem_shared.as_slice());
+
+    let client_keys = derive_hop_keys(&client_hybrid).unwrap();
+    let relay_keys = derive_hop_keys(&relay_hybrid).unwrap();
 
     (client_keys, relay_keys)
 }
@@ -803,5 +871,66 @@ mod aead_key_derivation_tests {
         assert!(crypt
             .open_forward(&nonce, &header, &mut tampered_ct, &tag)
             .is_err());
+    }
+
+    #[test]
+    fn test_hybrid_post_quantum_tamper_isolation() {
+        let cid = 0x11223344;
+        let relay_sk = SigningKey::generate(&mut OsRng);
+        let relay_pk = relay_sk.verifying_key().to_bytes();
+
+        let client_secret = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub = X25519PublicKey::from(&client_secret);
+        let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
+        let mut client_mlkem_pub_bytes = [0u8; 1184];
+        client_mlkem_pub_bytes.copy_from_slice(client_mlkem_ek.as_bytes().as_slice());
+
+        // 1. Untampered Baseline
+        let create_cell = build_create_cell(cid, &client_pub, &client_mlkem_ek, 0).unwrap();
+        let (_relay_hop, created_cell) = handle_create_cell(&create_cell, &relay_sk).unwrap();
+        let baseline_keys = process_created_cell(
+            &created_cell,
+            client_secret,
+            client_pub.as_bytes(),
+            &client_mlkem_dk,
+            &client_mlkem_pub_bytes,
+            &relay_pk,
+            cid,
+            0,
+        )
+        .expect("Valid hybrid handshake must succeed");
+
+        // 2. Tampering with ML-KEM Ciphertext in CREATED cell must fail signature / decapsulation
+        let client_secret_2 = EphemeralSecret::random_from_rng(OsRng);
+        let client_pub_2 = X25519PublicKey::from(&client_secret_2);
+        let (client_mlkem_dk_2, client_mlkem_ek_2) = MlKem768::generate(&mut OsRng);
+        let create_cell_2 = build_create_cell(cid, &client_pub_2, &client_mlkem_ek_2, 0).unwrap();
+        let (_, created_cell_2) = handle_create_cell(&create_cell_2, &relay_sk).unwrap();
+        let mut tampered_created_2 = created_cell_2;
+        tampered_created_2.payload[150] ^= 0x01; // Tamper ML-KEM ciphertext
+        let mut client_mlkem_pub_bytes_2 = [0u8; 1184];
+        client_mlkem_pub_bytes_2.copy_from_slice(client_mlkem_ek_2.as_bytes().as_slice());
+        let tampered_result = process_created_cell(
+            &tampered_created_2,
+            client_secret_2,
+            client_pub_2.as_bytes(),
+            &client_mlkem_dk_2,
+            &client_mlkem_pub_bytes_2,
+            &relay_pk,
+            cid,
+            0,
+        );
+        assert!(
+            tampered_result.is_err(),
+            "Tampered ML-KEM ciphertext must be rejected by Ed25519 signature verification"
+        );
+
+        // 3. Client and Relay derive matching keys in perform_client_relay_handshake
+        let (ck, rk) = perform_client_relay_handshake();
+        assert_eq!(ck.forward_key, rk.forward_key);
+        assert_eq!(ck.backward_key, rk.backward_key);
+        assert_eq!(ck.forward_aead_key, rk.forward_aead_key);
+        assert_eq!(ck.backward_aead_key, rk.backward_aead_key);
+        assert_ne!(ck.forward_key, baseline_keys.forward_key);
     }
 }

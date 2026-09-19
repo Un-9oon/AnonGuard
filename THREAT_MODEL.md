@@ -12,7 +12,7 @@ This document formalizes the operational trust boundaries, adversary capabilitie
 
 1. **Relay Honesty (Partial):** At least one intermediate relay in any 3-hop circuit ($\text{Guard} \to \text{Middle} \to \text{Exit}$) is honest and non-colluding. If all three relays collude or are controlled by the same entity, path correlation and client deanonymization are possible.
 2. **Endpoint Integrity:** The client operating system, hardware, and user agent (browser) are uncompromised by malware, rootkits, or hardware keyloggers.
-3. **Cryptographic Primitives:** The underlying mathematical assumptions of Curve25519 (X25519, Ed25519), ChaCha20, and SHA-256 remain computationally intractable for adversaries within current classical and near-term quantum bounds.
+3. **Cryptographic Primitives:** The underlying mathematical assumptions of Curve25519 (X25519, Ed25519), ML-KEM-768 (FIPS 203), ChaCha20, and SHA-256 remain computationally intractable for adversaries within current classical and near-term quantum bounds.
 4. **Directory Quorum:** Fewer than the configured threshold quorum ($M$-of-$N$) of Directory Authorities are Byzantine or compromised.
 
 ---
@@ -22,7 +22,7 @@ This document formalizes the operational trust boundaries, adversary capabilitie
 ### Adversary $\mathcal{A}_1$: Local Network & ISP Observer (Passive Wiretap)
 - **Capabilities:** Observes all packets entering and leaving the client's network interface, including local router, ISP transit, or public Wi-Fi eavesdropper.
 - **In-Scope Defenses:**
-  - **Payload Privacy:** All cells are encrypted with ephemeral X25519 shared secrets.
+  - **Payload Privacy:** All cells are encrypted with hybrid ephemeral X25519 + ML-KEM-768 post-quantum session key agreement.
   - **Destination Secrecy:** The local observer sees connections exclusively to the Guard node IP; destination hostnames and downstream relay IPs are completely obscured.
   - **Leak Prevention:** Remote DNS resolution over SOCKS5h, runtime IPv6 blackholing, and fail-closed kernel `nftables` prevent leakage outside the guarded tunnel.
   - **Traffic Fingerprint Disruption:** Statistical RMT Wigner-Surmise level repulsion eliminates predictable inter-arrival packet clustering, reducing Deep Fingerprinting CNN accuracy to near-random levels.
@@ -31,7 +31,7 @@ This document formalizes the operational trust boundaries, adversary capabilitie
 - **Capabilities:** Operates one or two relays in the network; attempts to inspect traffic, alter cell contents, replay cells, or forge consensus documents.
 - **In-Scope Defenses:**
   - **Hop Isolation:** Relays only observe adjacent hops. The Guard knows client IP but not destination; Exit knows destination but not client IP; Middle knows neither.
-  - **Integrity & Anti-Tagging:** Every 1024-byte cell is authenticated with a constant-time HMAC-SHA256 MAC. Bit-flipping and cell-tagging attacks fail MAC verification and trigger circuit termination.
+  - **Integrity & Anti-Tagging:** Every 2048-byte cell is authenticated with a constant-time HMAC-SHA256 MAC. Bit-flipping and cell-tagging attacks fail MAC verification and trigger circuit termination.
   - **Anti-Replay:** Monotonic sequence counters (`sequence_no`) bound into each cell's MAC reject duplicate, stale, or reordered cells.
   - **Anti-SSRF & DNS Rebinding:** Exit relays enforce strict IP address validation against RFC 1918 private subnets, loopback, link-local, and cloud metadata (e.g. `169.254.169.254`), validating resolved socket addresses ahead of TCP connection.
 
@@ -66,3 +66,13 @@ The following attack vectors are explicitly **out of scope** or represent fundam
    The kill-switch trip threshold is configurable via `--killswitch-trip-threshold <N>` (default: 5 failures per second). **Tradeoff:** a lower value (e.g. `--killswitch-trip-threshold 2`) is more sensitive to transient failures but increases the risk of false-positive circuit teardowns under momentary network turbulence; a higher value reduces false positives but widens the window in which a leak-inducing failure could persist before fail-closed engages. Operators should tune this to their threat model: privacy-critical deployments should prefer lower thresholds.
 8. **Empirical Website Fingerprinting (WF) Validation:**
    AnonGuard implements Random Matrix Theory (RMT) Wigner-Surmise repulsion algorithms mathematically to disrupt inter-packet arrival times. However, true empirical validation of Deep Fingerprinting (CNN) evasion requires continuous adversarial modeling over live, global, and highly-variable ISP transit networks. AnonGuard provides the algorithmic framework, but localized sandbox tests cannot certify resistance against an actively-trained state-level traffic classifier.
+
+---
+
+## 5. Post-Quantum Security Posture (PQC)
+
+AnonGuard integrates hybrid post-quantum key encapsulation into all telescopic circuit creation and extension handshakes.
+
+- **Primitive Choice:** ML-KEM-768 (FIPS 203 standardized Module-Lattice-Based Key Encapsulation Mechanism, Category 3 security, equivalent to AES-192).
+- **Hybrid Key Agreement Rationale:** Diffie-Hellman exchange combines classical X25519 (32 bytes) with ML-KEM-768 encapsulation (1184-byte public key, 1088-byte ciphertext). Session keys are derived via HKDF-SHA256 from the 64-byte secret `$S = S_{\text{X25519}} \| S_{\text{ML-KEM-768}}$`. This dual-primitive construction guarantees confidentiality even if either X25519 or ML-KEM-768 is compromised, neutralizing "store-now, decrypt-later" quantum adversaries without abandoning battle-tested elliptic-curve security.
+- **Implementation & Dependency Posture:** Uses the RustCrypto `ml-kem = "0.2"` crate. Future upgrades will track FIPS 203 final crate revisions as crate ecosystems mature.

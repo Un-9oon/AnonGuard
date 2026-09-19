@@ -7,6 +7,7 @@ use anonguard::onion::circuit::{
     OnionCircuit, RelayCircuitHop,
 };
 use ed25519_dalek::SigningKey;
+use ml_kem::{EncodedSizeUser, KemCore};
 use rand::rngs::OsRng;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
@@ -127,12 +128,23 @@ async fn one_hop_exit_opt(dest: SocketAddr, chunked: bool) -> (TcpStream, OnionC
     let cid = 0x2a2b_2c2d;
     let secret = EphemeralSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
-    let create = build_create_cell(cid, &public, 0).unwrap();
+    let (mlkem_dk, mlkem_ek) = ml_kem::MlKem768::generate(&mut OsRng);
+    let create = build_create_cell(cid, &public, &mlkem_ek, 0).unwrap();
     s.write_all(&create.serialize()).await.unwrap();
     let mut buf = [0u8; ONION_CELL_SIZE];
     s.read_exact(&mut buf).await.unwrap();
     let created = OnionCell::parse(&buf).unwrap();
-    let keys = process_created_cell(&created, secret, public.as_bytes(), &pk, cid, 0).unwrap();
+    let keys = process_created_cell(
+        &created,
+        secret,
+        public.as_bytes(),
+        &mlkem_dk,
+        (&mlkem_ek.as_bytes()).into(),
+        &pk,
+        cid,
+        0,
+    )
+    .unwrap();
     let mut circ = OnionCircuit::new(cid);
     circ.add_hop(keys).unwrap();
 

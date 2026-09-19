@@ -17,6 +17,7 @@ use crate::onion::circuit::{
     process_created_cell, OnionCircuit, PeelOutcome,
 };
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
+use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
 
@@ -995,7 +996,8 @@ pub async fn build_telescopic_circuit(
     let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
     let client_pub_0 = x25519_dalek::PublicKey::from(&client_secret_0);
     let client_pub_0_bytes = *client_pub_0.as_bytes();
-    let create_cell = build_create_cell(circuit_id, &client_pub_0, 0)
+    let (client_mlkem_dk_0, client_mlkem_ek_0) = MlKem768::generate(&mut OsRng);
+    let create_cell = build_create_cell(circuit_id, &client_pub_0, &client_mlkem_ek_0, 0)
         .map_err(|e| format!("Failed to build CREATE cell: {:?}", e))?;
     stream.write_all(&create_cell.serialize()).await?;
 
@@ -1006,10 +1008,14 @@ pub async fn build_telescopic_circuit(
     let pinned_key_0 = pinned_identity_keys
         .first()
         .ok_or("No pinned identity key for Hop 0 — refusing unauthenticated handshake")?;
+    let mut client_mlkem_pub_bytes_0 = [0u8; 1184];
+    client_mlkem_pub_bytes_0.copy_from_slice(client_mlkem_ek_0.as_bytes().as_slice());
     let hop_keys_0 = process_created_cell(
         &created_cell,
         client_secret_0,
         &client_pub_0_bytes,
+        &client_mlkem_dk_0,
+        &client_mlkem_pub_bytes_0,
         pinned_key_0,
         circuit_id,
         0,
@@ -1024,11 +1030,13 @@ pub async fn build_telescopic_circuit(
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_pub = x25519_dalek::PublicKey::from(&client_secret);
         let client_pub_bytes = *client_pub.as_bytes();
+        let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
 
         let extend_payload = encode_extend_payload(
             &chain[hop_idx].host,
             chain[hop_idx].port,
             &client_pub,
+            &client_mlkem_ek,
             hop_idx,
         )
         .map_err(|e| format!("Failed to encode EXTEND payload: {:?}", e))?;
@@ -1058,10 +1066,14 @@ pub async fn build_telescopic_circuit(
         let pinned_key = pinned_identity_keys.get(hop_idx).ok_or_else(|| {
             format!("No pinned identity key for Hop {hop_idx} — refusing unauthenticated handshake")
         })?;
+        let mut client_mlkem_pub_bytes = [0u8; 1184];
+        client_mlkem_pub_bytes.copy_from_slice(client_mlkem_ek.as_bytes().as_slice());
         let keys = process_created_cell(
             &resp_cell,
             client_secret,
             &client_pub_bytes,
+            &client_mlkem_dk,
+            &client_mlkem_pub_bytes,
             pinned_key,
             circuit_id,
             hop_idx,
@@ -1337,7 +1349,7 @@ pub async fn handle_onion_relay_connection(
                 }) => {
                     let payload = &client_buf[13..13 + len];
                     let extend_ok = async {
-                            let (next_h, next_p, next_pub, hop_index) = decode_extend_payload(payload)
+                            let (next_h, next_p, next_pub, next_mlkem_pub, hop_index) = decode_extend_payload(payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
 
                             if hop_index != relay_hop.hop_index + 1 {
@@ -1353,9 +1365,8 @@ pub async fn handle_onion_relay_connection(
                             }
 
                             let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
-
-                            .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
-                        let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, hop_index)
+                                .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
+                        let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, &next_mlkem_pub, hop_index)
                             .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
                         next_s.write_all(&c_cell.serialize()).await
                             .map_err(|e| format!("failed to write CREATE to next hop: {e}"))?;

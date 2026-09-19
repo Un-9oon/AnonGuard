@@ -37,6 +37,7 @@ chacha20poly1305 = "=0.10.1"
 subtle = "2.6"
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 zeroize = { version = "1.8", features = ["derive"] }
+ml-kem = "0.2"
 
 # Error handling
 thiserror = "1.0"

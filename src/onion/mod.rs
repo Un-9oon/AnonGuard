@@ -17,8 +17,15 @@ mod tests {
     use super::*;
     use crate::onion::circuit::HopKeys;
     use ed25519_dalek::SigningKey as Ed25519SigningKey;
+    use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
     use rand::rngs::OsRng;
     use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
+
+    fn ek_to_bytes(ek: &ml_kem::kem::EncapsulationKey<ml_kem::MlKem768Params>) -> [u8; 1184] {
+        let mut b = [0u8; 1184];
+        b.copy_from_slice(ek.as_bytes().as_slice());
+        b
+    }
 
     fn gen_relay_key() -> (Ed25519SigningKey, [u8; 32]) {
         let sk = Ed25519SigningKey::generate(&mut OsRng);
@@ -33,7 +40,8 @@ mod tests {
 
         let client_secret_0 = EphemeralSecret::random_from_rng(OsRng);
         let client_pub_0 = X25519PublicKey::from(&client_secret_0);
-        let create_cell_0 = build_create_cell(circuit_id, &client_pub_0, 0).unwrap();
+        let (mlkem_dk_0, mlkem_ek_0) = MlKem768::generate(&mut OsRng);
+        let create_cell_0 = build_create_cell(circuit_id, &client_pub_0, &mlkem_ek_0, 0).unwrap();
 
         let (guard_sk, guard_pk) = gen_relay_key();
         let (mut relay_guard, created_cell_0) =
@@ -43,6 +51,8 @@ mod tests {
             &created_cell_0,
             client_secret_0,
             client_pub_0.as_bytes(),
+            &mlkem_dk_0,
+            &ek_to_bytes(&mlkem_ek_0),
             &guard_pk,
             circuit_id,
             0,
@@ -52,7 +62,9 @@ mod tests {
 
         let client_secret_1 = EphemeralSecret::random_from_rng(OsRng);
         let client_pub_1 = X25519PublicKey::from(&client_secret_1);
-        let extend_payload_1 = encode_extend_payload("10.0.0.2", 9002, &client_pub_1, 1).unwrap();
+        let (mlkem_dk_1, mlkem_ek_1) = MlKem768::generate(&mut OsRng);
+        let extend_payload_1 =
+            encode_extend_payload("10.0.0.2", 9002, &client_pub_1, &mlkem_ek_1, 1).unwrap();
 
         let mut extend_cell_1 =
             OnionCell::new(circuit_id, 1, CellCommand::Extend, 0, &extend_payload_1).unwrap();
@@ -60,7 +72,13 @@ mod tests {
         let mut wire_buffer_1 = client_circuit.wrap_forward(&mut extend_cell_1).unwrap();
 
         let peel_1 = relay_guard.peel_forward(&mut wire_buffer_1).unwrap();
-        let (_target_host_1, _target_port_1, middle_pub_for_relay, _hop1) = match peel_1 {
+        let (
+            _target_host_1,
+            _target_port_1,
+            middle_pub_for_relay,
+            middle_mlkem_pub_for_relay,
+            _hop1,
+        ) = match peel_1 {
             PeelOutcome::AddressedToThisRelay { command, len } => {
                 assert_eq!(command, CellCommand::Extend);
                 decode_extend_payload(&wire_buffer_1[13..13 + len]).unwrap()
@@ -68,7 +86,13 @@ mod tests {
             PeelOutcome::ForwardDownstream => panic!("Guard must consume EXTEND cell!"),
         };
 
-        let create_cell_1 = build_create_cell(circuit_id, &middle_pub_for_relay, 1).unwrap();
+        let create_cell_1 = build_create_cell(
+            circuit_id,
+            &middle_pub_for_relay,
+            &middle_mlkem_pub_for_relay,
+            1,
+        )
+        .unwrap();
         let (middle_sk, middle_pk) = gen_relay_key();
         let (mut relay_middle, created_cell_1) =
             handle_create_cell(&create_cell_1, &middle_sk).unwrap();
@@ -86,6 +110,8 @@ mod tests {
             &client_unwrapped_1,
             client_secret_1,
             middle_pub_for_relay.as_bytes(),
+            &mlkem_dk_1,
+            &ek_to_bytes(&mlkem_ek_1),
             &middle_pk,
             circuit_id,
             1,
@@ -95,7 +121,9 @@ mod tests {
 
         let client_secret_2 = EphemeralSecret::random_from_rng(OsRng);
         let client_pub_2 = X25519PublicKey::from(&client_secret_2);
-        let extend_payload_2 = encode_extend_payload("10.0.0.3", 9003, &client_pub_2, 2).unwrap();
+        let (mlkem_dk_2, mlkem_ek_2) = MlKem768::generate(&mut OsRng);
+        let extend_payload_2 =
+            encode_extend_payload("10.0.0.3", 9003, &client_pub_2, &mlkem_ek_2, 2).unwrap();
 
         let mut extend_cell_2 =
             OnionCell::new(circuit_id, 1, CellCommand::Extend, 0, &extend_payload_2).unwrap();
@@ -110,15 +138,22 @@ mod tests {
         let mut to_middle = wire_buffer_2;
 
         let peel_2_middle = relay_middle.peel_forward(&mut to_middle).unwrap();
-        let (_target_host_2, _target_port_2, exit_pub_for_relay, _hop2) = match peel_2_middle {
-            PeelOutcome::AddressedToThisRelay { command, len } => {
-                assert_eq!(command, CellCommand::Extend);
-                decode_extend_payload(&to_middle[13..13 + len]).unwrap()
-            }
-            PeelOutcome::ForwardDownstream => panic!("Middle must consume EXTEND cell!"),
-        };
+        let (_target_host_2, _target_port_2, exit_pub_for_relay, exit_mlkem_pub_for_relay, _hop2) =
+            match peel_2_middle {
+                PeelOutcome::AddressedToThisRelay { command, len } => {
+                    assert_eq!(command, CellCommand::Extend);
+                    decode_extend_payload(&to_middle[13..13 + len]).unwrap()
+                }
+                PeelOutcome::ForwardDownstream => panic!("Middle must consume EXTEND cell!"),
+            };
 
-        let create_cell_2 = build_create_cell(circuit_id, &exit_pub_for_relay, 2).unwrap();
+        let create_cell_2 = build_create_cell(
+            circuit_id,
+            &exit_pub_for_relay,
+            &exit_mlkem_pub_for_relay,
+            2,
+        )
+        .unwrap();
         let (exit_sk, exit_pk) = gen_relay_key();
         let (mut relay_exit, created_cell_2) =
             handle_create_cell(&create_cell_2, &exit_sk).unwrap();
@@ -137,6 +172,8 @@ mod tests {
             &client_unwrapped_2,
             client_secret_2,
             exit_pub_for_relay.as_bytes(),
+            &mlkem_dk_2,
+            &ek_to_bytes(&mlkem_ek_2),
             &exit_pk,
             circuit_id,
             2,
@@ -180,14 +217,17 @@ mod tests {
         let circuit_id = 0xdeadbeef;
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_pub = X25519PublicKey::from(&client_secret);
+        let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
 
-        let create_cell = build_create_cell(circuit_id, &client_pub, 0).unwrap();
+        let create_cell = build_create_cell(circuit_id, &client_pub, &client_mlkem_ek, 0).unwrap();
         let (_relay_hop, created_cell) = handle_create_cell(&create_cell, &relay_sk).unwrap();
 
         let result = process_created_cell(
             &created_cell,
             client_secret,
             client_pub.as_bytes(),
+            &client_mlkem_dk,
+            &ek_to_bytes(&client_mlkem_ek),
             &wrong_pk,
             circuit_id,
             0,
@@ -202,8 +242,9 @@ mod tests {
         let circuit_id = 0xcafebabe;
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_pub = X25519PublicKey::from(&client_secret);
+        let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
 
-        let create_cell = build_create_cell(circuit_id, &client_pub, 0).unwrap();
+        let create_cell = build_create_cell(circuit_id, &client_pub, &client_mlkem_ek, 0).unwrap();
         let (_relay_hop, mut created_cell) = handle_create_cell(&create_cell, &relay_sk).unwrap();
 
         created_cell.payload[64] ^= 0xFF;
@@ -212,6 +253,8 @@ mod tests {
             &created_cell,
             client_secret,
             client_pub.as_bytes(),
+            &client_mlkem_dk,
+            &ek_to_bytes(&client_mlkem_ek),
             &relay_pk,
             circuit_id,
             0,
