@@ -206,6 +206,49 @@ impl ConsensusDocument {
 
         valid_auth_count >= quorum_threshold
     }
+
+    /// Merges the signatures from `other` into `self`, but only if `other` covers the exact
+    /// same consensus content — verified by comparing content digests, not by trusting the
+    /// caller.
+    ///
+    /// # Why this exists (fixes Critical Bug #1)
+    ///
+    /// Each Directory Authority only ever builds and signs *its own* locally-observed
+    /// `ConsensusDocument`; there is no authority-to-authority gossip round. That means no
+    /// single authority's `GET_CONSENSUS` response can ever carry more than one valid
+    /// signature, so a client requiring `quorum_threshold >= 2` could never be satisfied by
+    /// any individual authority's document — silently collapsing the "M-of-N" trust model
+    /// down to trusting whichever single authority happened to answer first (effectively
+    /// 1-of-N).
+    ///
+    /// This method lets the *client* do the aggregation instead: after independently fetching
+    /// a self-signed document from every configured authority, the client merges together the
+    /// documents that agree on content (same digest) into one multi-signed document, and only
+    /// then runs `verify_quorum` against it. A malicious or lagging authority whose relay view
+    /// disagrees (different digest) simply fails to merge and cannot contribute a signature to
+    /// a document it didn't actually attest to — `verify_quorum`'s own digest recomputation is
+    /// the final backstop against that even if this check were skipped.
+    ///
+    /// Returns the number of new signatures actually added (0 if the digests didn't match, or
+    /// if every signature in `other` was already present).
+    pub fn merge_signatures_from(&mut self, other: &ConsensusDocument) -> usize {
+        if self.compute_digest() != other.compute_digest() {
+            return 0;
+        }
+        let existing: std::collections::HashSet<String> = self
+            .signatures
+            .iter()
+            .map(|s| s.authority_id.clone())
+            .collect();
+        let mut added = 0;
+        for sig in &other.signatures {
+            if !existing.contains(&sig.authority_id) {
+                self.signatures.push(sig.clone());
+                added += 1;
+            }
+        }
+        added
+    }
 }
 
 #[cfg(test)]
@@ -273,5 +316,72 @@ mod tests {
 
         // Expired timestamp should fail
         assert!(!consensus.verify_quorum(&trusted_authorities, 2, 5000));
+    }
+
+    /// Regression test for Critical Bug #1: reproduces the realistic scenario where each
+    /// Directory Authority independently builds and signs its *own* `ConsensusDocument`
+    /// instance (as `DirectoryAuthority::GET_CONSENSUS` actually does), rather than three
+    /// authorities co-signing one shared object in memory like the test above. Before
+    /// `merge_signatures_from` existed, no single one of these per-authority documents could
+    /// ever satisfy a `quorum_threshold >= 2`, making M-of-N unreachable in practice.
+    #[test]
+    fn test_client_side_merge_achieves_real_quorum() {
+        let mut csprng = OsRng;
+
+        let auth1_priv = SigningKey::generate(&mut csprng);
+        let auth2_priv = SigningKey::generate(&mut csprng);
+        let auth3_priv = SigningKey::generate(&mut csprng);
+
+        let mut trusted_authorities = HashMap::new();
+        trusted_authorities.insert("auth-zurich".to_string(), auth1_priv.verifying_key());
+        trusted_authorities.insert("auth-reykjavik".to_string(), auth2_priv.verifying_key());
+        trusted_authorities.insert("auth-tokyo".to_string(), auth3_priv.verifying_key());
+
+        let relay_key = SigningKey::generate(&mut csprng);
+        let mut r1 = RelayDescriptor::new(
+            "relay-alpha".to_string(),
+            "198.51.100.10".to_string(),
+            9001,
+            [1u8; 32],
+            [0u8; 32],
+            false,
+            12345,
+            1000,
+        );
+        r1.sign_with_key(&relay_key);
+
+        // Each authority independently builds its OWN document (same content, but a distinct
+        // struct instance, exactly as three separate `GET_CONSENSUS` responses would look) and
+        // signs only that instance.
+        let mut doc_from_zurich = ConsensusDocument::new(1000, 4600, vec![r1.clone()]);
+        doc_from_zurich.sign_with_authority("auth-zurich", &auth1_priv);
+
+        let mut doc_from_reykjavik = ConsensusDocument::new(1000, 4600, vec![r1.clone()]);
+        doc_from_reykjavik.sign_with_authority("auth-reykjavik", &auth2_priv);
+
+        let mut doc_from_tokyo_disagreeing = ConsensusDocument::new(1000, 4600, vec![]); // stale/empty view
+        doc_from_tokyo_disagreeing.sign_with_authority("auth-tokyo", &auth3_priv);
+
+        // Before merging, neither individual document can reach a 2-of-3 quorum.
+        assert!(!doc_from_zurich.verify_quorum(&trusted_authorities, 2, 2000));
+        assert!(!doc_from_reykjavik.verify_quorum(&trusted_authorities, 2, 2000));
+
+        // Client merges: start from Zurich's document and fold in Reykjavik's signature since
+        // it covers the exact same content.
+        let mut merged = doc_from_zurich.clone();
+        let added = merged.merge_signatures_from(&doc_from_reykjavik);
+        assert_eq!(added, 1, "Reykjavik's signature should merge in (same digest)");
+
+        // Now 2-of-3 quorum is genuinely satisfiable.
+        assert!(merged.verify_quorum(&trusted_authorities, 2, 2000));
+
+        // Tokyo's document disagrees on content (different relay set / digest), so its
+        // signature must NOT merge in, even though Tokyo is a trusted authority.
+        let added_disagreeing = merged.merge_signatures_from(&doc_from_tokyo_disagreeing);
+        assert_eq!(
+            added_disagreeing, 0,
+            "a signature over different content must never merge in"
+        );
+        assert_eq!(merged.signatures.len(), 2);
     }
 }

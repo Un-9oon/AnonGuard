@@ -9,6 +9,12 @@ pub struct GuardState {
     pub guards: Vec<String>,
 }
 
+impl Default for GuardState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GuardState {
     pub fn new() -> Self {
         Self { guards: Vec::new() }

@@ -3,6 +3,7 @@
 //! Standalone CLI daemon for the AnonGuard engine.
 
 use clap::Parser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
@@ -389,7 +390,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !config.directory_authorities.is_empty() {
             let pool_clone = pool.clone();
             let auth_endpoints = config.directory_authorities.clone();
-            let mut auth_keys = trusted_authorities.clone();
+            let auth_keys = trusted_authorities.clone();
             let quorum_thresh = if args.quorum_threshold == 0 && !config.directory_authorities.is_empty() {
                 warn!("--quorum-threshold 0 is unsafe when --authorities is set; clamping to 1");
                 1
@@ -399,6 +400,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             tokio::spawn(async move {
                 loop {
+                    // Fix for Critical Bug #1 ("directory trust is effectively 1-of-N"):
+                    //
+                    // Each Directory Authority only ever signs the ConsensusDocument it built
+                    // from its own local view, so no single authority's GET_CONSENSUS response
+                    // can carry more than one valid signature. Previously this loop broke out
+                    // as soon as ANY one authority answered, meaning `quorum_threshold >= 2`
+                    // could never actually be satisfied — the "M-of-N" consensus model
+                    // silently degraded to trusting whichever single authority answered first.
+                    //
+                    // The fix: query every configured authority in this round, fetch each
+                    // one's self-signed document, and merge together the documents that agree
+                    // on content (same digest — see `ConsensusDocument::merge_signatures_from`)
+                    // into one multi-signed document *before* running `verify_quorum` against
+                    // it. Only after that merge does `quorum_threshold` mean anything real.
+                    let mut fetched_docs: Vec<(String, anonguard::mesh::ConsensusDocument)> =
+                        Vec::new();
+
                     for endpoint in &auth_endpoints {
                         let (auth_id_opt, raw_addr) =
                             if let Some((id, addr)) = endpoint.split_once('@') {
@@ -446,33 +464,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                                 >(
                                                     &frame
                                                 ) {
-                                                    let now =
-                                                        anonguard::mesh::current_timestamp_secs();
-                                                    match pool_clone
-                                                        .load_from_consensus(
-                                                            &doc,
-                                                            &auth_keys,
-                                                            quorum_thresh,
-                                                            now,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(loaded) => {
-                                                            tracing::info!(
-                                                                loaded = loaded,
-                                                                endpoint = %endpoint,
-                                                                "[AnonGuard Consensus] Verified M-of-N consensus document and loaded active relays"
-                                                            );
-                                                            break;
-                                                        }
-                                                        Err(e) => {
-                                                            tracing::warn!(
-                                                                error = %e,
-                                                                endpoint = %endpoint,
-                                                                "[AnonGuard Consensus] Consensus quorum verification failed"
-                                                            );
-                                                        }
-                                                    }
+                                                    fetched_docs
+                                                        .push((endpoint.clone(), doc));
                                                 }
                                             }
                                         }
@@ -495,6 +488,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         }
                     }
+
+                    // Group the fetched documents by content digest, merging signatures for
+                    // every document that agrees on content. A malicious/stale authority whose
+                    // relay view disagrees just starts (or joins) a different, smaller group —
+                    // its signature never contaminates a group it doesn't actually attest to.
+                    let mut merged_by_digest: HashMap<[u8; 32], anonguard::mesh::ConsensusDocument> =
+                        HashMap::new();
+                    for (_endpoint, doc) in &fetched_docs {
+                        let digest = doc.compute_digest();
+                        merged_by_digest
+                            .entry(digest)
+                            .and_modify(|existing| {
+                                existing.merge_signatures_from(doc);
+                            })
+                            .or_insert_with(|| doc.clone());
+                    }
+
+                    let now = anonguard::mesh::current_timestamp_secs();
+                    let mut quorum_reached = false;
+                    for candidate in merged_by_digest.values() {
+                        match pool_clone
+                            .load_from_consensus(candidate, &auth_keys, quorum_thresh, now)
+                            .await
+                        {
+                            Ok(loaded) => {
+                                tracing::info!(
+                                    loaded = loaded,
+                                    signatures = candidate.signatures.len(),
+                                    responders = fetched_docs.len(),
+                                    "[AnonGuard Consensus] Verified M-of-N consensus document (merged across authorities) and loaded active relays"
+                                );
+                                quorum_reached = true;
+                                break;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    signatures = candidate.signatures.len(),
+                                    "[AnonGuard Consensus] Merged consensus candidate failed quorum verification"
+                                );
+                            }
+                        }
+                    }
+                    if !quorum_reached && !fetched_docs.is_empty() {
+                        tracing::warn!(
+                            responders = fetched_docs.len(),
+                            threshold = quorum_thresh,
+                            "[AnonGuard Consensus] No consensus candidate reached quorum this round"
+                        );
+                    }
+
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });
