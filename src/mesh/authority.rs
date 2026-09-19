@@ -98,9 +98,11 @@ impl DirectoryAuthority {
                 error!("FATAL: Cannot read authority key file {:?}: {}", path, e);
                 std::process::exit(1);
             }
-            let arr: [u8; 32] = match bytes.as_slice().try_into() {
+            use zeroize::Zeroize;
+            let mut arr: [u8; 32] = match bytes.as_slice().try_into() {
                 Ok(a) => a,
                 Err(_) => {
+                    bytes.zeroize();
                     error!(
                         "FATAL: Authority key file {:?} is corrupt (expected 32 bytes, got {}). \
                         Delete the file to generate a fresh key, but note this will invalidate \
@@ -111,7 +113,10 @@ impl DirectoryAuthority {
                     std::process::exit(1);
                 }
             };
-            SigningKey::from_bytes(&arr)
+            let key = SigningKey::from_bytes(&arr);
+            arr.zeroize();
+            bytes.zeroize();
+            key
         } else {
             // Create new key and persist it at 0o600
             let key = SigningKey::generate(&mut OsRng);
@@ -529,5 +534,29 @@ mod tests {
         );
         legit_update.sign_with_key(&relay_key1);
         assert!(auth.register_relay(legit_update).await.is_ok());
+    }
+
+    #[test]
+    fn test_key_material_zeroize_on_drop() {
+        use zeroize::Zeroize;
+
+        fn assert_zeroize<T: Zeroize>(_t: T) {}
+
+        let mut secret = [0x42u8; 32];
+        assert_ne!(secret, [0u8; 32]);
+        secret.zeroize();
+        assert_eq!(secret, [0u8; 32]);
+
+        let mut key_vec = vec![0x99u8; 32];
+        assert_ne!(key_vec.as_slice(), &[0u8; 32]);
+        key_vec.as_mut_slice().zeroize();
+        assert_eq!(key_vec.as_slice(), &[0u8; 32]);
+
+        let mut key_vec_clear = vec![0x88u8; 32];
+        key_vec_clear.zeroize();
+        assert!(key_vec_clear.is_empty());
+
+        assert_zeroize(secret);
+        assert_zeroize(key_vec);
     }
 }

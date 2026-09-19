@@ -171,11 +171,19 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
 
+    use zeroize::Zeroize;
+
     if path.exists() {
         match std::fs::read(path) {
-            Ok(bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
-                Ok(arr) => return ed25519_dalek::SigningKey::from_bytes(&arr),
+            Ok(mut bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
+                Ok(mut arr) => {
+                    let key = ed25519_dalek::SigningKey::from_bytes(&arr);
+                    arr.zeroize();
+                    bytes.zeroize();
+                    return key;
+                }
                 Err(_) => {
+                    bytes.zeroize();
                     error!(
                         "FATAL: Identity key file {:?} is corrupt (expected 32 bytes, got {}). \
                         Delete it to generate a fresh key — existing relays will need to \
