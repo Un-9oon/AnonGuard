@@ -82,7 +82,7 @@ where
         }
     }
 
-    let j = jitter.expect("jitter is checked above");
+    let j = jitter.unwrap();
     let (mut a_read, mut a_write) = tokio::io::split(a);
     let (mut b_read, mut b_write) = tokio::io::split(b);
 

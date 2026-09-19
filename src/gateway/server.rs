@@ -8,8 +8,8 @@ use crate::core::GuardConfig;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
 use crate::morphing::{
-    morph_bidirectional_guarded, JitterEngine, LorenzAttractor, PoissonJitter, QuantumEnsemble,
-    QuantumRmtEngine,
+    morph_bidirectional_guarded, JitterEngine, LorenzAttractor, PoissonJitter, RmtEnsemble,
+    RmtTimingEngine,
 };
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 use crate::onion::circuit::{
@@ -60,13 +60,13 @@ impl GatewayServer {
         kill_switch: KillSwitchController,
         relay_identity_key: Arc<Ed25519SigningKey>,
     ) -> Self {
-        let jitter = if config.enable_quantum {
-            let ensemble = if config.quantum_ensemble.to_lowercase() == "gue" {
-                QuantumEnsemble::GUE
+        let jitter = if config.enable_rmt_morphing {
+            let ensemble = if config.rmt_ensemble.to_lowercase() == "gue" {
+                RmtEnsemble::GUE
             } else {
-                QuantumEnsemble::GOE
+                RmtEnsemble::GOE
             };
-            Some(JitterEngine::Quantum(QuantumRmtEngine::new(
+            Some(JitterEngine::Rmt(RmtTimingEngine::new(
                 ensemble, 1.5, 1024,
             )))
         } else if config.enable_chaos {

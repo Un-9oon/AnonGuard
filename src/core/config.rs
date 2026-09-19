@@ -19,9 +19,9 @@ pub struct GuardConfig {
     pub chaos_sigma: f64,
     pub chaos_rho: f64,
     pub chaos_beta: f64,
-    /// Enable Quantum Chaos (RMT) Morphing
-    pub enable_quantum: bool,
-    pub quantum_ensemble: String,
+    /// Enable statistical RMT (Wigner-surmise) traffic-timing morphing
+    pub enable_rmt_morphing: bool,
+    pub rmt_ensemble: String,
     /// Enable MTU chunk padding
     pub enable_padding: bool,
     /// Padding block size in bytes (e.g. 512, 1024, 1460)
@@ -74,8 +74,8 @@ impl Default for GuardConfig {
             chaos_sigma: 10.0,
             chaos_rho: 28.0,
             chaos_beta: 8.0 / 3.0,
-            enable_quantum: false,
-            quantum_ensemble: "goe".to_string(),
+            enable_rmt_morphing: false,
+            rmt_ensemble: "goe".to_string(),
             enable_padding: false,
             padding_block_size: 512,
             ja4_profile: "chrome_120".to_string(),
@@ -94,7 +94,7 @@ impl Default for GuardConfig {
             directory_authorities: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
             enable_firewall_killswitch: false,
-            pow_difficulty: 20,
+            pow_difficulty: crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
             identity_key_path: std::path::PathBuf::from("/etc/anonguard/identity.key"),
             guard_state_path: std::path::PathBuf::from("/etc/anonguard/guards.json"),
         }

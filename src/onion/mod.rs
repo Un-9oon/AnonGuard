@@ -305,11 +305,15 @@ mod tests {
         let forward_key = [1u8; 32];
         let backward_key = [2u8; 32];
         let mac_key = [99u8; 32];
+        let forward_aead_key = [7u8; 32];
+        let backward_aead_key = [8u8; 32];
         let keys = HopKeys {
             forward_key,
             backward_key,
             forward_mac: mac_key,
             backward_mac: mac_key,
+            forward_aead_key,
+            backward_aead_key,
         };
         let mut relay = RelayCircuitHop::new(1, keys, 0);
 
@@ -319,6 +323,8 @@ mod tests {
             backward_key,
             forward_mac: mac_key,
             backward_mac: mac_key,
+            forward_aead_key,
+            backward_aead_key,
         };
         client_circuit.add_hop(keys2).unwrap();
 

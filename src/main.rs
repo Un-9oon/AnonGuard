@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use anonguard::core::GuardConfig;
 use anonguard::gateway::GatewayServer;
 use anonguard::kernel::KillSwitchController;
-use anonguard::mesh::ProxyPool;
+use anonguard::mesh::{ProxyPool, DEFAULT_POW_DIFFICULTY};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,13 +52,14 @@ struct Args {
     #[arg(long, default_value_t = 2.666666)]
     chaos_beta: f64,
 
-    /// Enable Statistical Random Matrix Theory (RMT) Traffic Morphing (Wigner Surmise)
-    #[arg(long, alias = "rmt", default_value_t = false)]
-    quantum: bool,
+    /// Enable statistical RMT (Wigner-surmise) traffic-timing morphing. This is a
+    /// classical statistical technique from random matrix theory, not quantum computing.
+    #[arg(long = "rmt-morphing", visible_aliases = ["rmt", "quantum"], default_value_t = false)]
+    rmt_morphing: bool,
 
-    /// Statistical RMT Ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary)
-    #[arg(long, default_value = "goe")]
-    quantum_ensemble: String,
+    /// Statistical RMT ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary)
+    #[arg(long = "rmt-ensemble", visible_alias = "quantum-ensemble", default_value = "goe")]
+    rmt_ensemble: String,
 
     /// Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
     #[arg(short, long, default_value_t = false)]
@@ -119,8 +120,8 @@ struct Args {
     #[arg(long, default_value_t = false)]
     enable_firewall_killswitch: bool,
 
-    /// Registration PoW difficulty in leading zero bits (default 20, recommended 20+ for production)
-    #[arg(long, default_value_t = 20)]
+    /// Registration PoW difficulty in leading zero bits (see mesh::sybil::DEFAULT_POW_DIFFICULTY)
+    #[arg(long, default_value_t = DEFAULT_POW_DIFFICULTY)]
     pow_difficulty: u32,
 
     /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
@@ -264,8 +265,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         chaos_sigma: args.chaos_sigma,
         chaos_rho: args.chaos_rho,
         chaos_beta: args.chaos_beta,
-        enable_quantum: args.quantum,
-        quantum_ensemble: args.quantum_ensemble.clone(),
+        enable_rmt_morphing: args.rmt_morphing,
+        rmt_ensemble: args.rmt_ensemble.clone(),
         enable_onion_routing: args.onion,
         enforce_subnet_diversity: args.enforce_subnet_diversity,
         authority_mode: args.authority,

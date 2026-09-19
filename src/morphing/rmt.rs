@@ -1,14 +1,16 @@
-//! Quantum Random Matrix Theory (Q-RMT) Timing Engine
+//! Statistical Random Matrix Theory (RMT) Timing Engine
 //!
-//! Simulates the eigenvalue spacing of Gaussian Orthogonal Ensembles (GOE)
-//! and Gaussian Unitary Ensembles (GUE) using the Wigner Surmise.
-//! Provides computationally efficient O(1) level repulsion for traffic morphing.
+//! Samples inter-packet delay and chunk size from the eigenvalue-spacing
+//! distribution of Gaussian Orthogonal Ensembles (GOE) and Gaussian Unitary
+//! Ensembles (GUE) via the Wigner surmise — a classical result from random
+//! matrix theory (nuclear physics/statistics), unrelated to quantum computing.
+//! Sampling uses a standard CSPRNG and runs in O(1) time per packet.
 
 use rand::Rng;
 use std::f64::consts::PI;
 
 #[derive(Clone, Debug)]
-pub enum QuantumEnsemble {
+pub enum RmtEnsemble {
     /// Gaussian Orthogonal Ensemble (Time-reversal symmetry)
     GOE,
     /// Gaussian Unitary Ensemble (Broken time-reversal symmetry)
@@ -16,14 +18,14 @@ pub enum QuantumEnsemble {
 }
 
 #[derive(Clone)]
-pub struct QuantumRmtEngine {
-    ensemble: QuantumEnsemble,
+pub struct RmtTimingEngine {
+    ensemble: RmtEnsemble,
     base_delay_ms: f64,
     base_size_bytes: usize,
 }
 
-impl QuantumRmtEngine {
-    pub fn new(ensemble: QuantumEnsemble, base_delay_ms: f64, base_size_bytes: usize) -> Self {
+impl RmtTimingEngine {
+    pub fn new(ensemble: RmtEnsemble, base_delay_ms: f64, base_size_bytes: usize) -> Self {
         Self {
             ensemble,
             base_delay_ms,
@@ -34,8 +36,8 @@ impl QuantumRmtEngine {
     /// Generates the next packet size based on RMT level spacing
     pub fn next_chunk_size(&self) -> usize {
         let spacing = match self.ensemble {
-            QuantumEnsemble::GOE => self.sample_goe(),
-            QuantumEnsemble::GUE => self.sample_gue(),
+            RmtEnsemble::GOE => self.sample_goe(),
+            RmtEnsemble::GUE => self.sample_gue(),
         };
 
         // Scale spacing to chunk size (e.g. baseline 1024 bytes)
@@ -47,8 +49,8 @@ impl QuantumRmtEngine {
     /// Generates the next microsecond delay based on RMT level spacing
     pub fn next_delay_us(&self) -> u64 {
         let spacing = match self.ensemble {
-            QuantumEnsemble::GOE => self.sample_goe(),
-            QuantumEnsemble::GUE => self.sample_gue(),
+            RmtEnsemble::GOE => self.sample_goe(),
+            RmtEnsemble::GUE => self.sample_gue(),
         };
 
         // Scale spacing to microsecond delay

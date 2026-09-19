@@ -15,8 +15,6 @@ use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
-use hmac::{Hmac, Mac};
-use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 pub const MAX_HOPS: usize = 3;
@@ -66,6 +64,8 @@ pub struct HopKeys {
     pub backward_key: [u8; 32],
     pub forward_mac: [u8; 32],
     pub backward_mac: [u8; 32],
+    pub forward_aead_key: [u8; 32],
+    pub backward_aead_key: [u8; 32],
 }
 
 impl Drop for HopKeys {
@@ -74,6 +74,8 @@ impl Drop for HopKeys {
         self.backward_key.fill(0);
         self.forward_mac.fill(0);
         self.backward_mac.fill(0);
+        self.forward_aead_key.fill(0);
+        self.backward_aead_key.fill(0);
     }
 }
 
@@ -104,44 +106,48 @@ pub struct HopCryptState {
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInPlace};
 
 impl HopCryptState {
+    /// AEAD-seals the addressed hop's payload using a dedicated, independently
+    /// HKDF-derived key (forward_aead_key) — never reused from forward_key/forward_mac.
     pub fn seal_forward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
-        let mut aead_key = [0u8; 32];
-        aead_key[0..16].copy_from_slice(&self.keys.forward_key[0..16]);
-        aead_key[16..32].copy_from_slice(&self.keys.forward_mac[0..16]);
-        let cipher = ChaCha20Poly1305::new(&aead_key.into());
-        
-        let tag = cipher.encrypt_in_place_detached(
-            nonce.into(),
-            header,
-            pt_body
-        ).expect("ChaCha20Poly1305 should never fail in-place encryption");
-        
+        let cipher = ChaCha20Poly1305::new(&self.keys.forward_aead_key.into());
+        let tag = cipher
+            .encrypt_in_place_detached(nonce.into(), header, pt_body)
+            .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
         tag.into()
     }
 
-    pub fn open_forward(&self, nonce: &[u8; 12], header: &[u8], ct_body: &mut [u8], tag: &[u8; 16]) -> Result<(), ()> {
-        let mut aead_key = [0u8; 32];
-        aead_key[0..16].copy_from_slice(&self.keys.forward_key[0..16]);
-        aead_key[16..32].copy_from_slice(&self.keys.forward_mac[0..16]);
-        let cipher = ChaCha20Poly1305::new(&aead_key.into());
-        cipher.decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into()).map_err(|_| ())
+    pub fn open_forward(
+        &self,
+        nonce: &[u8; 12],
+        header: &[u8],
+        ct_body: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CircuitError> {
+        let cipher = ChaCha20Poly1305::new(&self.keys.forward_aead_key.into());
+        cipher
+            .decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into())
+            .map_err(|_| CircuitError::MacVerificationFailed)
     }
 
     pub fn seal_backward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
-        let mut aead_key = [0u8; 32];
-        aead_key[0..16].copy_from_slice(&self.keys.backward_key[0..16]);
-        aead_key[16..32].copy_from_slice(&self.keys.backward_mac[0..16]);
-        let cipher = ChaCha20Poly1305::new(&aead_key.into());
-        let tag = cipher.encrypt_in_place_detached(nonce.into(), header, pt_body).expect("len");
+        let cipher = ChaCha20Poly1305::new(&self.keys.backward_aead_key.into());
+        let tag = cipher
+            .encrypt_in_place_detached(nonce.into(), header, pt_body)
+            .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
         tag.into()
     }
 
-    pub fn open_backward(&self, nonce: &[u8; 12], header: &[u8], ct_body: &mut [u8], tag: &[u8; 16]) -> Result<(), ()> {
-        let mut aead_key = [0u8; 32];
-        aead_key[0..16].copy_from_slice(&self.keys.backward_key[0..16]);
-        aead_key[16..32].copy_from_slice(&self.keys.backward_mac[0..16]);
-        let cipher = ChaCha20Poly1305::new(&aead_key.into());
-        cipher.decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into()).map_err(|_| ())
+    pub fn open_backward(
+        &self,
+        nonce: &[u8; 12],
+        header: &[u8],
+        ct_body: &mut [u8],
+        tag: &[u8; 16],
+    ) -> Result<(), CircuitError> {
+        let cipher = ChaCha20Poly1305::new(&self.keys.backward_aead_key.into());
+        cipher
+            .decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into())
+            .map_err(|_| CircuitError::MacVerificationFailed)
     }
 
     pub fn new(keys: HopKeys) -> Self {
@@ -170,6 +176,8 @@ pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> Result<HopKeys, CircuitError
         backward_key: [0u8; 32],
         forward_mac: [0u8; 32],
         backward_mac: [0u8; 32],
+        forward_aead_key: [0u8; 32],
+        backward_aead_key: [0u8; 32],
     };
 
     hk.expand(b"AnonGuard-Forward-Key-v4", &mut keys.forward_key)
@@ -179,6 +187,14 @@ pub fn derive_hop_keys(shared_secret: &[u8; 32]) -> Result<HopKeys, CircuitError
     hk.expand(b"AnonGuard-Forward-MAC-v4", &mut keys.forward_mac)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
     hk.expand(b"AnonGuard-Backward-MAC-v4", &mut keys.backward_mac)
+        .map_err(|_| CircuitError::KeyDerivationFailed)?;
+    // Dedicated, full-entropy, single-purpose AEAD keys (v5). Previously the AEAD
+    // path reused the first 16 bytes each of forward_key and forward_mac spliced
+    // together, which halved effective entropy per source and reused MAC-domain
+    // key material inside the cipher. These are independently HKDF-derived instead.
+    hk.expand(b"AnonGuard-Forward-AEAD-Key-v5", &mut keys.forward_aead_key)
+        .map_err(|_| CircuitError::KeyDerivationFailed)?;
+    hk.expand(b"AnonGuard-Backward-AEAD-Key-v5", &mut keys.backward_aead_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
 
     Ok(keys)
@@ -346,9 +362,7 @@ impl OnionCircuit {
 
         let mut tag = [0u8; 16];
         tag.copy_from_slice(mac_buf);
-        if target_hop.open_backward(&nonce, header, ct, &tag).is_err() {
-            return Err(CircuitError::MacVerificationFailed);
-        }
+        target_hop.open_backward(&nonce, header, ct, &tag)?;
 
         self.bwd_replay_windows[hop_index].check_and_advance(seq)?;
 
@@ -718,4 +732,62 @@ pub fn perform_client_relay_handshake() -> (HopKeys, HopKeys) {
     let relay_keys = derive_hop_keys(relay_shared.as_bytes()).unwrap();
 
     (client_keys, relay_keys)
+}
+
+#[cfg(test)]
+mod aead_key_derivation_tests {
+    use super::*;
+
+    #[test]
+    fn aead_key_is_independent_from_transport_and_mac_keys() {
+        let shared_secret = [0x42u8; 32];
+        let keys = derive_hop_keys(&shared_secret).unwrap();
+
+        // The AEAD key must not equal, and must not be derivable by simple
+        // truncation/concatenation of, the stream-cipher key or the legacy
+        // MAC key. This guards against reintroducing the v4 bug where
+        // aead_key = forward_key[0..16] || forward_mac[0..16].
+        assert_ne!(keys.forward_aead_key, keys.forward_key);
+        assert_ne!(keys.forward_aead_key, keys.forward_mac);
+        assert_ne!(keys.forward_aead_key[0..16], keys.forward_key[0..16]);
+        assert_ne!(keys.forward_aead_key[16..32], keys.forward_mac[0..16]);
+
+        assert_ne!(keys.backward_aead_key, keys.backward_key);
+        assert_ne!(keys.backward_aead_key, keys.backward_mac);
+
+        // Forward and backward AEAD keys must themselves be distinct.
+        assert_ne!(keys.forward_aead_key, keys.backward_aead_key);
+    }
+
+    #[test]
+    fn aead_seal_open_round_trip_and_tamper_rejection() {
+        let shared_secret = [0x11u8; 32];
+        let keys = derive_hop_keys(&shared_secret).unwrap();
+        let crypt = HopCryptState::new(keys);
+
+        let nonce = build_nonce(1, 7, 1);
+        let header = [0xAAu8; 8];
+        let mut buf = *b"hello world, this is a test payload buffer!!!!";
+        let original = buf;
+
+        let tag = crypt.seal_forward(&nonce, &header, &mut buf);
+        assert_ne!(buf, original, "ciphertext must differ from plaintext");
+
+        // Correct tag + correct header must verify and recover the plaintext.
+        let mut roundtrip = buf;
+        crypt
+            .open_forward(&nonce, &header, &mut roundtrip, &tag)
+            .expect("valid AEAD open must succeed");
+        assert_eq!(roundtrip, original);
+
+        // Tampered header (AAD) must be rejected.
+        let mut tampered = buf;
+        let bad_header = [0xBBu8; 8];
+        assert!(crypt.open_forward(&nonce, &bad_header, &mut tampered, &tag).is_err());
+
+        // Tampered ciphertext must be rejected.
+        let mut tampered_ct = buf;
+        tampered_ct[0] ^= 0x01;
+        assert!(crypt.open_forward(&nonce, &header, &mut tampered_ct, &tag).is_err());
+    }
 }
