@@ -96,20 +96,54 @@ fn pack_backward_seq(hop_index: usize, counter: u32) -> Result<u32, CircuitError
     Ok(((hop_index as u32) << BWD_COUNTER_BITS) | counter)
 }
 
-fn compute_mac(key: &[u8; 32], nonce: &[u8; 12], header: &[u8], payload: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).unwrap();
-    mac.update(nonce);
-    mac.update(header);
-    mac.update(payload);
-    mac.finalize().into_bytes().into()
-}
-
 /// Per-hop cryptographic session state containing forward and backward keys.
 pub struct HopCryptState {
     pub keys: HopKeys,
 }
 
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::AeadInPlace};
+
 impl HopCryptState {
+    pub fn seal_forward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
+        let mut aead_key = [0u8; 32];
+        aead_key[0..16].copy_from_slice(&self.keys.forward_key[0..16]);
+        aead_key[16..32].copy_from_slice(&self.keys.forward_mac[0..16]);
+        let cipher = ChaCha20Poly1305::new(&aead_key.into());
+        
+        let tag = cipher.encrypt_in_place_detached(
+            nonce.into(),
+            header,
+            pt_body
+        ).expect("ChaCha20Poly1305 should never fail in-place encryption");
+        
+        tag.into()
+    }
+
+    pub fn open_forward(&self, nonce: &[u8; 12], header: &[u8], ct_body: &mut [u8], tag: &[u8; 16]) -> Result<(), ()> {
+        let mut aead_key = [0u8; 32];
+        aead_key[0..16].copy_from_slice(&self.keys.forward_key[0..16]);
+        aead_key[16..32].copy_from_slice(&self.keys.forward_mac[0..16]);
+        let cipher = ChaCha20Poly1305::new(&aead_key.into());
+        cipher.decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into()).map_err(|_| ())
+    }
+
+    pub fn seal_backward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
+        let mut aead_key = [0u8; 32];
+        aead_key[0..16].copy_from_slice(&self.keys.backward_key[0..16]);
+        aead_key[16..32].copy_from_slice(&self.keys.backward_mac[0..16]);
+        let cipher = ChaCha20Poly1305::new(&aead_key.into());
+        let tag = cipher.encrypt_in_place_detached(nonce.into(), header, pt_body).expect("len");
+        tag.into()
+    }
+
+    pub fn open_backward(&self, nonce: &[u8; 12], header: &[u8], ct_body: &mut [u8], tag: &[u8; 16]) -> Result<(), ()> {
+        let mut aead_key = [0u8; 32];
+        aead_key[0..16].copy_from_slice(&self.keys.backward_key[0..16]);
+        aead_key[16..32].copy_from_slice(&self.keys.backward_mac[0..16]);
+        let cipher = ChaCha20Poly1305::new(&aead_key.into());
+        cipher.decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into()).map_err(|_| ())
+    }
+
     pub fn new(keys: HopKeys) -> Self {
         Self { keys }
     }
@@ -262,9 +296,8 @@ impl OnionCircuit {
             let (header, body) = raw.split_at_mut(8);
             let (pt, mac_buf) = body.split_at_mut(1000);
 
-            target_hop.encrypt_forward_stream(&nonce, pt);
-            let tag = compute_mac(&target_hop.keys.forward_mac, &nonce, header, pt);
-            mac_buf.copy_from_slice(&tag[..16]);
+            let tag = target_hop.seal_forward(&nonce, header, pt);
+            mac_buf.copy_from_slice(&tag);
         }
 
         let hop_count = self.hops.len();
@@ -311,14 +344,14 @@ impl OnionCircuit {
         let (header, body) = raw.split_at_mut(8);
         let (ct, mac_buf) = body.split_at_mut(1000);
 
-        let expected_tag = compute_mac(&target_hop.keys.backward_mac, &nonce, header, ct);
-        if expected_tag[..16].ct_eq(mac_buf).unwrap_u8() != 1 {
+        let mut tag = [0u8; 16];
+        tag.copy_from_slice(mac_buf);
+        if target_hop.open_backward(&nonce, header, ct, &tag).is_err() {
             return Err(CircuitError::MacVerificationFailed);
         }
 
         self.bwd_replay_windows[hop_index].check_and_advance(seq)?;
 
-        target_hop.encrypt_backward_stream(&nonce, ct);
         let cell = OnionCell::parse(raw).map_err(CircuitError::ParseError)?;
         Ok((hop_index, cell))
     }
@@ -334,9 +367,9 @@ pub struct RelayCircuitHop {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum PeelResult {
-    AddressedToThisRelay(CellCommand, Vec<u8>),
-    ForwardDownstream(Box<[u8; ONION_CELL_SIZE]>),
+pub enum PeelOutcome {
+    AddressedToThisRelay { command: CellCommand, len: usize },
+    ForwardDownstream,
 }
 
 impl RelayCircuitHop {
@@ -350,10 +383,10 @@ impl RelayCircuitHop {
         }
     }
 
-    pub fn peel_forward(
+        pub fn peel_forward(
         &mut self,
         raw: &mut [u8; ONION_CELL_SIZE],
-    ) -> Result<PeelResult, CircuitError> {
+    ) -> Result<PeelOutcome, CircuitError> {
         let cell_circuit_id = u32::from_be_bytes(
             raw[0..4]
                 .try_into()
@@ -370,45 +403,36 @@ impl RelayCircuitHop {
 
         let nonce = build_nonce(1, self.circuit_id, seq);
 
-        let mut pt_scratch = [0u8; ONION_CELL_SIZE];
-        pt_scratch.copy_from_slice(raw);
-        let (header, body) = pt_scratch.split_at_mut(8);
-        let (pt, mac_buf) = body.split_at_mut(1000);
+        // Limit scope of immutable borrow
+        let mut tag = [0u8; 16];
+        let tag_matches = {
+            let (header, body) = raw.split_at_mut(8);
+            let (pt, mac_buf) = body.split_at_mut(1000);
+            tag.copy_from_slice(mac_buf);
+            self.crypt.open_forward(&nonce, header, pt, &tag).is_ok()
+        };
 
-        let expected_tag = compute_mac(&self.crypt.keys.forward_mac, &nonce, header, pt);
+        if tag_matches {
 
-        if expected_tag[..16].ct_eq(mac_buf).unwrap_u8() == 1 {
-            self.crypt.encrypt_forward_stream(&nonce, pt);
             if seq < self.expected_recv_seq {
-                return Err(CircuitError::AntiReplayRejection(format!(
-                    "Stale sequence {}",
-                    seq
-                )));
+                return Err(CircuitError::AntiReplayRejection(format!("Stale sequence {}", seq)));
             }
             if seq - self.expected_recv_seq > MAX_SEQ_GAP {
-                return Err(CircuitError::AntiReplayRejection(
-                    "Sequence gap too large".to_string(),
-                ));
+                return Err(CircuitError::AntiReplayRejection("Sequence gap too large".to_string()));
             }
             self.expected_recv_seq = seq + 1;
 
-            raw.copy_from_slice(&pt_scratch);
             let cell = OnionCell::parse(raw).map_err(|e| {
                 CircuitError::ParseError(format!("MAC verified but cell parse failed: {}", e))
             })?;
-            let len = (cell.length as usize).min(cell.payload.len());
-            return Ok(PeelResult::AddressedToThisRelay(
-                cell.command,
-                cell.payload[..len].to_vec(),
-            ));
+            return Ok(PeelOutcome::AddressedToThisRelay {
+                command: cell.command,
+                len: (cell.length as usize).min(cell.payload.len()),
+            });
         }
 
-        let (_, fwd_body) = raw.split_at_mut(8);
-        self.crypt.encrypt_forward_stream(&nonce, fwd_body);
-
-        let mut full_cell = [0u8; ONION_CELL_SIZE];
-        full_cell.copy_from_slice(raw);
-        Ok(PeelResult::ForwardDownstream(Box::new(full_cell)))
+        self.crypt.encrypt_forward_stream(&nonce, &mut raw[8..]);
+        Ok(PeelOutcome::ForwardDownstream)
     }
 
     pub fn wrap_backward_relay(
@@ -451,9 +475,8 @@ impl RelayCircuitHop {
         let (header, body) = raw.split_at_mut(8);
         let (pt, mac_buf) = body.split_at_mut(1000);
 
-        self.crypt.encrypt_backward_stream(&nonce, pt);
-        let tag = compute_mac(&self.crypt.keys.backward_mac, &nonce, header, pt);
-        mac_buf.copy_from_slice(&tag[..16]);
+        let tag = self.crypt.seal_backward(&nonce, header, pt);
+        mac_buf.copy_from_slice(&tag);
         Ok(())
     }
 }
