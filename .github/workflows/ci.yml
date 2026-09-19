@@ -28,8 +28,11 @@ jobs:
       - name: Run Test Suite
         run: cargo test --all-targets --verbose
 
-      - name: Run Clippy Linter (Strict Zero-Warning Enforcement)
+      - name: Run Clippy Linter (Strict Zero-Warning Enforcement - Debug)
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Clippy Linter & Build (Strict Zero-Warning Enforcement - Release)
+        run: cargo clippy --release --all-targets -- -D warnings && cargo build --release
 
       - name: Check Benchmark Compilation
         run: cargo bench --no-run
