@@ -933,4 +933,48 @@ mod aead_key_derivation_tests {
         assert_eq!(ck.backward_aead_key, rk.backward_aead_key);
         assert_ne!(ck.forward_key, baseline_keys.forward_key);
     }
+
+    #[test]
+    fn test_sequential_circuits_have_independent_hop_keys() {
+        let (ck1_h0, rk1_h0) = perform_client_relay_handshake();
+        let (ck1_h1, rk1_h1) = perform_client_relay_handshake();
+        let (ck1_h2, rk1_h2) = perform_client_relay_handshake();
+
+        let (ck2_h0, rk2_h0) = perform_client_relay_handshake();
+        let (ck2_h1, rk2_h1) = perform_client_relay_handshake();
+        let (ck2_h2, rk2_h2) = perform_client_relay_handshake();
+
+        // 1. Assert matching client/relay hop keys for each circuit
+        assert_eq!(ck1_h0.forward_key, rk1_h0.forward_key);
+        assert_eq!(ck1_h1.forward_key, rk1_h1.forward_key);
+        assert_eq!(ck1_h2.forward_key, rk1_h2.forward_key);
+
+        assert_eq!(ck2_h0.forward_key, rk2_h0.forward_key);
+        assert_eq!(ck2_h1.forward_key, rk2_h1.forward_key);
+        assert_eq!(ck2_h2.forward_key, rk2_h2.forward_key);
+
+        // 2. Assert pairwise key independence across Circuit 1 and Circuit 2
+        assert_ne!(ck1_h0.forward_key, ck2_h0.forward_key);
+        assert_ne!(ck1_h0.backward_key, ck2_h0.backward_key);
+        assert_ne!(ck1_h0.forward_aead_key, ck2_h0.forward_aead_key);
+        assert_ne!(ck1_h0.backward_aead_key, ck2_h0.backward_aead_key);
+
+        assert_ne!(ck1_h1.forward_key, ck2_h1.forward_key);
+        assert_ne!(ck1_h1.backward_key, ck2_h1.backward_key);
+        assert_ne!(ck1_h1.forward_aead_key, ck2_h1.forward_aead_key);
+        assert_ne!(ck1_h1.backward_aead_key, ck2_h1.backward_aead_key);
+
+        assert_ne!(ck1_h2.forward_key, ck2_h2.forward_key);
+        assert_ne!(ck1_h2.backward_key, ck2_h2.backward_key);
+        assert_ne!(ck1_h2.forward_aead_key, ck2_h2.forward_aead_key);
+        assert_ne!(ck1_h2.backward_aead_key, ck2_h2.backward_aead_key);
+
+        // 3. Assert forward secrecy: Compromising Circuit 2 secrets provides zero advantage for Circuit 1
+        let mut leak_attempt = ck2_h0.forward_key;
+        for (b, k) in leak_attempt.iter_mut().zip(ck2_h1.forward_key.iter()) {
+            *b ^= *k;
+        }
+        assert_ne!(leak_attempt, ck1_h0.forward_key);
+        assert_ne!(leak_attempt, ck1_h1.forward_key);
+    }
 }

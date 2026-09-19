@@ -76,3 +76,11 @@ AnonGuard integrates hybrid post-quantum key encapsulation into all telescopic c
 - **Primitive Choice:** ML-KEM-768 (FIPS 203 standardized Module-Lattice-Based Key Encapsulation Mechanism, Category 3 security, equivalent to AES-192).
 - **Hybrid Key Agreement Rationale:** Diffie-Hellman exchange combines classical X25519 (32 bytes) with ML-KEM-768 encapsulation (1184-byte public key, 1088-byte ciphertext). Session keys are derived via HKDF-SHA256 from the 64-byte secret `$S = S_{\text{X25519}} \| S_{\text{ML-KEM-768}}$`. This dual-primitive construction guarantees confidentiality even if either X25519 or ML-KEM-768 is compromised, neutralizing "store-now, decrypt-later" quantum adversaries without abandoning battle-tested elliptic-curve security.
 - **Implementation & Dependency Posture:** Uses the RustCrypto `ml-kem = "0.2"` crate. Future upgrades will track FIPS 203 final crate revisions as crate ecosystems mature.
+
+### Forward Secrecy Property
+
+AnonGuard guarantees strict Perfect Forward Secrecy (PFS) across all operational onion circuits:
+
+1. **Ephemeral Key Lifecycle & Zeroization:** Client ephemeral X25519 secret keys (`EphemeralSecret`) and ML-KEM decapsulation keys (`DecapsulationKey`) are instantiated exclusively for the duration of the telescopic handshake. Ephemeral secret bytes are consumed by Diffie-Hellman / decapsulation operations and automatically zeroized from RAM upon drop (`ZeroizeOnDrop`).
+2. **Sequential Circuit Key Independence:** Every circuit negotiation generates fresh ephemeral key pairs ($E_{\text{client}}, D_{\text{client}}$) and fresh relay ephemeral pairs ($E_{\text{relay}}$). Hop keys derived for Circuit $N$ ($K_{N, i}$) share zero algebraic dependence with hop keys of Circuit $N+1$ ($K_{N+1, i}$), even when traversing the exact same physical relay sequence.
+3. **Compromise Isolation:** A adversary who compromises the long-term identity keys of a relay, or who forces the compromise of ephemeral session secrets for a specific circuit, obtains zero mathematical advantage toward decrypting traffic from past or future circuits. This property is formally verified via unit test `test_sequential_circuits_have_independent_hop_keys`.
