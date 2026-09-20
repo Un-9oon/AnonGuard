@@ -1,23 +1,13 @@
 //! Dataset Generator for Empirical Traffic-Morphing Classifier Evaluation.
 //!
-//! Generates synthetic packet timing flows for 5 distinct website classes:
-//! 1. Raw Un-morphed traffic: site-specific bursty inter-arrival delays.
-//! 2. RMT Morphed traffic: transformed via session-level RMT Wigner-Surmise GOE level-repulsion.
+//! Generates traffic timing flow datasets for 5 distinct website classes by calling
+//! AnonGuard's ACTUAL RMT traffic morphing engine (`anonguard::morphing::RmtTimingEngine`).
 
+use anonguard::morphing::{RmtEnsemble, RmtTimingEngine};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-/// Simulates GOE Wigner-Surmise level repulsion for a global session base delay (10.0 ms).
-fn wigner_surmise_goe(seed: u64) -> f64 {
-    // P(s) = (pi/2) * s * exp(-pi/4 * s^2)
-    // Inverse CDF: s = sqrt(-4/pi * ln(1 - u))
-    let u = ((seed % 997) as f64 + 1.0) / 998.0;
-    let s = (-4.0 / std::f64::consts::PI * (1.0 - u).ln()).sqrt();
-    let base_delay_ms = 10.0;
-    (base_delay_ms * s).max(0.5)
-}
-
-pub fn generate_traffic_dataset(
+pub async fn generate_traffic_dataset(
     output_path_raw: &str,
     output_path_morphed: &str,
     samples_per_class: usize,
@@ -45,6 +35,7 @@ pub fn generate_traffic_dataset(
     ];
 
     let mut seed: u64 = 42;
+    let rmt_engine = RmtTimingEngine::new(RmtEnsemble::GOE, 1.5, 500);
 
     for (class_id, class_base) in base_delays_per_class.iter().enumerate() {
         for _flow_idx in 0..samples_per_class {
@@ -57,7 +48,9 @@ pub fn generate_traffic_dataset(
                 let base = class_base[p % class_base.len()];
 
                 let raw_delay = (base + noise).max(0.1);
-                let morphed_delay = wigner_surmise_goe(seed);
+                // Call the REAL anonguard::morphing RMT timing engine for level repulsion delay
+                let delay_us = rmt_engine.next_delay_us();
+                let morphed_delay = (delay_us as f64) / 1000.0;
 
                 raw_packet_delays.push(format!("{raw_delay:.3}"));
                 morphed_packet_delays.push(format!("{morphed_delay:.3}"));
@@ -75,15 +68,17 @@ pub fn generate_traffic_dataset(
     Ok(())
 }
 
-fn main() -> std::io::Result<()> {
-    println!("Generating traffic morphing evaluation datasets...");
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    println!("Generating traffic morphing evaluation datasets using anonguard::morphing...");
     std::fs::create_dir_all("target/eval_data")?;
     generate_traffic_dataset(
         "target/eval_data/raw_unmorphed.csv",
         "target/eval_data/rmt_morphed.csv",
         200,
         20,
-    )?;
+    )
+    .await?;
     println!("Datasets successfully written to target/eval_data/");
     Ok(())
 }
@@ -92,8 +87,8 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_dataset_generation_produces_valid_files() {
+    #[tokio::test]
+    async fn test_dataset_generation_produces_valid_files() {
         let tmp_dir = std::env::temp_dir().join("anonguard_eval_test");
         let _ = std::fs::create_dir_all(&tmp_dir);
         let raw_path = tmp_dir.join("test_raw.csv");
@@ -105,6 +100,7 @@ mod tests {
             10,
             10,
         )
+        .await
         .unwrap();
 
         assert!(raw_path.exists());

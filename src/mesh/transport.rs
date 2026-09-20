@@ -285,12 +285,12 @@ fn derive_transport_keys(shared_secret: &[u8; 32], is_client: bool) -> ([u8; 32]
     let mut k_c2s = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
     hk.expand(b"AnonGuard-Client-To-Server-v2-HKDF", &mut k_c2s)
-        .expect("HKDF-Expand failed for C2S key");
+        .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     let mut k_s2c = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
     hk.expand(b"AnonGuard-Server-To-Client-v2-HKDF", &mut k_s2c)
-        .expect("HKDF-Expand failed for S2C key");
+        .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     if is_client {
         (k_c2s, k_s2c)

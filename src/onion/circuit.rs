@@ -109,7 +109,7 @@ impl HopCryptState {
         // SAFETY: ChaCha20Poly1305 in-place encryption over in-memory slices cannot fail because allocation is not required and nonce/key lengths (12 bytes/32 bytes) are fixed by type signatures.
         let tag = cipher
             .encrypt_in_place_detached(nonce.into(), header, pt_body)
-            .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
+            .expect("safe: ChaCha20Poly1305 in-place detached encryption over in-memory slice cannot fail; key is 32-byte array, nonce is 12-byte array, buffer payload length is checked in OnionCell::new");
         tag.into()
     }
 
@@ -131,7 +131,7 @@ impl HopCryptState {
         // SAFETY: ChaCha20Poly1305 in-place encryption over in-memory slices cannot fail because allocation is not required and nonce/key lengths (12 bytes/32 bytes) are fixed by type signatures.
         let tag = cipher
             .encrypt_in_place_detached(nonce.into(), header, pt_body)
-            .expect("ChaCha20Poly1305 in-place encryption cannot fail for correctly sized buffers");
+            .expect("safe: ChaCha20Poly1305 in-place detached encryption over in-memory slice cannot fail; key is 32-byte array, nonce is 12-byte array, buffer payload length is checked in OnionCell::new");
         tag.into()
     }
 
