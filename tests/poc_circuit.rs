@@ -27,7 +27,7 @@ fn deliver(client: &mut OnionCircuit, cell: &[u8; ONION_CELL_SIZE]) -> Result<()
 
 #[test]
 fn poc_replay_window_gap_off_by_one() {
-    let (ck, rk) = perform_client_relay_handshake();
+    let (ck, rk) = perform_client_relay_handshake().unwrap();
     let cid = 0x1122_3344;
     let mut client = OnionCircuit::new(cid);
     client.add_hop(ck).unwrap();

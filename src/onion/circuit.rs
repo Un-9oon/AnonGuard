@@ -19,8 +19,9 @@ use rand::rngs::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
-use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
+use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const MAX_HOPS: usize = 3;
 const BWD_COUNTER_BITS: u32 = 30;
@@ -64,6 +65,7 @@ impl From<&str> for CircuitError {
     }
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct HopKeys {
     pub forward_key: [u8; 32],
     pub backward_key: [u8; 32],
@@ -71,17 +73,6 @@ pub struct HopKeys {
     pub backward_mac: [u8; 32],
     pub forward_aead_key: [u8; 32],
     pub backward_aead_key: [u8; 32],
-}
-
-impl Drop for HopKeys {
-    fn drop(&mut self) {
-        self.forward_key.fill(0);
-        self.backward_key.fill(0);
-        self.forward_mac.fill(0);
-        self.backward_mac.fill(0);
-        self.forward_aead_key.fill(0);
-        self.backward_aead_key.fill(0);
-    }
 }
 
 /// Helper to build a 96-bit nonce from circuit_id and sequence_no
@@ -449,12 +440,13 @@ impl RelayCircuitHop {
             }
             self.expected_recv_seq = seq + 1;
 
-            let cell = OnionCell::parse(raw).map_err(|e| {
-                CircuitError::ParseError(format!("MAC verified but cell parse failed: {}", e))
+            let command = CellCommand::from_u8(raw[8]).ok_or_else(|| {
+                CircuitError::ParseError(format!("Unknown cell command: {}", raw[8]))
             })?;
+            let length = u16::from_be_bytes([raw[11], raw[12]]);
             return Ok(PeelOutcome::AddressedToThisRelay {
-                command: cell.command,
-                len: (cell.length as usize).min(cell.payload.len()),
+                command,
+                len: (length as usize).min(PAYLOAD_SIZE),
             });
         }
 
@@ -784,7 +776,13 @@ pub fn decode_relay_target(payload: &[u8]) -> Result<(String, u16), CircuitError
     Ok((host, port))
 }
 
-pub fn perform_client_relay_handshake() -> (HopKeys, HopKeys) {
+/// Simulates a complete client-relay key exchange in one call and returns the
+/// matching client-side and relay-side `HopKeys` for use in benchmarks and tests.
+///
+/// # Errors
+/// Returns `CircuitError::KeyDerivationFailed` if `OsRng` is unavailable or
+/// returns `CircuitError::General` if ML-KEM encapsulation or decapsulation fails.
+pub fn perform_client_relay_handshake() -> Result<(HopKeys, HopKeys), CircuitError> {
     let client_secret = EphemeralSecret::random_from_rng(OsRng);
     let client_public = X25519PublicKey::from(&client_secret);
     let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
@@ -795,8 +793,12 @@ pub fn perform_client_relay_handshake() -> (HopKeys, HopKeys) {
     let client_x25519_shared = client_secret.diffie_hellman(&relay_public);
     let relay_x25519_shared = relay_secret.diffie_hellman(&client_public);
 
-    let (ct, relay_mlkem_shared) = client_mlkem_ek.encapsulate(&mut OsRng).unwrap();
-    let client_mlkem_shared = client_mlkem_dk.decapsulate(&ct).unwrap();
+    let (ct, relay_mlkem_shared) = client_mlkem_ek
+        .encapsulate(&mut OsRng)
+        .map_err(|_| CircuitError::General("ML-KEM encapsulation failed".to_string()))?;
+    let client_mlkem_shared = client_mlkem_dk
+        .decapsulate(&ct)
+        .map_err(|_| CircuitError::General("ML-KEM decapsulation failed".to_string()))?;
 
     let mut client_hybrid = [0u8; 64];
     client_hybrid[0..32].copy_from_slice(client_x25519_shared.as_bytes());
@@ -806,15 +808,60 @@ pub fn perform_client_relay_handshake() -> (HopKeys, HopKeys) {
     relay_hybrid[0..32].copy_from_slice(relay_x25519_shared.as_bytes());
     relay_hybrid[32..64].copy_from_slice(relay_mlkem_shared.as_slice());
 
-    let client_keys = derive_hop_keys(&client_hybrid).unwrap();
-    let relay_keys = derive_hop_keys(&relay_hybrid).unwrap();
+    let client_keys = derive_hop_keys(&client_hybrid)?;
+    let relay_keys = derive_hop_keys(&relay_hybrid)?;
 
-    (client_keys, relay_keys)
+    Ok((client_keys, relay_keys))
 }
 
 #[cfg(test)]
 mod aead_key_derivation_tests {
     use super::*;
+
+    /// Rule 8 test for the perform_client_relay_handshake() -> Result conversion.
+    ///
+    /// Before the fix: the function returned `(HopKeys, HopKeys)` and contained
+    /// `.unwrap()` calls on ML-KEM encapsulate/decapsulate and derive_hop_keys —
+    /// any OsRng failure or (in principle) crypto-library error would panic
+    /// the entire daemon.
+    ///
+    /// After the fix: the function returns `Result<(HopKeys, HopKeys), CircuitError>`.
+    /// This test calls the REAL function and asserts:
+    ///   1. It succeeds (Ok) in normal conditions.
+    ///   2. The caller-side and relay-side keys are symmetric (matching forward/backward).
+    ///   3. Two sequential calls produce independent keys (forward secrecy).
+    #[test]
+    fn test_perform_client_relay_handshake_returns_result() {
+        // Call the real function (not a reimplementation) — must succeed and return Ok.
+        let result = perform_client_relay_handshake();
+        assert!(
+            result.is_ok(),
+            "perform_client_relay_handshake must succeed and return Ok, got: {:?}",
+            result.err()
+        );
+        let (ck, rk) = result.unwrap();
+
+        // Keys must be symmetric: client's forward == relay's forward (shared handshake).
+        assert_eq!(
+            ck.forward_key, rk.forward_key,
+            "Client forward_key must match relay forward_key after handshake"
+        );
+        assert_eq!(
+            ck.backward_key, rk.backward_key,
+            "Client backward_key must match relay backward_key after handshake"
+        );
+        assert_eq!(
+            ck.forward_aead_key, rk.forward_aead_key,
+            "Client forward_aead_key must match relay forward_aead_key"
+        );
+
+        // Two calls must produce independent keys (forward secrecy).
+        let (ck2, _) = perform_client_relay_handshake().unwrap();
+        assert_ne!(
+            ck.forward_key, ck2.forward_key,
+            "Sequential handshakes must produce independent keys"
+        );
+    }
 
     #[test]
     fn aead_key_is_independent_from_transport_and_mac_keys() {
@@ -926,7 +973,7 @@ mod aead_key_derivation_tests {
         );
 
         // 3. Client and Relay derive matching keys in perform_client_relay_handshake
-        let (ck, rk) = perform_client_relay_handshake();
+        let (ck, rk) = perform_client_relay_handshake().unwrap();
         assert_eq!(ck.forward_key, rk.forward_key);
         assert_eq!(ck.backward_key, rk.backward_key);
         assert_eq!(ck.forward_aead_key, rk.forward_aead_key);
@@ -936,13 +983,13 @@ mod aead_key_derivation_tests {
 
     #[test]
     fn test_sequential_circuits_have_independent_hop_keys() {
-        let (ck1_h0, rk1_h0) = perform_client_relay_handshake();
-        let (ck1_h1, rk1_h1) = perform_client_relay_handshake();
-        let (ck1_h2, rk1_h2) = perform_client_relay_handshake();
+        let (ck1_h0, rk1_h0) = perform_client_relay_handshake().unwrap();
+        let (ck1_h1, rk1_h1) = perform_client_relay_handshake().unwrap();
+        let (ck1_h2, rk1_h2) = perform_client_relay_handshake().unwrap();
 
-        let (ck2_h0, rk2_h0) = perform_client_relay_handshake();
-        let (ck2_h1, rk2_h1) = perform_client_relay_handshake();
-        let (ck2_h2, rk2_h2) = perform_client_relay_handshake();
+        let (ck2_h0, rk2_h0) = perform_client_relay_handshake().unwrap();
+        let (ck2_h1, rk2_h1) = perform_client_relay_handshake().unwrap();
+        let (ck2_h2, rk2_h2) = perform_client_relay_handshake().unwrap();
 
         // 1. Assert matching client/relay hop keys for each circuit
         assert_eq!(ck1_h0.forward_key, rk1_h0.forward_key);

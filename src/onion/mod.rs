@@ -291,9 +291,9 @@ mod tests {
     #[test]
     fn test_tampering_rejection() {
         // Build a valid 3-hop circuit
-        let (client_hop0, relay0_keys) = perform_client_relay_handshake();
-        let (client_hop1, relay1_keys) = perform_client_relay_handshake();
-        let (client_hop2, relay2_keys) = perform_client_relay_handshake();
+        let (client_hop0, relay0_keys) = perform_client_relay_handshake().unwrap();
+        let (client_hop1, relay1_keys) = perform_client_relay_handshake().unwrap();
+        let (client_hop2, relay2_keys) = perform_client_relay_handshake().unwrap();
 
         let mut client_circuit = OnionCircuit::new(77);
         client_circuit.add_hop(client_hop0).unwrap();
@@ -396,9 +396,9 @@ mod tests {
 
     #[test]
     fn test_3_hop_authenticated_onion_circuit() {
-        let (client_hop0, relay0_keys) = perform_client_relay_handshake();
-        let (client_hop1, relay1_keys) = perform_client_relay_handshake();
-        let (client_hop2, relay2_keys) = perform_client_relay_handshake();
+        let (client_hop0, relay0_keys) = perform_client_relay_handshake().unwrap();
+        let (client_hop1, relay1_keys) = perform_client_relay_handshake().unwrap();
+        let (client_hop2, relay2_keys) = perform_client_relay_handshake().unwrap();
 
         let mut client_circuit = OnionCircuit::new(42);
         client_circuit.add_hop(client_hop0).unwrap();

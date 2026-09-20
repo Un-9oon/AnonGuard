@@ -65,5 +65,21 @@ fn bench_aead(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_pow, bench_aead);
+fn bench_cell(c: &mut Criterion) {
+    let mut group = c.benchmark_group("OnionCell Parsing and Serialization");
+
+    let payload = vec![0u8; 995];
+    let cell = OnionCell::new(1234, 1, CellCommand::Data, 1, &payload).unwrap();
+    let raw = cell.serialize();
+
+    group.bench_function("cell_serialize", |b| b.iter(|| black_box(cell.serialize())));
+
+    group.bench_function("cell_parse", |b| {
+        b.iter(|| black_box(OnionCell::parse(black_box(&raw)).unwrap()))
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_pow, bench_aead, bench_cell);
 criterion_main!(benches);

@@ -152,7 +152,7 @@ jobs:
           cd release_assets
           for file in *.tar.gz *.zip *.deb; do
             if [ -f "$file" ]; then
-              cosign sign-blob --yes "$file" --bundle "$file.sigstore.json" || true
+              cosign sign-blob --yes "$file" --bundle "$file.sigstore.json"
             fi
           done
 
