@@ -123,6 +123,7 @@ impl ConsensusDocument {
     /// signatures and cannot be altered after signing.
     pub fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
+        hasher.update(b"AnonGuard-Consensus-v1");
         hasher.update(self.valid_after.to_be_bytes());
         hasher.update(self.valid_until.to_be_bytes());
 

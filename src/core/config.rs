@@ -22,6 +22,10 @@ pub struct GuardConfig {
     /// Enable statistical RMT (Wigner-surmise) traffic-timing morphing
     pub enable_rmt_morphing: bool,
     pub rmt_ensemble: String,
+    /// F6: Enable website fingerprinting traffic chaffing (WF-defense).
+    /// Default false because the current static-interval design is vulnerable to
+    /// ML classifiers and wastes bandwidth. Do not enable in production.
+    pub enable_chaffing: bool,
     /// Enable MTU chunk padding
     pub enable_padding: bool,
     /// Padding block size in bytes (e.g. 512, 1024, 1460)
@@ -74,6 +78,9 @@ pub struct GuardConfig {
     pub identity_key_path: std::path::PathBuf,
     /// Path to persist the client's Entry Guards (Hop 0 pins)
     pub guard_state_path: std::path::PathBuf,
+    /// Allow authority transport registration and gossip without pinned identity keys.
+    /// MUST be false by default to prevent MITM. Only for local testnets.
+    pub allow_unauthenticated_registration: bool,
 }
 
 impl Default for GuardConfig {
@@ -90,6 +97,7 @@ impl Default for GuardConfig {
             chaos_beta: 8.0 / 3.0,
             enable_rmt_morphing: false,
             rmt_ensemble: "goe".to_string(),
+            enable_chaffing: false,
             enable_padding: false,
             padding_block_size: 512,
             ja4_profile: "chrome_120".to_string(),
@@ -115,6 +123,7 @@ impl Default for GuardConfig {
             pow_difficulty: crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
             identity_key_path: std::path::PathBuf::from("/etc/anonguard/identity.key"),
             guard_state_path: std::path::PathBuf::from("/etc/anonguard/guards.json"),
+            allow_unauthenticated_registration: false,
         }
     }
 }

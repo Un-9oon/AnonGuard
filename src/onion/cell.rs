@@ -107,6 +107,9 @@ impl OnionCell {
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
         let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
         let length = u16::from_be_bytes([buf[11], buf[12]]);
+        if length as usize > PAYLOAD_SIZE {
+            return Err(format!("Parsed cell length {} exceeds maximum {}", length, PAYLOAD_SIZE));
+        }
 
         let mut ephemeral_key = [0u8; 32];
         ephemeral_key.copy_from_slice(&buf[13..45]);

@@ -71,3 +71,10 @@ path = "fuzz_targets/fuzz_consensus_deser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_proxy_node_parse"
+path = "fuzz_targets/fuzz_proxy_node_parse.rs"
+test = false
+doc = false
+bench = false

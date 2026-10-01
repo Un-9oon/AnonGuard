@@ -36,3 +36,22 @@ jobs:
 
       - name: Check Benchmark Compilation
         run: cargo bench --no-run
+
+  fuzz:
+    name: Run Fuzz Targets (Short Campaign)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run Fuzz Targets
+        run: |
+          cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_consensus_deser -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_proxy_node_parse -- -max_total_time=60

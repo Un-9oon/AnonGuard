@@ -35,16 +35,15 @@ async fn poc_quorum_depends_on_wall_clock_second() {
     );
     d.sign_with_key(&rk);
 
-    let a1 = Arc::new(DirectoryAuthority::with_difficulty(
-        "auth-1".into(),
-        "127.0.0.1:19301".into(),
-        8,
-    ));
-    let a2 = Arc::new(DirectoryAuthority::with_difficulty(
-        "auth-2".into(),
-        "127.0.0.1:19302".into(),
-        8,
-    ));
+    let mut a1_auth =
+        DirectoryAuthority::with_difficulty("auth-1".into(), "127.0.0.1:19301".into(), 8);
+    a1_auth.allow_unauthenticated_registration = true;
+    let a1 = Arc::new(a1_auth);
+
+    let mut a2_auth =
+        DirectoryAuthority::with_difficulty("auth-2".into(), "127.0.0.1:19302".into(), 8);
+    a2_auth.allow_unauthenticated_registration = true;
+    let a2 = Arc::new(a2_auth);
     a1.register_relay(d.clone()).await.unwrap();
     a2.register_relay(d.clone()).await.unwrap();
     let (v1, v2) = (a1.verifying_key(), a2.verifying_key());
@@ -107,18 +106,23 @@ async fn poc_quorum_with_divergent_relay_registration() {
     );
     d2.sign_with_key(&rk2);
 
-    let a1 = Arc::new(DirectoryAuthority::with_peer_authorities(
+    let mut a1_auth = DirectoryAuthority::with_peer_authorities(
         "auth-1".into(),
         "127.0.0.1:19303".into(),
         8,
-        vec!["127.0.0.1:19304".into()],
-    ));
-    let a2 = Arc::new(DirectoryAuthority::with_peer_authorities(
+        vec![("127.0.0.1:19304".into(), None)],
+    );
+    a1_auth.allow_unauthenticated_registration = true;
+    let a1 = Arc::new(a1_auth);
+
+    let mut a2_auth = DirectoryAuthority::with_peer_authorities(
         "auth-2".into(),
         "127.0.0.1:19304".into(),
         8,
-        vec!["127.0.0.1:19303".into()],
-    ));
+        vec![("127.0.0.1:19303".into(), None)],
+    );
+    a2_auth.allow_unauthenticated_registration = true;
+    let a2 = Arc::new(a2_auth);
 
     // Register relay-a ONLY to authority 1, and relay-b ONLY to authority 2
     a1.register_relay(d1.clone()).await.unwrap();

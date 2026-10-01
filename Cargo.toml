@@ -79,3 +79,6 @@ python = ["dep:pyo3"]
 [dev-dependencies]
 criterion = "0.8.2"
 tokio-test = "0.4"
+[[test]]
+name = "test_adversarial_robustness"
+path = "tests/test_adversarial_robustness.rs"

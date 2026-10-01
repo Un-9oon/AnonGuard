@@ -68,13 +68,21 @@ impl std::error::Error for SybilError {}
 /// Entries are automatically purged when they fall outside MAX_TIMESTAMP_DRIFT_SECS.
 pub struct NonceRegistry {
     /// Maps (node_id, nonce) -> timestamp of first observation
-    seen: Mutex<HashMap<(String, u64), u64>>,
+    seen: Mutex<NonceRegistryState>,
+}
+
+struct NonceRegistryState {
+    map: HashMap<(String, u64), u64>,
+    last_purge: u64,
 }
 
 impl NonceRegistry {
     pub fn new() -> Self {
         Self {
-            seen: Mutex::new(HashMap::new()),
+            seen: Mutex::new(NonceRegistryState {
+                map: HashMap::new(),
+                last_purge: 0,
+            }),
         }
     }
 
@@ -87,30 +95,33 @@ impl NonceRegistry {
     /// permanently disable replay detection — a disabled registry would silently allow
     /// nonce replay attacks, which is worse than operating on state that was mid-update.
     pub fn check_and_record(&self, node_id: &str, nonce: u64, current_time: u64) -> bool {
-        let mut seen = self
+        let mut state = self
             .seen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Purge expired entries (outside 2x the drift window for safety)
-        let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
-        seen.retain(|_, ts| *ts > expiry_threshold);
+        // Purge expired entries periodically (every 10 seconds) instead of every call (O(N) DoS defense)
+        if current_time.saturating_sub(state.last_purge) >= 10 {
+            let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
+            state.map.retain(|_, ts| *ts > expiry_threshold);
+            state.last_purge = current_time;
+        }
 
-        if seen.len() >= 100_000 {
+        if state.map.len() >= 100_000 {
             // Hard bound reached to prevent OOM. Cap by removing oldest entries (10%).
-            let mut entries: Vec<_> = seen.iter().map(|(k, v)| (k.clone(), *v)).collect();
+            let mut entries: Vec<_> = state.map.iter().map(|(k, v)| (k.clone(), *v)).collect();
             entries.sort_unstable_by_key(|(_, v)| *v);
             let to_remove = entries.len() / 10;
             for (k, _) in entries.into_iter().take(to_remove) {
-                seen.remove(&k);
+                state.map.remove(&k);
             }
         }
 
         let key = (node_id.to_string(), nonce);
-        if seen.contains_key(&key) {
+        if state.map.contains_key(&key) {
             return true; // Replay detected
         }
-        seen.insert(key, current_time);
+        state.map.insert(key, current_time);
         false // First time seen
     }
 }
@@ -239,24 +250,44 @@ pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
                     seen_ipv4_subnets.push(subnet);
                 }
                 std::net::IpAddr::V6(ipv6) => {
+                    let octets = ipv6.octets();
+                    
                     // Check if it's an IPv4-mapped IPv6 address (::ffff:a.b.c.d)
                     if let Some(ipv4) = ipv6.to_ipv4_mapped() {
-                        let octets = ipv4.octets();
-                        let subnet = [octets[0], octets[1]];
+                        let subnet = [ipv4.octets()[0], ipv4.octets()[1]];
                         if seen_ipv4_subnets.contains(&subnet) {
                             return Err(SybilError::SubnetCollision(subnet));
                         }
                         seen_ipv4_subnets.push(subnet);
                     } else if let Some(ipv4) = ipv6.to_ipv4() {
                         // Also check IPv4-compatible (::a.b.c.d)
-                        let octets = ipv4.octets();
-                        let subnet = [octets[0], octets[1]];
+                        let subnet = [ipv4.octets()[0], ipv4.octets()[1]];
+                        if seen_ipv4_subnets.contains(&subnet) {
+                            return Err(SybilError::SubnetCollision(subnet));
+                        }
+                        seen_ipv4_subnets.push(subnet);
+                    } else if octets[0] == 0x20 && octets[1] == 0x02 {
+                        // 6to4 (2002::/16) - extract embedded IPv4 from bytes 2 and 3
+                        let subnet = [octets[2], octets[3]];
+                        if seen_ipv4_subnets.contains(&subnet) {
+                            return Err(SybilError::SubnetCollision(subnet));
+                        }
+                        seen_ipv4_subnets.push(subnet);
+                    } else if octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x00 && octets[3] == 0x00 {
+                        // Teredo (2001:0000::/32) - extract embedded IPv4 (obfuscated by XORing with 0xFF in bytes 12-15)
+                        let subnet = [octets[12] ^ 0xFF, octets[13] ^ 0xFF];
+                        if seen_ipv4_subnets.contains(&subnet) {
+                            return Err(SybilError::SubnetCollision(subnet));
+                        }
+                        seen_ipv4_subnets.push(subnet);
+                    } else if octets[0..12] == [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0] {
+                        // NAT64 (64:ff9b::/96) - extract embedded IPv4 from bytes 12 and 13
+                        let subnet = [octets[12], octets[13]];
                         if seen_ipv4_subnets.contains(&subnet) {
                             return Err(SybilError::SubnetCollision(subnet));
                         }
                         seen_ipv4_subnets.push(subnet);
                     } else {
-                        let octets = ipv6.octets();
                         let subnet = [octets[0], octets[1], octets[2], octets[3]];
                         if seen_ipv6_subnets.contains(&subnet) {
                             return Err(SybilError::Ipv6SubnetCollision(subnet));
@@ -335,6 +366,16 @@ mod tests {
         assert_eq!(
             err_bracket,
             SybilError::Ipv6SubnetCollision([0x20, 0x01, 0x0d, 0xb8])
+        );
+
+        // Test IPv6 transition mechanism spoofing defense
+        // 198.51.10.1 (IPv4), 2002:c633:a01::1 (6to4), 2001:0:4136:e378:8000:63bf:39cc:f5fe (Teredo)
+        // They all embed 198.51.x.x -> subnet [198, 51]
+        let colliding_transition = ["198.51.10.1", "2002:c633:a01::1", "2001:0:4136:e378:8000:63bf:39cc:f5fe"];
+        let err_transition = validate_circuit_diversity(&colliding_transition).unwrap_err();
+        assert_eq!(
+            err_transition,
+            SybilError::SubnetCollision([198, 51])
         );
     }
 

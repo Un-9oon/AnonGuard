@@ -30,7 +30,8 @@ pub struct DirectoryAuthority {
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
-    pub peer_authorities: Vec<String>,
+    pub peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
+    pub allow_unauthenticated_registration: bool,
 }
 
 impl DirectoryAuthority {
@@ -59,6 +60,7 @@ impl DirectoryAuthority {
             )),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
+            allow_unauthenticated_registration: false,
         }
     }
 
@@ -67,7 +69,7 @@ impl DirectoryAuthority {
         authority_id: String,
         listen_addr: String,
         pow_difficulty: u32,
-        peer_authorities: Vec<String>,
+        peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
     ) -> Self {
         let mut auth = Self::with_difficulty(authority_id, listen_addr, pow_difficulty);
         auth.peer_authorities = peer_authorities;
@@ -180,6 +182,7 @@ impl DirectoryAuthority {
             )),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
+            allow_unauthenticated_registration: false,
         }
     }
 
@@ -278,13 +281,33 @@ impl DirectoryAuthority {
             relays.clone()
         };
 
-        for peer in &self.peer_authorities {
+        for (peer, pinned_key) in &self.peer_authorities {
             if peer == &self.listen_addr {
                 continue;
             }
+
+            if pinned_key.is_none() {
+                if !self.allow_unauthenticated_registration {
+                    error!(
+                        "Authority [{}]: Gossip to {} refused: no pinned identity key for peer authority. \
+                         This would be unauthenticated and vulnerable to active MITM. \
+                         Populate authority keys, or set allow_unauthenticated_registration = true.",
+                        self.authority_id, peer
+                    );
+                    continue;
+                } else {
+                    warn!(
+                        "Authority [{}]: No pinned identity key for peer authority {}. \
+                         Gossip will be unauthenticated (allow_unauthenticated_registration is enabled). \
+                         MITM risk!",
+                        self.authority_id, peer
+                    );
+                }
+            }
+
             match tokio::time::timeout(
                 tokio::time::Duration::from_millis(500),
-                Self::fetch_peer_relay_list(peer),
+                Self::fetch_peer_relay_list(peer, pinned_key.as_ref()),
             )
             .await
             {
@@ -324,10 +347,11 @@ impl DirectoryAuthority {
 
     async fn fetch_peer_relay_list(
         peer_addr: &str,
+        pinned_key: Option<&ed25519_dalek::VerifyingKey>,
     ) -> Result<Vec<RelayDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
         use tokio::net::TcpStream;
         let stream = TcpStream::connect(peer_addr).await?;
-        let mut session = SecureTransportSession::client_handshake(stream, None).await?;
+        let mut session = SecureTransportSession::client_handshake(stream, pinned_key).await?;
         session.write_frame(b"GET_RELAY_LIST").await?;
         let resp = session.read_frame().await?;
         let list: Vec<RelayDescriptor> = serde_json::from_slice(&resp)?;

@@ -562,48 +562,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                     }
 
-                    // Group the fetched documents by content digest, merging signatures for
-                    // every document that agrees on content. A malicious/stale authority whose
-                    // relay view disagrees just starts (or joins) a different, smaller group —
-                    // its signature never contaminates a group it doesn't actually attest to.
-                    let mut merged_by_digest: HashMap<
-                        [u8; 32],
-                        anonguard::mesh::ConsensusDocument,
-                    > = HashMap::new();
-                    for (_endpoint, doc) in &fetched_docs {
-                        let digest = doc.compute_digest();
-                        merged_by_digest
-                            .entry(digest)
-                            .and_modify(|existing| {
-                                existing.merge_signatures_from(doc);
-                            })
-                            .or_insert_with(|| doc.clone());
-                    }
-
+                    let docs: Vec<anonguard::mesh::ConsensusDocument> = fetched_docs.iter().map(|(_, doc)| doc.clone()).collect();
                     let now = anonguard::mesh::current_timestamp_secs();
+                    
                     let mut quorum_reached = false;
-                    for candidate in merged_by_digest.values() {
-                        match pool_clone
-                            .load_from_consensus(candidate, &auth_keys, quorum_thresh, now)
-                            .await
-                        {
-                            Ok(loaded) => {
-                                tracing::info!(
-                                    loaded = loaded,
-                                    signatures = candidate.signatures.len(),
-                                    responders = fetched_docs.len(),
-                                    "[AnonGuard Consensus] Verified M-of-N consensus document (merged across authorities) and loaded active relays"
-                                );
-                                quorum_reached = true;
-                                break;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    signatures = candidate.signatures.len(),
-                                    "[AnonGuard Consensus] Merged consensus candidate failed quorum verification"
-                                );
-                            }
+                    match pool_clone
+                        .load_from_multi_consensus(&docs, &auth_keys, quorum_thresh, now)
+                        .await
+                    {
+                        Ok(loaded) => {
+                            tracing::info!(
+                                loaded = loaded,
+                                responders = docs.len(),
+                                "[AnonGuard Consensus] Verified M-of-N consensus (intersection across authorities) and loaded active relays"
+                            );
+                            quorum_reached = true;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "[AnonGuard Consensus] Failed to load relays from directory consensus"
+                            );
                         }
                     }
                     if !quorum_reached && !fetched_docs.is_empty() {

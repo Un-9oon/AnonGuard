@@ -111,7 +111,9 @@ impl GatewayServer {
         );
 
         // Step 2: Spawn the Website Fingerprinting Traffic Chaffing Engine
-        crate::gateway::chaffing::ChaffingEngine::new(self.config.listen_addr.clone()).spawn();
+        if self.config.enable_chaffing {
+            crate::gateway::chaffing::ChaffingEngine::new(self.config.listen_addr.clone()).spawn();
+        }
 
         if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
             let auths = self.config.directory_authorities.clone();
@@ -186,21 +188,24 @@ impl GatewayServer {
                                 ed25519_dalek::VerifyingKey::from_bytes(key_bytes).ok()
                             });
 
-                        if pinned_vk.is_none() && !config.authority_identity_keys.is_empty() {
-                            warn!(
-                                "No pinned identity key for authority index {} ({}); \
-                                 handshake will be unauthenticated — MITM risk",
-                                auth_idx, auth_url
-                            );
-                        } else if config.authority_identity_keys.is_empty() {
-                            warn!(
-                                "authority_identity_keys is empty — relay registration to {} \
-                                 is unauthenticated and vulnerable to active MITM. \
-                                 Populate GuardConfig::authority_identity_keys from your \
-                                 authority's published Ed25519 key. \
-                                 See docs/reports/hardening_findings.md.",
-                                auth_url
-                            );
+                        if pinned_vk.is_none() {
+                            if !config.allow_unauthenticated_registration {
+                                error!(
+                                    "Registration to {} refused: no pinned identity key for authority index {}. \
+                                     This would be unauthenticated and vulnerable to active MITM. \
+                                     Populate GuardConfig::authority_identity_keys, or explicitly set \
+                                     allow_unauthenticated_registration = true for local testnets.",
+                                    auth_url, auth_idx
+                                );
+                                continue;
+                            } else {
+                                warn!(
+                                    "No pinned identity key for authority index {} ({}); \
+                                     handshake will be unauthenticated (allow_unauthenticated_registration is enabled). \
+                                     MITM risk!",
+                                    auth_idx, auth_url
+                                );
+                            }
                         }
 
                         let auth_host_port = auth_url.trim_start_matches("http://");
@@ -989,7 +994,6 @@ pub async fn stream_onion_circuit(
 /// `pinned_identity_keys[i]` MUST be the `identity_key_ed25519` from the consensus-verified
 /// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
 /// the corresponding private key via Ed25519 signature (MITM protection).
-
 pub async fn build_telescopic_circuit(
     stream: &mut TcpStream,
     circuit_id: u32,
@@ -1155,11 +1159,18 @@ fn spawn_onion_cell_reader(
     tokio::spawn(async move {
         loop {
             let mut buf = [0u8; ONION_CELL_SIZE];
-            if read_half.read_exact(&mut buf).await.is_err() {
-                break;
-            }
-            if tx.send(buf).await.is_err() {
-                break;
+            tokio::select! {
+                res = read_half.read_exact(&mut buf) => {
+                    if res.is_err() {
+                        break;
+                    }
+                    if tx.send(buf).await.is_err() {
+                        break;
+                    }
+                }
+                _ = tx.closed() => {
+                    break;
+                }
             }
         }
         // `tx` drops here on EOF/error/backpressure-close, so the paired `rx.recv()` on the
@@ -1179,12 +1190,19 @@ fn spawn_raw_downstream_reader(
     tokio::spawn(async move {
         loop {
             let mut buf = [0u8; PAYLOAD_SIZE];
-            match read_half.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).await.is_err() {
-                        break;
+            tokio::select! {
+                res = read_half.read(&mut buf) => {
+                    match res {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
                     }
+                }
+                _ = tx.closed() => {
+                    break;
                 }
             }
         }

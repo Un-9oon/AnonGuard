@@ -71,24 +71,72 @@ impl ProxyPool {
         Ok(loaded)
     }
 
-    /// Loads authenticated relays from a Directory Authority Consensus Document,
-    /// strictly enforcing Directory Authority signature quorum, timestamp validity,
-    /// and individual relay Ed25519 identity bindings.
-    ///
-    /// Performs a **full replace** of consensus-sourced entries so stale relays are
-    /// evicted on each refresh cycle (fixes #6 pool never evicts).
-    pub async fn load_from_consensus(
+    /// Loads authenticated relays from a set of Directory Authority Consensus Documents,
+    /// computing a majority intersection of individual relay descriptors to achieve
+    /// M-of-N consensus even if authorities have slightly differing overall views.
+    pub async fn load_from_multi_consensus(
         &self,
-        doc: &crate::mesh::consensus::ConsensusDocument,
+        docs: &[crate::mesh::consensus::ConsensusDocument],
         authorities: &std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
         quorum_threshold: usize,
         current_time: u64,
     ) -> Result<usize, String> {
-        if !doc.verify_quorum(authorities, quorum_threshold, current_time) {
-            return Err("Directory consensus document quorum verification failed".to_string());
+        let mut relay_votes: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+        let mut relay_metadata: std::collections::HashMap<String, crate::mesh::consensus::RelayDescriptor> = std::collections::HashMap::new();
+
+        for doc in docs {
+            // A document is valid if it is signed by AT LEAST 1 trusted authority. We only count votes from authorities that actually signed this document.
+            if current_time < doc.valid_after || current_time > doc.valid_until {
+                continue;
+            }
+            
+            let digest = doc.compute_digest();
+            let mut doc_valid_auths = Vec::new();
+            for sig in &doc.signatures {
+                if let Some(pubkey) = authorities.get(&sig.authority_id) {
+                    if let Ok(sig_bytes) = sig.signature_bytes.as_slice().try_into() {
+                        let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                        if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
+                            doc_valid_auths.push(sig.authority_id.clone());
+                        }
+                    }
+                }
+            }
+
+            if doc_valid_auths.is_empty() && quorum_threshold > 0 {
+                continue;
+            }
+
+            for relay in &doc.relays {
+                if !relay.verify_identity() {
+                    continue; // Skip relays with invalid or missing cryptographic identity signatures
+                }
+                
+                // Use the relay's node_id and signature as a unique key for its exact content
+                let key = format!("{}:{}", relay.node_id, hex::encode(&relay.signature));
+                let entry = relay_votes.entry(key.clone()).or_default();
+                for auth in &doc_valid_auths {
+                    entry.insert(auth.clone());
+                }
+                relay_metadata.insert(key, relay.clone());
+            }
         }
 
-        // Full replace: clear old consensus entries and repopulate from fresh document
+        // Filter relays that reached the quorum threshold
+        let mut final_relays = Vec::new();
+        for (key, auths) in relay_votes {
+            if auths.len() >= quorum_threshold {
+                if let Some(r) = relay_metadata.remove(&key) {
+                    final_relays.push(r);
+                }
+            }
+        }
+
+        if final_relays.is_empty() && quorum_threshold > 0 {
+            return Err("No relays reached the required consensus quorum".to_string());
+        }
+
+        // Full replace: clear old consensus entries and repopulate
         let mut list = self.nodes.write().await;
         let mut id_keys = self.identity_keys.write().await;
         list.retain(|_, n| {
@@ -97,10 +145,7 @@ impl ProxyPool {
         id_keys.clear();
 
         let mut loaded = 0;
-        for relay in &doc.relays {
-            if !relay.verify_identity() {
-                continue; // Skip relays with invalid or missing cryptographic identity signatures
-            }
+        for relay in final_relays {
             let scheme = if relay.host.starts_with("reverse://") {
                 relay.host.clone()
             } else {
@@ -108,15 +153,14 @@ impl ProxyPool {
             };
             if let Ok(mut node) = ProxyNode::parse(&scheme) {
                 node.enforce_remote_dns();
-                // Carry the is_exit flag from the consensus descriptor into the ProxyNode
                 node.is_exit = relay.is_exit;
                 let key = format!("{}:{}", node.host, node.port);
-                // Store identity key keyed by "host:port" for circuit handshake binding
                 id_keys.insert(key.clone(), relay.identity_key_ed25519);
                 list.insert(key, node);
                 loaded += 1;
             }
         }
+        
         Ok(loaded)
     }
 

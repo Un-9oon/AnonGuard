@@ -1,4 +1,3 @@
-use rand::Rng;
 use rand_distr::{Distribution, Exp};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -49,15 +48,10 @@ pub async fn stream_multipath_circuits(
 
         // Bounded Poisson-like Organic Metronome (mean 20ms, bounded 5ms-35ms)
         let exp_dist = Exp::new(1.0 / 20.0).unwrap();
-        let mut get_next_delay = move || {
+        let get_next_delay = move || {
             let mut rng = rand::thread_rng();
-            let mut delay: f64 = exp_dist.sample(&mut rng);
-            if delay < 5.0 {
-                delay = 5.0;
-            }
-            if delay > 35.0 {
-                delay = 35.0;
-            }
+            let delay: f64 = exp_dist.sample(&mut rng);
+            let delay = delay.clamp(5.0, 35.0);
             std::time::Duration::from_millis(delay as u64)
         };
 
@@ -169,25 +163,36 @@ pub async fn stream_multipath_circuits(
 
         loop {
             // Build a list of pinned Box futures that do a single `read` call (not read_exact)
-            let (res, idx) = std::future::poll_fn(|cx| {
-                for (i, ur) in upstream_reads.iter_mut().enumerate() {
-                    let rem = ONION_CELL_SIZE - read_bytes[i];
-                    let mut buf =
-                        tokio::io::ReadBuf::new(&mut bufs[i][read_bytes[i]..read_bytes[i] + rem]);
-                    match std::pin::Pin::new(&mut *ur).poll_read(cx, &mut buf) {
-                        std::task::Poll::Ready(Ok(())) => {
-                            let n = buf.filled().len();
-                            return std::task::Poll::Ready((Ok(n), i));
+            let (res, idx) = match tokio::time::timeout(
+                std::time::Duration::from_secs(60), // Idle timeout for multipath connection
+                std::future::poll_fn(|cx| {
+                    for (i, ur) in upstream_reads.iter_mut().enumerate() {
+                        let rem = ONION_CELL_SIZE - read_bytes[i];
+                        let mut buf = tokio::io::ReadBuf::new(
+                            &mut bufs[i][read_bytes[i]..read_bytes[i] + rem],
+                        );
+                        match std::pin::Pin::new(&mut *ur).poll_read(cx, &mut buf) {
+                            std::task::Poll::Ready(Ok(())) => {
+                                let n = buf.filled().len();
+                                return std::task::Poll::Ready((Ok(n), i));
+                            }
+                            std::task::Poll::Ready(Err(e)) => {
+                                return std::task::Poll::Ready((Err(e), i));
+                            }
+                            std::task::Poll::Pending => continue,
                         }
-                        std::task::Poll::Ready(Err(e)) => {
-                            return std::task::Poll::Ready((Err(e), i));
-                        }
-                        std::task::Poll::Pending => continue,
                     }
+                    std::task::Poll::Pending
+                }),
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    tracing::warn!("Multipath router stream idle timeout");
+                    break;
                 }
-                std::task::Poll::Pending
-            })
-            .await;
+            };
 
             match res {
                 Ok(0) => break, // EOF

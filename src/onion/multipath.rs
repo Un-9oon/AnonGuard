@@ -9,6 +9,12 @@ pub struct MultiPathSlicer {
     next_seq: u64,
 }
 
+impl Default for MultiPathSlicer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiPathSlicer {
     pub fn new() -> Self {
         Self { next_seq: 0 }
@@ -33,6 +39,12 @@ pub struct MultiPathReassembler {
     buffer: BTreeMap<u64, Vec<u8>>,
 }
 
+impl Default for MultiPathReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiPathReassembler {
     pub fn new() -> Self {
         Self {
@@ -52,6 +64,21 @@ impl MultiPathReassembler {
         let mut seq_bytes = [0u8; 8];
         seq_bytes.copy_from_slice(&payload[0..8]);
         let seq = u64::from_be_bytes(seq_bytes);
+
+        // --- F5: DoS Defense (Bound the Reassembly Buffer) ---
+        if seq < self.next_expected_seq {
+            return None; // Drop replayed or too-old packets
+        }
+
+        const MAX_SEQ_GAP: u64 = 100_000;
+        if seq - self.next_expected_seq > MAX_SEQ_GAP {
+            return None; // Drop aggressively out-of-bound sequences
+        }
+
+        const MAX_BUFFERED_ENTRIES: usize = 10_000;
+        if self.buffer.len() >= MAX_BUFFERED_ENTRIES && !self.buffer.contains_key(&seq) {
+            return None; // Drop new packets if the buffer is full
+        }
 
         let data = payload[8..].to_vec();
 
