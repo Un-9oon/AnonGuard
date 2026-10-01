@@ -1,4 +1,4 @@
-use crate::morphing::{LorenzAttractor, PoissonJitter, RmtTimingEngine};
+use crate::morphing::{AdversarialPerturbEngine, LorenzAttractor, PoissonJitter, RmtTimingEngine};
 use rand::Rng;
 use std::io::Result;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -8,6 +8,9 @@ pub enum JitterEngine {
     Poisson(PoissonJitter),
     Chaos(LorenzAttractor),
     Rmt(RmtTimingEngine),
+    /// Step 3: Dynamic Adversarial Perturbation — FGSM-inspired micro-delays
+    /// that push each traffic trace out-of-distribution for DL WF classifiers.
+    Adversarial(AdversarialPerturbEngine),
 }
 
 impl JitterEngine {
@@ -18,6 +21,10 @@ impl JitterEngine {
             JitterEngine::Rmt(q) => {
                 let delay = q.next_delay_us();
                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+            }
+            JitterEngine::Adversarial(a) => {
+                // Clone then apply — the shared Arc counters propagate correctly.
+                a.clone().apply().await;
             }
         }
     }
@@ -114,6 +121,15 @@ where
                                 let target = q.next_chunk_size();
                                 std::cmp::min(target, data.len())
                             }
+                            JitterEngine::Adversarial(_) => {
+                                // Use RMT-style random sharding so packet sizes vary
+                                if data.len() <= 64 {
+                                    data.len()
+                                } else {
+                                    rand::thread_rng()
+                                        .gen_range(64..=std::cmp::min(data.len(), 2048))
+                                }
+                            }
                         };
                         let (chunk, rest) = data.split_at(std::cmp::min(shard_len, data.len()));
                         data = rest;
@@ -124,6 +140,9 @@ where
                             JitterEngine::Rmt(q) => {
                                 let delay = q.next_delay_us();
                                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+                            }
+                            JitterEngine::Adversarial(a) => {
+                                a.clone().apply().await;
                             }
                         }
                         if b_write.write_all(chunk).await.is_err() {
@@ -162,6 +181,14 @@ where
                                 let target = q.next_chunk_size();
                                 std::cmp::min(target, data.len())
                             }
+                            JitterEngine::Adversarial(_) => {
+                                if data.len() <= 64 {
+                                    data.len()
+                                } else {
+                                    rand::thread_rng()
+                                        .gen_range(64..=std::cmp::min(data.len(), 2048))
+                                }
+                            }
                         };
                         let (chunk, rest) = data.split_at(std::cmp::min(shard_len, data.len()));
                         data = rest;
@@ -172,6 +199,9 @@ where
                             JitterEngine::Rmt(q) => {
                                 let delay = q.next_delay_us();
                                 tokio::time::sleep(std::time::Duration::from_micros(delay)).await;
+                            }
+                            JitterEngine::Adversarial(a) => {
+                                a.clone().apply().await;
                             }
                         }
                         if a_write.write_all(chunk).await.is_err() {

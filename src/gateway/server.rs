@@ -110,6 +110,9 @@ impl GatewayServer {
             MAX_CONCURRENT_PER_IP
         );
 
+        // Step 2: Spawn the Website Fingerprinting Traffic Chaffing Engine
+        crate::gateway::chaffing::ChaffingEngine::new(self.config.listen_addr.clone()).spawn();
+
         if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
             let auths = self.config.directory_authorities.clone();
             let identity_key = self.relay_identity_key.clone();
@@ -165,12 +168,47 @@ impl GatewayServer {
                     };
                     let request = format!("REGISTER_RELAY {}", json_payload);
 
-                    for auth_url in &auths {
+                    for (auth_idx, auth_url) in auths.iter().enumerate() {
+                        // [B3] Wire authority identity key pinning (STS, Diffie-van Oorschot-Wiener 1992).
+                        //
+                        // The correct mechanism (sign ephemeral DH keys with long-term identity key,
+                        // verify against a pinned key) is already implemented in
+                        // SecureTransportSession::client_handshake. This was a wiring bug — pinned_key
+                        // was always None, making the handshake vulnerable to active MITM impersonation.
+                        //
+                        // Bootstrap: authority_identity_keys is empty by default. Operators MUST
+                        // pre-populate it from their authority's published Ed25519 key. An empty list
+                        // produces a startup warning — see docs/reports/hardening_findings.md.
+                        let pinned_vk: Option<ed25519_dalek::VerifyingKey> = config
+                            .authority_identity_keys
+                            .get(auth_idx)
+                            .and_then(|key_bytes| {
+                                ed25519_dalek::VerifyingKey::from_bytes(key_bytes).ok()
+                            });
+
+                        if pinned_vk.is_none() && !config.authority_identity_keys.is_empty() {
+                            warn!(
+                                "No pinned identity key for authority index {} ({}); \
+                                 handshake will be unauthenticated — MITM risk",
+                                auth_idx, auth_url
+                            );
+                        } else if config.authority_identity_keys.is_empty() {
+                            warn!(
+                                "authority_identity_keys is empty — relay registration to {} \
+                                 is unauthenticated and vulnerable to active MITM. \
+                                 Populate GuardConfig::authority_identity_keys from your \
+                                 authority's published Ed25519 key. \
+                                 See docs/reports/hardening_findings.md.",
+                                auth_url
+                            );
+                        }
+
                         let auth_host_port = auth_url.trim_start_matches("http://");
                         if let Ok(stream) = tokio::net::TcpStream::connect(auth_host_port).await {
                             if let Ok(mut session) =
                                 crate::mesh::transport::SecureTransportSession::client_handshake(
-                                    stream, None,
+                                    stream,
+                                    pinned_vk.as_ref(), // [B3] pass pinned key; None = warn only, not fail
                                 )
                                 .await
                             {
@@ -187,6 +225,12 @@ impl GatewayServer {
                                         String::from_utf8_lossy(&msg)
                                     );
                                 }
+                            } else {
+                                warn!(
+                                    "Relay registration to {} rejected: handshake failed. \
+                                     Check authority_identity_keys configuration.",
+                                    auth_url
+                                );
                             }
                         }
                     }
@@ -851,19 +895,27 @@ pub async fn stream_onion_circuit(
         let mut buf = [0u8; PAYLOAD_SIZE];
         let stream_id = 1u16;
         let mut client_seq = 2u32; // Seq 1 was RELAY cell
-        let mut dummy_interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+        let mut padding_engine = crate::onion::padding::AdaptivePaddingEngine::default_config();
 
         loop {
             let mut is_dummy = false;
+            let delay = padding_engine.next_event_delay();
             let n = tokio::select! {
                 res = client_read.read(&mut buf) => match res {
                     Ok(0) => break,
-                    Ok(n) => n,
+                    Ok(n) => {
+                        padding_engine.record_real_packet();
+                        n
+                    },
                     Err(_) => break,
                 },
-                _ = dummy_interval.tick() => {
-                    is_dummy = true;
-                    0
+                _ = tokio::time::sleep(delay) => {
+                    if padding_engine.should_send_padding() {
+                        is_dummy = true;
+                        0
+                    } else {
+                        continue;
+                    }
                 }
             };
 
@@ -1485,6 +1537,89 @@ mod tests {
         assert!(
             ds_cell_ref.is_none(),
             "Unset cell receiver must safely evaluate to None without panicking"
+        );
+    }
+
+    // ── B3: Authority identity key pinning — MITM repro ───────────────────────
+    //
+    // Mechanism: the old code always called client_handshake(stream, None). An attacker
+    // positioned between the relay and the authority (active MITM) can impersonate the
+    // authority, complete the unauthenticated DH handshake, and silently drop or replay
+    // REGISTER_RELAY frames.
+    //
+    // This test directly exercises SecureTransportSession::client_handshake (the same
+    // function the production registration loop calls) to verify:
+    //   1. With pinned_key = None: handshake succeeds even against a wrong-key server.
+    //   2. With pinned_key = Some(&correct_key): handshake succeeds.
+    //   3. With pinned_key = Some(&wrong_key): handshake fails with PermissionDenied —
+    //      this is the post-fix behavior that catches an active MITM.
+    //
+    // Reference: Diffie, van Oorschot, Wiener, "Authentication and Authenticated Key
+    // Exchanges", Designs, Codes and Cryptography, 1992 (STS protocol). The mechanism
+    // is already correctly implemented in SecureTransportSession; this was a wiring bug.
+    #[tokio::test]
+    async fn test_b3_mitm_wrong_pinned_key_rejected() {
+        use crate::mesh::transport::SecureTransportSession;
+        use ed25519_dalek::SigningKey;
+        use rand::rngs::OsRng;
+        use tokio::net::{TcpListener, TcpStream};
+
+        // Generate two authority key pairs: `real_auth` (genuine) and `mitm_auth` (attacker).
+        let real_auth_key = SigningKey::generate(&mut OsRng);
+        let real_auth_vk = real_auth_key.verifying_key();
+        let mitm_auth_key = SigningKey::generate(&mut OsRng);
+
+        // ── Scenario 1: relay connects to MITM server, pinned_key = None (old, broken code) ──
+        // Expect: handshake SUCCEEDS even though the server is using the MITM key.
+        // This is the "repro" — demonstrates the vulnerability before the fix.
+        let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr1 = listener1.local_addr().unwrap();
+        let mitm_key_clone = mitm_auth_key.clone();
+        let _srv1 = tokio::spawn(async move {
+            let (s, _) = listener1.accept().await.unwrap();
+            let _ = SecureTransportSession::server_handshake(s, Some(&mitm_key_clone)).await;
+        });
+        let client1 = TcpStream::connect(addr1).await.unwrap();
+        let result1 = SecureTransportSession::client_handshake(client1, None).await;
+        assert!(
+            result1.is_ok(),
+            "Unpinned handshake should succeed (demonstrates pre-fix vulnerability)"
+        );
+
+        // ── Scenario 2: relay connects to real authority, pinned_key = correct (post-fix, happy path) ──
+        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let real_key_clone = real_auth_key.clone();
+        let _srv2 = tokio::spawn(async move {
+            let (s, _) = listener2.accept().await.unwrap();
+            let _ = SecureTransportSession::server_handshake(s, Some(&real_key_clone)).await;
+        });
+        let client2 = TcpStream::connect(addr2).await.unwrap();
+        let result2 = SecureTransportSession::client_handshake(client2, Some(&real_auth_vk)).await;
+        assert!(
+            result2.is_ok(),
+            "Pinned handshake with correct key must succeed"
+        );
+
+        // ── Scenario 3: relay connects to MITM server, pinned_key = real authority key (post-fix) ──
+        // Expect: handshake FAILS with PermissionDenied — the fix works.
+        let listener3 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr3 = listener3.local_addr().unwrap();
+        let _srv3 = tokio::spawn(async move {
+            let (s, _) = listener3.accept().await.unwrap();
+            let _ = SecureTransportSession::server_handshake(s, Some(&mitm_auth_key)).await;
+        });
+        let client3 = TcpStream::connect(addr3).await.unwrap();
+        let result3 = SecureTransportSession::client_handshake(client3, Some(&real_auth_vk)).await;
+        assert!(
+            result3.is_err(),
+            "Pinned handshake against MITM server MUST fail"
+        );
+        let err3 = result3.err().unwrap();
+        assert_eq!(
+            err3.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "MITM must be rejected with PermissionDenied, not silently accepted"
         );
     }
 }

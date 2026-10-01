@@ -50,6 +50,20 @@ pub struct GuardConfig {
     pub authority_id: String,
     /// List of trusted Directory Authority endpoints for consensus verification
     pub directory_authorities: Vec<String>,
+    /// [B3] Pinned Ed25519 identity keys (raw 32-byte arrays, hex-encoded) for each
+    /// Directory Authority listed in `directory_authorities`. When non-empty, the relay
+    /// registration handshake enforces STS-style key pinning against the first key in
+    /// this list (matching the authority ordering in `directory_authorities`). An empty
+    /// list means unauthenticated mode, which is insecure and logged as a warning.
+    ///
+    /// Bootstrap: bake in the canonical authority keys at compile time (mirroring Tor's
+    /// hardcoded dirauth list). Rotation procedure: update this list and redeploy; old
+    /// keys can be kept for a grace period by appending rather than replacing. See
+    /// docs/reports/hardening_findings.md for the full bootstrap threat model.
+    ///
+    /// Reference: Diffie, van Oorschot, Wiener, "Authentication and Authenticated Key
+    /// Exchanges", Designs, Codes and Cryptography, 1992 (STS protocol).
+    pub authority_identity_keys: Vec<[u8; 32]>,
     /// Gateway listen address
     pub listen_addr: String,
     /// Apply OS/kernel-level nftables firewall kill switch (Linux with root/CAP_NET_ADMIN)
@@ -92,6 +106,10 @@ impl Default for GuardConfig {
             authority_mode: false,
             authority_id: "authority-default".to_string(),
             directory_authorities: Vec::new(),
+            // [B3] Empty by default — operators MUST populate this from their authority's
+            // published Ed25519 identity key. An empty list triggers a warning at startup.
+            // See docs/reports/hardening_findings.md for bootstrap threat model.
+            authority_identity_keys: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
             enable_firewall_killswitch: false,
             pow_difficulty: crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,

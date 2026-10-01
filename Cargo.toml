@@ -41,6 +41,7 @@ url = "2.5"
 # Cryptography & Hashing
 sha2 = "=0.10.9"
 rand = "0.8"
+rand_distr = "0.4"
 x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 chacha20 = "0.9"
 chacha20poly1305 = "=0.10.1"

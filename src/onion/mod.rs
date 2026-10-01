@@ -4,6 +4,7 @@
 
 pub mod cell;
 pub mod circuit;
+pub mod padding;
 
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{
