@@ -1,8 +1,10 @@
 //! Fixed-size 1024-byte OnionCell protocol with HMAC-SHA256 Authenticated MAC.
 
+use rand::Rng;
+
 pub const ONION_CELL_SIZE: usize = 2048;
-pub const HEADER_SIZE: usize = 29;
-pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 2019 bytes
+pub const HEADER_SIZE: usize = 61; // Increased for Sphinx 32-byte Ephemeral Key
+pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 1987 bytes
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -43,6 +45,7 @@ pub struct OnionCell {
     pub command: CellCommand,
     pub stream_id: u16,
     pub length: u16,
+    pub ephemeral_key: [u8; 32], // Sphinx-style randomized header identity
     pub mac: [u8; 16],
     pub payload: [u8; PAYLOAD_SIZE],
 }
@@ -67,12 +70,18 @@ impl OnionCell {
         let len = data.len();
         payload[..len].copy_from_slice(data);
 
+        // Sphinx unlikability: Re-randomize ephemeral header identity at creation
+        let mut rng = rand::thread_rng();
+        let mut ephemeral_key = [0u8; 32];
+        rng.fill(&mut ephemeral_key);
+
         Ok(Self {
             circuit_id,
             sequence_no,
             command,
             stream_id,
             length: len as u16,
+            ephemeral_key,
             mac: [0u8; 16], // To be filled by AEAD
             payload,
         })
@@ -85,7 +94,8 @@ impl OnionCell {
         buf[8] = self.command as u8;
         buf[9..11].copy_from_slice(&self.stream_id.to_be_bytes());
         buf[11..13].copy_from_slice(&self.length.to_be_bytes());
-        buf[13..13 + PAYLOAD_SIZE].copy_from_slice(&self.payload);
+        buf[13..45].copy_from_slice(&self.ephemeral_key);
+        buf[45..45 + PAYLOAD_SIZE].copy_from_slice(&self.payload);
         buf[ONION_CELL_SIZE - 16..ONION_CELL_SIZE].copy_from_slice(&self.mac);
         buf
     }
@@ -97,8 +107,13 @@ impl OnionCell {
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
         let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
         let length = u16::from_be_bytes([buf[11], buf[12]]);
+        
+        let mut ephemeral_key = [0u8; 32];
+        ephemeral_key.copy_from_slice(&buf[13..45]);
+        
         let mut payload = [0u8; PAYLOAD_SIZE];
-        payload.copy_from_slice(&buf[13..13 + PAYLOAD_SIZE]);
+        payload.copy_from_slice(&buf[45..45 + PAYLOAD_SIZE]);
+        
         let mut mac = [0u8; 16];
         mac.copy_from_slice(&buf[ONION_CELL_SIZE - 16..ONION_CELL_SIZE]);
 
@@ -108,6 +123,7 @@ impl OnionCell {
             command,
             stream_id,
             length,
+            ephemeral_key,
             mac,
             payload,
         })

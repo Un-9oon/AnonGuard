@@ -5,7 +5,7 @@
 pub mod cell;
 pub mod circuit;
 pub mod padding;
-
+pub mod multipath;
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{
     build_create_cell, decode_extend_payload, derive_hop_keys, encode_extend_payload,
@@ -82,7 +82,7 @@ mod tests {
         ) = match peel_1 {
             PeelOutcome::AddressedToThisRelay { command, len } => {
                 assert_eq!(command, CellCommand::Extend);
-                decode_extend_payload(&wire_buffer_1[13..13 + len]).unwrap()
+                decode_extend_payload(&wire_buffer_1[45..45 + len]).unwrap()
             }
             PeelOutcome::ForwardDownstream => panic!("Guard must consume EXTEND cell!"),
         };
@@ -143,7 +143,7 @@ mod tests {
             match peel_2_middle {
                 PeelOutcome::AddressedToThisRelay { command, len } => {
                     assert_eq!(command, CellCommand::Extend);
-                    decode_extend_payload(&to_middle[13..13 + len]).unwrap()
+                    decode_extend_payload(&to_middle[45..45 + len]).unwrap()
                 }
                 PeelOutcome::ForwardDownstream => panic!("Middle must consume EXTEND cell!"),
             };
@@ -204,7 +204,7 @@ mod tests {
         match p2 {
             PeelOutcome::AddressedToThisRelay { command, len } => {
                 assert_eq!(command, CellCommand::Data);
-                assert_eq!(&to_e[13..13 + len], payload);
+                assert_eq!(&to_e[45..45 + len], payload);
             }
             PeelOutcome::ForwardDownstream => panic!("Exit must consume authenticated data"),
         }
@@ -331,7 +331,7 @@ mod tests {
         match result {
             Ok(PeelOutcome::AddressedToThisRelay { len, .. }) => {
                 assert_ne!(
-                    &to_exit[13..13 + len],
+                    &to_exit[45..45 + len],
                     payload,
                     "CRITICAL: Tampered cell was accepted with original payload — AEAD integrity broken!"
                 );
@@ -434,7 +434,7 @@ mod tests {
         match peel_exit {
             PeelOutcome::AddressedToThisRelay { command, len } => {
                 assert_eq!(command, CellCommand::Data);
-                assert_eq!(&to_exit[13..13 + len], secret_payload);
+                assert_eq!(&to_exit[45..45 + len], secret_payload);
             }
             PeelOutcome::ForwardDownstream => {
                 panic!("Exit node should have consumed the cell!")

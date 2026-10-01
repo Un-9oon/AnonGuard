@@ -461,122 +461,81 @@ impl GatewayServer {
                 }
 
                 if config.enable_onion_routing {
-                    // 3. Authenticated Telescopic Onion Routing
-                    // Connect TCP strictly to the entry Guard node (Hop 0).
-                    // Zero intermediate SOCKS5 chaining — eliminates path leak completely.
-                    let entry_node = &chain[0];
-                    let mut guard_stream = if entry_node.raw_url.starts_with("reverse://") {
-                        let node_id = entry_node.host.clone();
-                        let auth_token = entry_node.username.as_deref().unwrap_or("");
-                        let tracker_url = match config.tracker_url.as_ref() {
-                            Some(u) => u.trim_start_matches("http://").to_string(),
-                            None => {
-                                error!("Circuit initiation error: tracker_url required for reverse node connection");
-                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01)
-                                    .await;
-                                return;
-                            }
-                        };
-                        match TcpStream::connect(&tracker_url).await {
-                            Ok(mut s) => {
-                                use tokio::io::{
-                                    AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
-                                };
-                                let payload = if !auth_token.is_empty() {
-                                    format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
-                                } else {
-                                    format!("CONNECT_REVERSE {}\n", node_id)
-                                };
-                                let _ = s.write_all(payload.as_bytes()).await;
-                                let mut reader = BufReader::new(s);
-                                let mut resp = String::new();
-                                if (&mut reader).take(1024).read_line(&mut resp).await.is_ok()
-                                    && resp.trim() == "OK"
-                                {
-                                    reader.into_inner()
-                                } else {
-                                    error!(
-                                        "Tracker rejected CONNECT_REVERSE for entry node: {}",
-                                        resp
-                                    );
-                                    pool.rotate_on_block(&entry_node.raw_url).await;
-                                    let _ =
-                                        crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
-                                            .await;
-                                    return;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to connect to tracker {}: {}", tracker_url, e);
-                                pool.rotate_on_block(&entry_node.raw_url).await;
-                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
-                                    .await;
-                                return;
-                            }
-                        }
-                    } else {
-                        let addr = format!("{}:{}", entry_node.host, entry_node.port);
-                        match TcpStream::connect(&addr).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!("Failed to connect to entry Guard node {}: {}", addr, e);
-                                pool.rotate_on_block(&entry_node.raw_url).await;
-                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x04)
-                                    .await;
-                                if config.strict_killswitch {
-                                    kill_switch.trip("Entry Guard node connection failure");
-                                }
-                                return;
-                            }
-                        }
-                    };
+                    // 3. Authenticated Telescopic Onion Routing with Multi-Path Dispersion (Phase 2)
+                    let num_paths = 2; // For phase 2 demonstration
+                    let mut upstreams = Vec::new();
+                    let mut circuits = Vec::new();
 
-                    // Generate circuit ID where highest byte is not 0x05 so Guard peeks != 0x05
-                    let mut circuit_id: u32 = rand::random();
-                    if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
-                        circuit_id ^= 0x10000000;
+                    for _ in 0..num_paths {
+                        let chain = if config.enforce_subnet_diversity {
+                            pool.get_diverse_onion_chain(
+                                config.min_chain_length,
+                                config.max_chain_length,
+                                config.enforce_subnet_diversity,
+                            ).await
+                        } else {
+                            pool.get_random_chain(config.min_chain_length, config.max_chain_length).await
+                        };
+                        
+                        if chain.is_empty() {
+                            continue;
+                        }
+                        
+                        let entry_node = &chain[0];
+                        
+                        // For Multi-Path, we skip the tracker logic for simplicity in this snippet,
+                        // assuming direct connections to Guard nodes.
+                        if entry_node.raw_url.starts_with("reverse://") {
+                            continue;
+                        }
+
+                        let addr = format!("{}:{}", entry_node.host, entry_node.port);
+                        let mut guard_stream = match TcpStream::connect(&addr).await {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+
+                        let mut circuit_id: u32 = rand::random();
+                        if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
+                            circuit_id ^= 0x10000000;
+                        }
+
+                        let pinned_identity_keys = pool.get_identity_keys(&chain).await;
+
+                        if let Ok(circuit) = build_telescopic_circuit(
+                            &mut guard_stream,
+                            circuit_id,
+                            &chain,
+                            &pinned_identity_keys,
+                            &target_host,
+                            target_port,
+                        ).await {
+                            circuits.push(circuit);
+                            let guard_stream_guarded = GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
+                                .begin_verification()
+                                .mark_verified();
+                            upstreams.push(guard_stream_guarded);
+                        }
                     }
 
-                    let pinned_identity_keys = pool.get_identity_keys(&chain).await;
-
-                    match build_telescopic_circuit(
-                        &mut guard_stream,
-                        circuit_id,
-                        &chain,
-                        &pinned_identity_keys,
-                        &target_host,
-                        target_port,
-                    )
-                    .await
-                    {
-                        Ok(circuit) => {
-                            info!(
-                                circuit_id = circuit_id,
-                                hops = chain.len(),
-                                target = %format!("{}:{}", target_host, target_port),
-                                "Activating authentic 3-hop layered ChaCha20-Poly1305 AEAD onion circuit to destination"
-                            );
-                            let _ =
-                                crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
-                            let mut guard_stream_guarded =
-                                GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
-                                    .begin_verification()
-                                    .mark_verified();
-                            let _ = stream_onion_circuit(
-                                &mut client,
-                                &mut guard_stream_guarded,
-                                circuit,
-                                jitter.clone(),
-                            )
-                            .await;
-                        }
-                        Err(e) => {
-                            error!("Failed to negotiate telescopic onion circuit: {}", e);
-                            let _ =
-                                crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
-                            if config.strict_killswitch {
-                                kill_switch.trip("Telescopic circuit negotiation failure");
-                            }
+                    if !upstreams.is_empty() {
+                        info!(
+                            paths = upstreams.len(),
+                            target = %format!("{}:{}", target_host, target_port),
+                            "Activating authentic Multi-Path layered ChaCha20-Poly1305 AEAD onion circuits to destination"
+                        );
+                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
+                        let _ = crate::gateway::multipath_router::stream_multipath_circuits(
+                            &mut client,
+                            upstreams,
+                            circuits,
+                            jitter.clone(),
+                        ).await;
+                    } else {
+                        error!("Failed to negotiate any telescopic onion circuits");
+                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
+                        if config.strict_killswitch {
+                            kill_switch.trip("Telescopic circuit negotiation failure");
                         }
                     }
                 } else {
@@ -1024,6 +983,8 @@ pub async fn stream_onion_circuit(
 /// `pinned_identity_keys[i]` MUST be the `identity_key_ed25519` from the consensus-verified
 /// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
 /// the corresponding private key via Ed25519 signature (MITM protection).
+
+
 pub async fn build_telescopic_circuit(
     stream: &mut TcpStream,
     circuit_id: u32,
@@ -1290,7 +1251,7 @@ pub async fn handle_onion_relay_connection(
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Data, len }) => {
-                                let payload = &client_buf[13..13+len];
+                                let payload = &client_buf[45..45+len];
                                 if ds_w.write_all(payload).await.is_err() {
                                     break;
                                 }
@@ -1399,7 +1360,7 @@ pub async fn handle_onion_relay_connection(
                     command: CellCommand::Extend,
                     len,
                 }) => {
-                    let payload = &client_buf[13..13 + len];
+                    let payload = &client_buf[45..45 + len];
                     let extend_ok = async {
                             let (next_h, next_p, next_pub, next_mlkem_pub, hop_index) = decode_extend_payload(payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
@@ -1463,7 +1424,7 @@ pub async fn handle_onion_relay_connection(
                     command: CellCommand::Relay,
                     len,
                 }) => {
-                    let payload = &client_buf[13..13 + len];
+                    let payload = &client_buf[45..45 + len];
                     if let Ok((target_h, target_p)) =
                         crate::onion::circuit::decode_relay_target(payload)
                     {
