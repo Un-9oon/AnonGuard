@@ -4,8 +4,8 @@
 
 pub mod cell;
 pub mod circuit;
-pub mod padding;
 pub mod multipath;
+pub mod padding;
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{
     build_create_cell, decode_extend_payload, derive_hop_keys, encode_extend_payload,

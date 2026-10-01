@@ -107,13 +107,13 @@ impl OnionCell {
             .ok_or_else(|| format!("Unknown cell command: {}", buf[8]))?;
         let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
         let length = u16::from_be_bytes([buf[11], buf[12]]);
-        
+
         let mut ephemeral_key = [0u8; 32];
         ephemeral_key.copy_from_slice(&buf[13..45]);
-        
+
         let mut payload = [0u8; PAYLOAD_SIZE];
         payload.copy_from_slice(&buf[45..45 + PAYLOAD_SIZE]);
-        
+
         let mut mac = [0u8; 16];
         mac.copy_from_slice(&buf[ONION_CELL_SIZE - 16..ONION_CELL_SIZE]);
 

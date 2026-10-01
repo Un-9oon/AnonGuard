@@ -32,7 +32,10 @@ impl ChaffingEngine {
     /// Spawns the Chaffing Engine in the background
     pub fn spawn(self) {
         tokio::spawn(async move {
-            info!("[AnonGuard Chaffing] Engine started on local proxy {}", self.proxy_addr);
+            info!(
+                "[AnonGuard Chaffing] Engine started on local proxy {}",
+                self.proxy_addr
+            );
             self.run_loop().await;
         });
     }
@@ -55,7 +58,10 @@ impl ChaffingEngine {
         let mut stream = match TcpStream::connect(&self.proxy_addr).await {
             Ok(s) => s,
             Err(e) => {
-                error!("[AnonGuard Chaffing] Failed to connect to local proxy: {}", e);
+                error!(
+                    "[AnonGuard Chaffing] Failed to connect to local proxy: {}",
+                    e
+                );
                 return;
             }
         };

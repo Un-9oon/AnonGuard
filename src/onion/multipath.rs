@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-/// Payload size for our multi-path cells. 
+/// Payload size for our multi-path cells.
 /// We reserve 8 bytes for the 64-bit multi-path sequence number,
 /// leaving the rest for the actual payload.
 pub const MULTIPATH_HEADER_SIZE: usize = 8;
@@ -98,10 +98,10 @@ mod tests {
 
         // Receive out of order: 1, 3, 2
         assert_eq!(reassembler.receive(&out1[..len1]).unwrap(), b"hello");
-        
+
         assert_eq!(reassembler.receive(&out3[..len3]), None); // Buffered
         assert_eq!(reassembler.pop_next_buffered(), None);
-        
+
         assert_eq!(reassembler.receive(&out2[..len2]).unwrap(), b"world"); // Completes gap
         assert_eq!(reassembler.pop_next_buffered().unwrap(), b"multipath"); // Unlocks buffered
         assert_eq!(reassembler.pop_next_buffered(), None);

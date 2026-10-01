@@ -96,7 +96,10 @@ async fn rw_b1_timeout_fires_on_dead_listener() {
     // TimedOut | ConnectionRefused | NetworkUnreachable.
     let public_policy = ExitPolicy::with_timeout(false, Duration::from_millis(250));
     let res2 = public_policy.resolve_and_connect("169.0.0.1", 9999).await;
-    assert!(res2.is_err(), "Non-routable address must fail within timeout");
+    assert!(
+        res2.is_err(),
+        "Non-routable address must fail within timeout"
+    );
     let kind = res2.unwrap_err().kind();
     assert!(
         matches!(
@@ -173,20 +176,29 @@ async fn rw_b2_nat64_blocked_before_socket_opens() {
     // resolve_and_connect → is_ip_permitted → PermissionDenied (no socket opened).
 
     let nat64_cases: &[(&str, &str)] = &[
-        ("64:ff9b:1::a9fe:a9fe", "NAT64 local-use → 169.254.169.254 (cloud metadata)"),
-        ("64:ff9b:1::c0a8:101",   "NAT64 local-use → 192.168.1.1 (RFC 1918)"),
-        ("64:ff9b:1::7f00:1",     "NAT64 local-use → 127.0.0.1 (loopback)"),
-        ("64:ff9b::a9fe:a9fe",    "NAT64 well-known → 169.254.169.254"),
-        ("2002:a9fe:a9fe::1",     "6to4 → 169.254.169.254"),
-        ("2002:c0a8:101::1",      "6to4 → 192.168.1.1"),
-        ("2001::1",               "Teredo 2001::/32"),
-        ("2001:db8::1",           "Documentation 2001:db8::/32"),
-        ("2001:20::1",            "ORCHIDv2 2001:20::/28"),
-        ("100::1",                "Discard-Only 100::/64"),
-        ("::1",                   "IPv6 loopback"),
-        ("::ffff:127.0.0.1",      "IPv4-mapped loopback"),
-        ("::ffff:169.254.169.254","IPv4-mapped cloud metadata"),
-        ("::ffff:10.0.0.1",       "IPv4-mapped RFC 1918"),
+        (
+            "64:ff9b:1::a9fe:a9fe",
+            "NAT64 local-use → 169.254.169.254 (cloud metadata)",
+        ),
+        (
+            "64:ff9b:1::c0a8:101",
+            "NAT64 local-use → 192.168.1.1 (RFC 1918)",
+        ),
+        (
+            "64:ff9b:1::7f00:1",
+            "NAT64 local-use → 127.0.0.1 (loopback)",
+        ),
+        ("64:ff9b::a9fe:a9fe", "NAT64 well-known → 169.254.169.254"),
+        ("2002:a9fe:a9fe::1", "6to4 → 169.254.169.254"),
+        ("2002:c0a8:101::1", "6to4 → 192.168.1.1"),
+        ("2001::1", "Teredo 2001::/32"),
+        ("2001:db8::1", "Documentation 2001:db8::/32"),
+        ("2001:20::1", "ORCHIDv2 2001:20::/28"),
+        ("100::1", "Discard-Only 100::/64"),
+        ("::1", "IPv6 loopback"),
+        ("::ffff:127.0.0.1", "IPv4-mapped loopback"),
+        ("::ffff:169.254.169.254", "IPv4-mapped cloud metadata"),
+        ("::ffff:10.0.0.1", "IPv4-mapped RFC 1918"),
     ];
 
     let mut all_blocked = true;
@@ -199,7 +211,10 @@ async fn rw_b2_nat64_blocked_before_socket_opens() {
         let conn_res = policy.resolve_and_connect(addr_str, 80).await;
 
         if ip_permitted {
-            eprintln!("  [B2] ❌ FAIL: {} ({}) passed is_ip_permitted!", addr_str, desc);
+            eprintln!(
+                "  [B2] ❌ FAIL: {} ({}) passed is_ip_permitted!",
+                addr_str, desc
+            );
             all_blocked = false;
         } else if conn_res.is_ok()
             || conn_res
@@ -219,7 +234,10 @@ async fn rw_b2_nat64_blocked_before_socket_opens() {
             println!("  [B2] ✅ {} — {} → PermissionDenied", addr_str, desc);
         }
     }
-    assert!(all_blocked, "One or more NAT64/IPv6 special-purpose addresses were NOT blocked");
+    assert!(
+        all_blocked,
+        "One or more NAT64/IPv6 special-purpose addresses were NOT blocked"
+    );
 }
 
 /// B2: Verify globally-routable IPv6 is still allowed (regression guard)
@@ -263,14 +281,20 @@ async fn rw_b2_real_dns_resolution_validates_ipv6_addresses() {
         .map(|s| s.ip())
         .collect();
 
-    assert!(!addrs.is_empty(), "DNS resolution must return at least one address");
+    assert!(
+        !addrs.is_empty(),
+        "DNS resolution must return at least one address"
+    );
     let res = policy.validate_resolved_ips("cloudflare.com", &addrs);
     assert!(
         res.is_ok(),
         "cloudflare.com IPs {:?} should all be public/permitted",
         addrs
     );
-    println!("  [B2-dns] ✅ cloudflare.com resolved {:?} — all permitted", addrs);
+    println!(
+        "  [B2-dns] ✅ cloudflare.com resolved {:?} — all permitted",
+        addrs
+    );
 
     // Craft a fake DNS-rebind scenario: hostname passes string check but
     // "DNS" returns a NAT64-encoded address.
@@ -279,18 +303,13 @@ async fn rw_b2_real_dns_resolution_validates_ipv6_addresses() {
         "64:ff9b::c0a8:101".parse().unwrap(),    // NAT64 well-known → 192.168.1.1
     ];
     let rebind_res = policy.validate_resolved_ips("totally-legit-bank.com", &fake_rebind_ips);
-    assert!(
-        rebind_res.is_err(),
-        "Fake NAT64 DNS rebind must be blocked"
-    );
+    assert!(rebind_res.is_err(), "Fake NAT64 DNS rebind must be blocked");
     assert_eq!(
         rebind_res.unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied,
         "NAT64 DNS rebind must return PermissionDenied"
     );
-    println!(
-        "  [B2-dns] ✅ Fake NAT64 DNS rebind correctly blocked with PermissionDenied"
-    );
+    println!("  [B2-dns] ✅ Fake NAT64 DNS rebind correctly blocked with PermissionDenied");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -381,9 +400,7 @@ async fn rw_b3_live_authority_relay_pinned_handshake() {
         "MITM rejection must be PermissionDenied, got {:?}",
         err.kind()
     );
-    println!(
-        "  [B3] ✅ MITM scenario: relay correctly rejected MITM with PermissionDenied"
-    );
+    println!("  [B3] ✅ MITM scenario: relay correctly rejected MITM with PermissionDenied");
 
     // ── 3. Key rotation: old key accepted in grace period, new key also accepted ──
     let new_auth_key = SigningKey::generate(&mut OsRng);
@@ -406,9 +423,7 @@ async fn rw_b3_live_authority_relay_pinned_handshake() {
         rotation_result.is_ok(),
         "Post-rotation: relay with new pinned key must succeed"
     );
-    println!(
-        "  [B3] ✅ Key rotation: relay accepted new authority key after rotation"
-    );
+    println!("  [B3] ✅ Key rotation: relay accepted new authority key after rotation");
 }
 
 /// B3: Real-world GuardConfig wiring — verify authority_identity_keys flows
@@ -449,7 +464,10 @@ async fn rw_b3_config_authority_key_wiring() {
         .authority_identity_keys
         .get(0) // auth_idx = 0
         .and_then(|b| ed25519_dalek::VerifyingKey::from_bytes(b).ok());
-    assert!(pinned.is_some(), "Index-aligned access must return Some for populated config");
+    assert!(
+        pinned.is_some(),
+        "Index-aligned access must return Some for populated config"
+    );
     assert!(
         cfg.authority_identity_keys.get(1).is_none(),
         "Out-of-bounds access must return None (no panic)"
@@ -481,18 +499,18 @@ async fn rw_b4_blocked_ports_gate_fires_before_socket_on_real_ips() {
     // We use IPs not hostnames so DNS doesn't add latency or failure modes.
     // The key property: is_permitted() must return false BEFORE connect() is called.
     let blocked: &[(&str, u16, &str)] = &[
-        ("8.8.8.8",      22,    "SSH"),
-        ("1.1.1.1",      22,    "SSH"),
-        ("8.8.8.8",      2375,  "Docker API HTTP"),
-        ("8.8.8.8",      2376,  "Docker API TLS"),
-        ("8.8.8.8",      3306,  "MySQL"),
-        ("1.1.1.1",      5432,  "PostgreSQL"),
-        ("8.8.8.8",      6379,  "Redis"),
-        ("8.8.8.8",      9200,  "Elasticsearch"),
-        ("8.8.8.8",      11211, "Memcached"),
-        ("8.8.8.8",      27017, "MongoDB"),
-        ("8.8.8.8",      25,    "SMTP"),
-        ("1.1.1.1",      445,   "SMB"),
+        ("8.8.8.8", 22, "SSH"),
+        ("1.1.1.1", 22, "SSH"),
+        ("8.8.8.8", 2375, "Docker API HTTP"),
+        ("8.8.8.8", 2376, "Docker API TLS"),
+        ("8.8.8.8", 3306, "MySQL"),
+        ("1.1.1.1", 5432, "PostgreSQL"),
+        ("8.8.8.8", 6379, "Redis"),
+        ("8.8.8.8", 9200, "Elasticsearch"),
+        ("8.8.8.8", 11211, "Memcached"),
+        ("8.8.8.8", 27017, "MongoDB"),
+        ("8.8.8.8", 25, "SMTP"),
+        ("1.1.1.1", 445, "SMB"),
     ];
 
     let mut all_ok = true;
@@ -514,7 +532,9 @@ async fn rw_b4_blocked_ports_gate_fires_before_socket_on_real_ips() {
         if permitted || conn_res.is_ok() || !correct_err {
             eprintln!(
                 "  [B4] ❌ {}:{} ({}) — permitted={}, conn={:?}",
-                ip, port, service,
+                ip,
+                port,
+                service,
                 permitted,
                 conn_res.err().map(|e| e.kind())
             );
@@ -532,7 +552,10 @@ async fn rw_b4_blocked_ports_gate_fires_before_socket_on_real_ips() {
             );
         }
     }
-    assert!(all_ok, "One or more blocked ports were not intercepted before socket open");
+    assert!(
+        all_ok,
+        "One or more blocked ports were not intercepted before socket open"
+    );
 }
 
 /// B4: Permitted ports on real internet hosts must still connect successfully.
@@ -546,22 +569,26 @@ async fn rw_b4_permitted_ports_connect_on_real_internet() {
     let policy = ExitPolicy::with_timeout(false, Duration::from_secs(5));
 
     let permitted: &[(&str, u16, &str)] = &[
-        ("1.1.1.1",  80,  "HTTP to Cloudflare"),
-        ("1.1.1.1",  443, "HTTPS to Cloudflare"),
-        ("8.8.8.8",  53,  "DNS to Google"),
+        ("1.1.1.1", 80, "HTTP to Cloudflare"),
+        ("1.1.1.1", 443, "HTTPS to Cloudflare"),
+        ("8.8.8.8", 53, "DNS to Google"),
     ];
 
     for (host, port, desc) in permitted {
         assert!(
             policy.is_permitted(host, *port),
             "{}:{} ({}) must be permitted by policy",
-            host, port, desc
+            host,
+            port,
+            desc
         );
         let res = policy.resolve_and_connect(host, *port).await;
         assert!(
             res.is_ok(),
             "{}:{} ({}) must connect successfully, got {:?}",
-            host, port, desc,
+            host,
+            port,
+            desc,
             res.err().map(|e| e.kind())
         );
         println!("  [B4-permit] ✅ {}:{} ({}) — connected", host, port, desc);
@@ -596,15 +623,17 @@ async fn rw_combined_full_request_path_e2e() {
             .unwrap();
         let frame = sess.read_frame().await.unwrap();
         let msg = String::from_utf8_lossy(&frame);
-        assert!(msg.contains("REGISTER_RELAY"), "Must receive REGISTER_RELAY");
+        assert!(
+            msg.contains("REGISTER_RELAY"),
+            "Must receive REGISTER_RELAY"
+        );
         sess.write_frame(b"REGISTERED OK relay-007").await.unwrap();
     });
 
     let relay_stream = TcpStream::connect(auth_addr).await.unwrap();
-    let mut relay_sess =
-        SecureTransportSession::client_handshake(relay_stream, Some(&auth_vk))
-            .await
-            .expect("B3: relay must authenticate authority");
+    let mut relay_sess = SecureTransportSession::client_handshake(relay_stream, Some(&auth_vk))
+        .await
+        .expect("B3: relay must authenticate authority");
     relay_sess
         .write_frame(b"REGISTER_RELAY {\"id\":\"relay-007\",\"exit\":true}")
         .await
@@ -620,13 +649,21 @@ async fn rw_combined_full_request_path_e2e() {
     // B4: EXTEND to SSH port → must be blocked immediately
     let ssh_res = exit_policy.resolve_and_connect("8.8.8.8", 22).await;
     assert!(ssh_res.is_err());
-    assert_eq!(ssh_res.err().unwrap().kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        ssh_res.err().unwrap().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
     println!("  [E2E] ✅ B4: EXTEND to SSH (22) blocked by exit policy");
 
     // B2: EXTEND to NAT64-encoded cloud metadata → blocked
-    let nat64_res = exit_policy.resolve_and_connect("64:ff9b:1::a9fe:a9fe", 80).await;
+    let nat64_res = exit_policy
+        .resolve_and_connect("64:ff9b:1::a9fe:a9fe", 80)
+        .await;
     assert!(nat64_res.is_err());
-    assert_eq!(nat64_res.err().unwrap().kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        nat64_res.err().unwrap().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
     println!("  [E2E] ✅ B2: EXTEND to NAT64(169.254.169.254) blocked");
 
     // B1: EXTEND to non-routable target → times out (not blocked by policy, times out)
@@ -641,12 +678,19 @@ async fn rw_combined_full_request_path_e2e() {
                 | std::io::ErrorKind::NetworkUnreachable
                 | std::io::ErrorKind::HostUnreachable
         ),
-        "B1: non-routable should time out/be refused, got {:?}", k
+        "B1: non-routable should time out/be refused, got {:?}",
+        k
     );
-    println!("  [E2E] ✅ B1: EXTEND to non-routable (169.0.0.1) timed out: {:?}", k);
+    println!(
+        "  [E2E] ✅ B1: EXTEND to non-routable (169.0.0.1) timed out: {:?}",
+        k
+    );
 
     // Permitted: EXTEND to public web → no policy block (may or may not connect, not asserted)
     let permitted_gate = exit_policy.is_permitted("1.1.1.1", 443);
-    assert!(permitted_gate, "EXTEND to 1.1.1.1:443 must pass policy gate");
+    assert!(
+        permitted_gate,
+        "EXTEND to 1.1.1.1:443 must pass policy gate"
+    );
     println!("  [E2E] ✅ All four fixes active and correct in unified request path");
 }

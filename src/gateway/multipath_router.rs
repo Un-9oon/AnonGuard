@@ -1,8 +1,8 @@
+use rand::Rng;
+use rand_distr::{Distribution, Exp};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
-use rand::Rng;
-use rand_distr::{Distribution, Exp};
 
 use crate::core::state_machine::{ActiveGuarded, GuardedSocket};
 use crate::morphing::JitterEngine;
@@ -21,7 +21,12 @@ pub async fn stream_multipath_circuits(
         return Err("Mismatched or empty upstreams/circuits".into());
     }
 
-    let circuits = Arc::new(circuits.into_iter().map(|c| Mutex::new(c)).collect::<Vec<_>>());
+    let circuits = Arc::new(
+        circuits
+            .into_iter()
+            .map(|c| Mutex::new(c))
+            .collect::<Vec<_>>(),
+    );
     let (mut client_read, mut client_write) = tokio::io::split(client);
 
     let mut upstream_reads = Vec::new();
@@ -41,19 +46,23 @@ pub async fn stream_multipath_circuits(
         let mut buf = vec![0u8; 8192];
         let stream_id = 1u16;
         let mut client_seqs = vec![2u32; num_paths];
-        
+
         // Bounded Poisson-like Organic Metronome (mean 20ms, bounded 5ms-35ms)
         let exp_dist = Exp::new(1.0 / 20.0).unwrap();
         let mut get_next_delay = move || {
             let mut rng = rand::thread_rng();
             let mut delay: f64 = exp_dist.sample(&mut rng);
-            if delay < 5.0 { delay = 5.0; }
-            if delay > 35.0 { delay = 35.0; }
+            if delay < 5.0 {
+                delay = 5.0;
+            }
+            if delay > 35.0 {
+                delay = 35.0;
+            }
             std::time::Duration::from_millis(delay as u64)
         };
 
         let mut path_loads = vec![0usize; num_paths];
-        
+
         let mut client_buffer = std::collections::VecDeque::new();
         let mut client_open = true;
 
@@ -163,7 +172,8 @@ pub async fn stream_multipath_circuits(
             let (res, idx) = std::future::poll_fn(|cx| {
                 for (i, ur) in upstream_reads.iter_mut().enumerate() {
                     let rem = ONION_CELL_SIZE - read_bytes[i];
-                    let mut buf = tokio::io::ReadBuf::new(&mut bufs[i][read_bytes[i]..read_bytes[i]+rem]);
+                    let mut buf =
+                        tokio::io::ReadBuf::new(&mut bufs[i][read_bytes[i]..read_bytes[i] + rem]);
                     match std::pin::Pin::new(&mut *ur).poll_read(cx, &mut buf) {
                         std::task::Poll::Ready(Ok(())) => {
                             let n = buf.filled().len();
@@ -176,8 +186,9 @@ pub async fn stream_multipath_circuits(
                     }
                 }
                 std::task::Poll::Pending
-            }).await;
-            
+            })
+            .await;
+
             match res {
                 Ok(0) => break, // EOF
                 Ok(n) => {
@@ -185,7 +196,7 @@ pub async fn stream_multipath_circuits(
                     if read_bytes[idx] == ONION_CELL_SIZE {
                         // We have a full cell
                         read_bytes[idx] = 0;
-                        
+
                         let cell_res = {
                             let mut guard = circuits_bwd[idx].lock().await;
                             guard.unwrap_backward(&mut bufs[idx])
@@ -197,10 +208,14 @@ pub async fn stream_multipath_circuits(
                                     let len = (cell.length as usize).min(cell.payload.len());
                                     let data = &cell.payload[..len];
                                     if let Some(ordered_data) = reassembler.receive(data) {
-                                        if client_write.write_all(&ordered_data).await.is_err() { break; }
+                                        if client_write.write_all(&ordered_data).await.is_err() {
+                                            break;
+                                        }
                                     }
                                     while let Some(ordered_data) = reassembler.pop_next_buffered() {
-                                        if client_write.write_all(&ordered_data).await.is_err() { break; }
+                                        if client_write.write_all(&ordered_data).await.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                                 CellCommand::Destroy => break,

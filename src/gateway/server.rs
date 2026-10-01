@@ -472,17 +472,19 @@ impl GatewayServer {
                                 config.min_chain_length,
                                 config.max_chain_length,
                                 config.enforce_subnet_diversity,
-                            ).await
+                            )
+                            .await
                         } else {
-                            pool.get_random_chain(config.min_chain_length, config.max_chain_length).await
+                            pool.get_random_chain(config.min_chain_length, config.max_chain_length)
+                                .await
                         };
-                        
+
                         if chain.is_empty() {
                             continue;
                         }
-                        
+
                         let entry_node = &chain[0];
-                        
+
                         // For Multi-Path, we skip the tracker logic for simplicity in this snippet,
                         // assuming direct connections to Guard nodes.
                         if entry_node.raw_url.starts_with("reverse://") {
@@ -509,11 +511,14 @@ impl GatewayServer {
                             &pinned_identity_keys,
                             &target_host,
                             target_port,
-                        ).await {
+                        )
+                        .await
+                        {
                             circuits.push(circuit);
-                            let guard_stream_guarded = GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
-                                .begin_verification()
-                                .mark_verified();
+                            let guard_stream_guarded =
+                                GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
+                                    .begin_verification()
+                                    .mark_verified();
                             upstreams.push(guard_stream_guarded);
                         }
                     }
@@ -530,7 +535,8 @@ impl GatewayServer {
                             upstreams,
                             circuits,
                             jitter.clone(),
-                        ).await;
+                        )
+                        .await;
                     } else {
                         error!("Failed to negotiate any telescopic onion circuits");
                         let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
@@ -983,7 +989,6 @@ pub async fn stream_onion_circuit(
 /// `pinned_identity_keys[i]` MUST be the `identity_key_ed25519` from the consensus-verified
 /// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
 /// the corresponding private key via Ed25519 signature (MITM protection).
-
 
 pub async fn build_telescopic_circuit(
     stream: &mut TcpStream,

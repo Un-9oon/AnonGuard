@@ -1,5 +1,5 @@
-use rand_distr::{Distribution, Exp};
 use rand::rngs::OsRng;
+use rand_distr::{Distribution, Exp};
 use std::time::{Duration, Instant};
 
 /// The WTF-PAD state machine.
@@ -54,7 +54,9 @@ impl AdaptivePaddingEngine {
         let now = Instant::now();
 
         // Check if we need to transition from Burst to Gap
-        if self.state == WtfPadState::Burst && now.duration_since(self.last_real_packet_time) >= self.burst_timeout {
+        if self.state == WtfPadState::Burst
+            && now.duration_since(self.last_real_packet_time) >= self.burst_timeout
+        {
             self.state = WtfPadState::Gap;
             self.schedule_next_padding(now);
         }
@@ -104,15 +106,16 @@ mod tests {
 
     #[test]
     fn test_wtf_pad_transitions() {
-        let mut engine = AdaptivePaddingEngine::new(Duration::from_millis(10), Duration::from_millis(5));
-        
+        let mut engine =
+            AdaptivePaddingEngine::new(Duration::from_millis(10), Duration::from_millis(5));
+
         // Initial state is Burst
         assert_eq!(engine.state, WtfPadState::Burst);
         assert!(!engine.should_send_padding());
 
         // Wait past burst timeout
         thread::sleep(Duration::from_millis(15));
-        
+
         // Next check should trigger Gap state
         engine.should_send_padding();
         assert_eq!(engine.state, WtfPadState::Gap);
