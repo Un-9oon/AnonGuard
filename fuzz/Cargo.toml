@@ -21,6 +21,7 @@ name = "fuzz_onion_cell_parse"
 path = "fuzz_targets/fuzz_onion_cell_parse.rs"
 test = false
 doc = false
+bench = false
 
 [[bin]]
 name = "fuzz_target_1"
@@ -30,23 +31,11 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_peel_forward"
 path = "fuzz_targets/fuzz_peel_forward.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_decode_extend"
@@ -56,23 +45,11 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_decode_relay_target"
 path = "fuzz_targets/fuzz_decode_relay_target.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_socks5_frame"
@@ -82,23 +59,11 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_exit_policy"
 path = "fuzz_targets/fuzz_exit_policy.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_verify_pow"
@@ -108,23 +73,11 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_consensus_deser"
 path = "fuzz_targets/fuzz_consensus_deser.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "fuzz_onion_cell_parse"
-path = "fuzz_targets/fuzz_onion_cell_parse.rs"
-test = false
-doc = false
 
 [[bin]]
 name = "fuzz_proxy_node_parse"

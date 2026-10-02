@@ -22,10 +22,10 @@ impl ChaffingEngine {
             proxy_addr,
             decoy_targets: vec![
                 ("en.wikipedia.org", 443), // Wikipedia
-                ("www.google.com", 443), // Google
-                ("www.github.com", 443), // GitHub
-                ("www.reddit.com", 443), // Reddit
-                ("www.amazon.com", 443), // Amazon
+                ("www.google.com", 443),   // Google
+                ("www.github.com", 443),   // GitHub
+                ("www.reddit.com", 443),   // Reddit
+                ("www.amazon.com", 443),   // Amazon
             ],
             mean_chaff_interval: Duration::from_secs(10), // Spawn a decoy connection on average every 10 seconds
         }

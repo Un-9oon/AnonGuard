@@ -66,7 +66,7 @@ impl RmtTimingEngine {
         // Prevent strictly 0.0 to avoid ln(0) infinity
         let u: f64 = rng.gen_range(1e-9..1.0);
         let base_s = (-(4.0 / PI) * u.ln()).sqrt();
-        
+
         // Adversarial GAN Perturbation (A-Wade/Walkie-Talkie style)
         // Dynamically shifts the parameter by up to +/- 15% to break static DL feature extraction
         let adv_noise: f64 = rng.gen_range(0.85..1.15);

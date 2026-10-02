@@ -133,7 +133,7 @@ impl DirectoryAuthority {
 
         let mut temp_path = path.to_path_buf();
         temp_path.set_extension("tmp");
-        
+
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -143,23 +143,33 @@ impl DirectoryAuthority {
         {
             Ok(f) => f,
             Err(e) => {
-                error!("FATAL: Cannot create temporary authority key file {:?}: {}", temp_path, e);
+                error!(
+                    "FATAL: Cannot create temporary authority key file {:?}: {}",
+                    temp_path, e
+                );
                 std::process::exit(1);
             }
         };
         if let Err(e) = file.write_all(bytes) {
-            error!("FATAL: Cannot write temporary authority key file {:?}: {}", temp_path, e);
+            error!(
+                "FATAL: Cannot write temporary authority key file {:?}: {}",
+                temp_path, e
+            );
             let _ = std::fs::remove_file(&temp_path);
             std::process::exit(1);
         }
         if let Err(e) = file.sync_all() {
-            error!("FATAL: Cannot sync temporary authority key file {:?}: {}", temp_path, e);
+            error!(
+                "FATAL: Cannot sync temporary authority key file {:?}: {}",
+                temp_path, e
+            );
             let _ = std::fs::remove_file(&temp_path);
             std::process::exit(1);
         }
         // Ensure the OS-level permissions are 0o600 even on existing files
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)) {
+        if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
+        {
             error!(
                 "FATAL: Cannot set permissions on temporary authority key file {:?}: {}",
                 temp_path, e
@@ -167,10 +177,13 @@ impl DirectoryAuthority {
             let _ = std::fs::remove_file(&temp_path);
             std::process::exit(1);
         }
-        
+
         // Atomic rename
         if let Err(e) = std::fs::rename(&temp_path, path) {
-            error!("FATAL: Cannot atomically rename authority key file to {:?}: {}", path, e);
+            error!(
+                "FATAL: Cannot atomically rename authority key file to {:?}: {}",
+                path, e
+            );
             let _ = std::fs::remove_file(&temp_path);
             std::process::exit(1);
         }

@@ -228,21 +228,30 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
     {
         Ok(f) => f,
         Err(e) => {
-            error!("FATAL: Cannot create temporary identity key file {:?}: {}", temp_path, e);
+            error!(
+                "FATAL: Cannot create temporary identity key file {:?}: {}",
+                temp_path, e
+            );
             std::process::exit(1);
         }
     };
     if let Err(e) = f.write_all(&key.to_bytes()) {
-        error!("FATAL: Cannot write temporary identity key file {:?}: {}", temp_path, e);
+        error!(
+            "FATAL: Cannot write temporary identity key file {:?}: {}",
+            temp_path, e
+        );
         let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
     if let Err(e) = f.sync_all() {
-        error!("FATAL: Cannot sync temporary identity key file {:?}: {}", temp_path, e);
+        error!(
+            "FATAL: Cannot sync temporary identity key file {:?}: {}",
+            temp_path, e
+        );
         let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
-    
+
     // Belt-and-suspenders: set permissions explicitly in case umask interfered
     if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)) {
         error!(
@@ -252,10 +261,13 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
         let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
-    
+
     // Atomic rename
     if let Err(e) = std::fs::rename(&temp_path, path) {
-        error!("FATAL: Cannot atomically rename identity key file to {:?}: {}", path, e);
+        error!(
+            "FATAL: Cannot atomically rename identity key file to {:?}: {}",
+            path, e
+        );
         let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
@@ -278,9 +290,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.status {
         println!("=== AnonGuard Daemon Status ===");
         println!("Version: 0.2.0");
-        
+
         let identity_path = args.identity_key_path.unwrap_or_else(|| {
-            let mut p = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+            let mut p =
+                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
             p.push(".local/share/anonguard/identity.key");
             p
         });
@@ -289,7 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else {
             println!("Status: DEGRADED (Identity Key Missing)");
         }
-        
+
         println!(
             "Fail-Closed Guarantee: {}",
             if cfg!(target_os = "linux") {
@@ -405,7 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         error!("If you are absolutely sure you know what you are doing, re-run with --i-know-this-is-insecure.");
         std::process::exit(1);
     }
-    
+
     if args.i_know_this_is_insecure {
         warn!("=========================================================================");
         warn!("WARNING: RUNNING IN INSECURE MODE. DO NOT USE THIS IN PRODUCTION.");
@@ -612,9 +625,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                     }
 
-                    let docs: Vec<anonguard::mesh::ConsensusDocument> = fetched_docs.iter().map(|(_, doc)| doc.clone()).collect();
+                    let docs: Vec<anonguard::mesh::ConsensusDocument> =
+                        fetched_docs.iter().map(|(_, doc)| doc.clone()).collect();
                     let now = anonguard::mesh::current_timestamp_secs();
-                    
+
                     let mut quorum_reached = false;
                     match pool_clone
                         .load_from_multi_consensus(&docs, &auth_keys, quorum_thresh, now)

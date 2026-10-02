@@ -252,7 +252,7 @@ pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
                 }
                 std::net::IpAddr::V6(ipv6) => {
                     let octets = ipv6.octets();
-                    
+
                     // Check if it's an IPv4-mapped IPv6 address (::ffff:a.b.c.d)
                     if let Some(ipv4) = ipv6.to_ipv4_mapped() {
                         let subnet = [ipv4.octets()[0], ipv4.octets()[1]];
@@ -274,7 +274,11 @@ pub fn validate_circuit_diversity(hosts: &[&str]) -> Result<(), SybilError> {
                             return Err(SybilError::SubnetCollision(subnet));
                         }
                         seen_ipv4_subnets.push(subnet);
-                    } else if octets[0] == 0x20 && octets[1] == 0x01 && octets[2] == 0x00 && octets[3] == 0x00 {
+                    } else if octets[0] == 0x20
+                        && octets[1] == 0x01
+                        && octets[2] == 0x00
+                        && octets[3] == 0x00
+                    {
                         // Teredo (2001:0000::/32) - extract embedded IPv4 (obfuscated by XORing with 0xFF in bytes 12-15)
                         let subnet = [octets[12] ^ 0xFF, octets[13] ^ 0xFF];
                         if seen_ipv4_subnets.contains(&subnet) {
@@ -372,12 +376,13 @@ mod tests {
         // Test IPv6 transition mechanism spoofing defense
         // 198.51.10.1 (IPv4), 2002:c633:a01::1 (6to4), 2001:0:4136:e378:8000:63bf:39cc:f5fe (Teredo)
         // They all embed 198.51.x.x -> subnet [198, 51]
-        let colliding_transition = ["198.51.10.1", "2002:c633:a01::1", "2001:0:4136:e378:8000:63bf:39cc:f5fe"];
+        let colliding_transition = [
+            "198.51.10.1",
+            "2002:c633:a01::1",
+            "2001:0:4136:e378:8000:63bf:39cc:f5fe",
+        ];
         let err_transition = validate_circuit_diversity(&colliding_transition).unwrap_err();
-        assert_eq!(
-            err_transition,
-            SybilError::SubnetCollision([198, 51])
-        );
+        assert_eq!(err_transition, SybilError::SubnetCollision([198, 51]));
     }
 
     /// Regression test for G2: NonceRegistry must survive mutex poisoning.
@@ -411,29 +416,29 @@ mod tests {
             "second call: replay detected"
         );
     }
-    
+
     #[test]
     fn test_clock_skew_pow_verification() {
         let ts_now = current_timestamp_secs();
         let node_id = "test-node-skew";
         let diff = 10;
-        
+
         // Find a valid nonce for 'now'
         let nonce = solve_pow_bounded(node_id, ts_now, diff).expect("Should find nonce");
-        
+
         // 1. Valid exactly at ts_now
         assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now));
-        
+
         // 2. Exact boundary tests (MAX_TIMESTAMP_DRIFT_SECS is 300)
         assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now - 300));
         assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now + 300));
-        
+
         // 3. Past-dated timestamp (expired) - fails closed
         assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now - 301));
-        
+
         // 4. Future-dated timestamp (clock skew attack) - fails closed
         assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now + 301));
-        
+
         // 5. Far future/past
         assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now + 100000));
         assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now - 100000));

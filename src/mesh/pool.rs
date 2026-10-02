@@ -81,15 +81,19 @@ impl ProxyPool {
         quorum_threshold: usize,
         current_time: u64,
     ) -> Result<usize, String> {
-        let mut relay_votes: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
-        let mut relay_metadata: std::collections::HashMap<String, crate::mesh::consensus::RelayDescriptor> = std::collections::HashMap::new();
+        let mut relay_votes: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        let mut relay_metadata: std::collections::HashMap<
+            String,
+            crate::mesh::consensus::RelayDescriptor,
+        > = std::collections::HashMap::new();
 
         for doc in docs {
             // A document is valid if it is signed by AT LEAST 1 trusted authority. We only count votes from authorities that actually signed this document.
             if current_time < doc.valid_after || current_time > doc.valid_until {
                 continue;
             }
-            
+
             let digest = doc.compute_digest();
             let mut doc_valid_auths = Vec::new();
             for sig in &doc.signatures {
@@ -111,7 +115,7 @@ impl ProxyPool {
                 if !relay.verify_identity() {
                     continue; // Skip relays with invalid or missing cryptographic identity signatures
                 }
-                
+
                 // Use the relay's node_id and signature as a unique key for its exact content
                 let key = format!("{}:{}", relay.node_id, hex::encode(&relay.signature));
                 let entry = relay_votes.entry(key.clone()).or_default();
@@ -160,7 +164,7 @@ impl ProxyPool {
                 loaded += 1;
             }
         }
-        
+
         Ok(loaded)
     }
 

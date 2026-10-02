@@ -108,7 +108,10 @@ impl OnionCell {
         let stream_id = u16::from_be_bytes([buf[9], buf[10]]);
         let length = u16::from_be_bytes([buf[11], buf[12]]);
         if length as usize > PAYLOAD_SIZE {
-            return Err(format!("Parsed cell length {} exceeds maximum {}", length, PAYLOAD_SIZE));
+            return Err(format!(
+                "Parsed cell length {} exceeds maximum {}",
+                length, PAYLOAD_SIZE
+            ));
         }
 
         let mut ephemeral_key = [0u8; 32];
