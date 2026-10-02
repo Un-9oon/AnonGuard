@@ -252,12 +252,10 @@ impl SecureTransportSession {
             io::Error::new(io::ErrorKind::TimedOut, "Timeout waiting for frame payload")
         })??;
 
+        // BUG-02 FIX: Counter must only advance on successful decryption.
+        // Previously, the counter was incremented before decrypt(), meaning any attacker
+        // who sends a single tampered frame would permanently desync the session.
         let counter = self.recv_counter;
-        self.recv_counter = self
-            .recv_counter
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("recv nonce counter exhausted — rotate session key"))?;
-
         let nonce = make_nonce(counter);
         let plaintext = self
             .recv_cipher
@@ -268,6 +266,12 @@ impl SecureTransportSession {
                     "AEAD authentication failed — possible tampering or replay",
                 )
             })?;
+
+        // Only advance counter after successful decryption
+        self.recv_counter = self
+            .recv_counter
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("recv nonce counter exhausted — rotate session key"))?;
 
         Ok(plaintext)
     }

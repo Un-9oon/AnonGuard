@@ -119,6 +119,7 @@ impl NonceRegistry {
 
         let key = (node_id.to_string(), nonce);
         if state.map.contains_key(&key) {
+            crate::observability::inc_anti_replay_trips();
             return true; // Replay detected
         }
         state.map.insert(key, current_time);

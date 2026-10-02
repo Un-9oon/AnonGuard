@@ -65,7 +65,12 @@ impl RmtTimingEngine {
         let mut rng = rand::thread_rng();
         // Prevent strictly 0.0 to avoid ln(0) infinity
         let u: f64 = rng.gen_range(1e-9..1.0);
-        (-(4.0 / PI) * u.ln()).sqrt()
+        let base_s = (-(4.0 / PI) * u.ln()).sqrt();
+        
+        // Adversarial GAN Perturbation (A-Wade/Walkie-Talkie style)
+        // Dynamically shifts the parameter by up to +/- 15% to break static DL feature extraction
+        let adv_noise: f64 = rng.gen_range(0.85..1.15);
+        base_s * adv_noise
     }
 
     /// Samples spacing `s` from the GUE Wigner Surmise:
@@ -93,6 +98,9 @@ impl RmtTimingEngine {
             }
         }
 
-        best_s
+        // Adversarial GAN Perturbation
+        let mut rng = rand::thread_rng();
+        let adv_noise: f64 = rng.gen_range(0.85..1.15);
+        best_s * adv_noise
     }
 }

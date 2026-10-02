@@ -21,9 +21,11 @@ impl ChaffingEngine {
         Self {
             proxy_addr,
             decoy_targets: vec![
-                ("1.1.1.1", 443), // Cloudflare
-                ("8.8.8.8", 443), // Google
-                ("9.9.9.9", 443), // Quad9
+                ("en.wikipedia.org", 443), // Wikipedia
+                ("www.google.com", 443), // Google
+                ("www.github.com", 443), // GitHub
+                ("www.reddit.com", 443), // Reddit
+                ("www.amazon.com", 443), // Amazon
             ],
             mean_chaff_interval: Duration::from_secs(10), // Spawn a decoy connection on average every 10 seconds
         }
@@ -44,7 +46,10 @@ impl ChaffingEngine {
         loop {
             // Wait for a random interval modeled by an exponential distribution
             let lambda = 1.0 / self.mean_chaff_interval.as_secs_f64();
-            let exp = Exp::new(lambda).unwrap();
+            // BUG-03 FIX: Exp::new() fails if lambda <= 0 or is NaN/inf.
+            // Use a safe fallback of 0.1 (mean 10s) instead of panicking.
+            let exp = Exp::new(lambda)
+                .unwrap_or_else(|_| Exp::new(0.1).expect("safe: 0.1 is a valid Exp rate"));
             let delay_secs = exp.sample(&mut OsRng).clamp(1.0, 30.0);
             sleep(Duration::from_secs_f64(delay_secs)).await;
 
@@ -80,11 +85,11 @@ impl ChaffingEngine {
             return;
         }
 
-        // 2. Connection Request (IPv4 or Domain Name)
-        // We just use IPv4 targets for simplicity in decoy traffic
-        let mut req = vec![0x05, 0x01, 0x00, 0x01];
-        let ip_parts: Vec<u8> = host.split('.').map(|s| s.parse().unwrap()).collect();
-        req.extend_from_slice(&ip_parts);
+        // 2. Connection Request (Domain Name)
+        let mut req = vec![0x05, 0x01, 0x00, 0x03]; // ATYP 0x03 = Domain Name
+        let host_bytes = host.as_bytes();
+        req.push(host_bytes.len() as u8);
+        req.extend_from_slice(host_bytes);
         req.push((port >> 8) as u8);
         req.push((port & 0xFF) as u8);
 

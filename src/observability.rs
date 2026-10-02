@@ -41,6 +41,31 @@ pub fn inc_quorum_reconciliation_failures() {
     metrics::counter!("quorum_reconciliation_failures_total").increment(1);
 }
 
+/// Increments the count of timeouts across the system (e.g., handshake, circuit build).
+pub fn inc_timeouts() {
+    metrics::counter!("timeouts_total").increment(1);
+}
+
+/// Increments the count of AEAD (cryptographic decryption/authentication) failures.
+pub fn inc_aead_failures() {
+    metrics::counter!("aead_failures_total").increment(1);
+}
+
+/// Increments the count of anti-replay occurrences (e.g. duplicate nonces or cells).
+pub fn inc_anti_replay_trips() {
+    metrics::counter!("anti_replay_trips_total").increment(1);
+}
+
+/// Increments the count of consensus document fetching or parsing failures.
+pub fn inc_consensus_failures() {
+    metrics::counter!("consensus_failures_total").increment(1);
+}
+
+/// Increments the count of connections dropped due to limits (global or per-IP).
+pub fn inc_connection_limit_drops() {
+    metrics::counter!("connection_limit_drops_total").increment(1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

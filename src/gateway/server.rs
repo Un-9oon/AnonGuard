@@ -276,11 +276,11 @@ impl GatewayServer {
                 let count = ip_map.entry(client_ip_key).or_insert(0);
                 if *count >= MAX_CONCURRENT_PER_IP {
                     warn!(
-                        client = %client_addr,
                         current = *count,
                         limit = MAX_CONCURRENT_PER_IP,
                         "[AnonGuard DoS Defense] Dropped connection: per-IP connection cap exceeded"
                     );
+                    crate::observability::inc_connection_limit_drops();
                     continue;
                 }
                 *count += 1;
@@ -339,7 +339,8 @@ impl GatewayServer {
                 {
                     Ok(Ok(_)) => peek_buf[0] == 0x05,
                     Ok(Err(_)) | Err(_) => {
-                        warn!(client = %client_addr, "Client closed or timed out before sending first byte");
+                        warn!("Client closed or timed out before sending first byte");
+                        crate::observability::inc_timeouts();
                         return;
                     }
                 };
@@ -352,7 +353,6 @@ impl GatewayServer {
                     if is_socks5 {
                         if !config.allow_open_socks5 {
                             warn!(
-                                client = %client_addr,
                                 "Relay Mode: Rejected unauthenticated plain SOCKS5 proxy request on onion relay port (anti-abuse policy)"
                             );
                             return;
@@ -460,7 +460,7 @@ impl GatewayServer {
                         .await
                 };
                 if chain.is_empty() {
-                    warn!(client = %client_addr, "[AnonGuard Gateway] No upstream proxies available for chain");
+                    warn!("[AnonGuard Gateway] No upstream proxies available for chain");
                     let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01).await;
                     return;
                 }

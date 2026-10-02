@@ -123,7 +123,10 @@ impl HopCryptState {
         let cipher = ChaCha20Poly1305::new(&self.keys.forward_aead_key.into());
         cipher
             .decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into())
-            .map_err(|_| CircuitError::MacVerificationFailed)
+            .map_err(|_| {
+                crate::observability::inc_aead_failures();
+                CircuitError::MacVerificationFailed
+            })
     }
 
     pub fn seal_backward(&self, nonce: &[u8; 12], header: &[u8], pt_body: &mut [u8]) -> [u8; 16] {
@@ -145,7 +148,10 @@ impl HopCryptState {
         let cipher = ChaCha20Poly1305::new(&self.keys.backward_aead_key.into());
         cipher
             .decrypt_in_place_detached(nonce.into(), header, ct_body, tag.into())
-            .map_err(|_| CircuitError::MacVerificationFailed)
+            .map_err(|_| {
+                crate::observability::inc_aead_failures();
+                CircuitError::MacVerificationFailed
+            })
     }
 
     pub fn new(keys: HopKeys) -> Self {
@@ -427,17 +433,22 @@ impl RelayCircuitHop {
         };
 
         if tag_matches {
+            // BUG-01 FIX: All validation checks BEFORE mutating expected_recv_seq.
+            // Previously the gap check was done after the stale check, but expected_recv_seq
+            // could theoretically be advanced by a large-gap sequence before the gap check fires.
             if seq < self.expected_recv_seq {
                 return Err(CircuitError::AntiReplayRejection(format!(
                     "Stale sequence {}",
                     seq
                 )));
             }
-            if seq - self.expected_recv_seq > MAX_SEQ_GAP {
+            // Gap check first — before touching state
+            if seq.saturating_sub(self.expected_recv_seq) > MAX_SEQ_GAP {
                 return Err(CircuitError::AntiReplayRejection(
                     "Sequence gap too large".to_string(),
                 ));
             }
+            // Only advance state after all checks pass
             self.expected_recv_seq = seq + 1;
 
             let command = CellCommand::from_u8(raw[8]).ok_or_else(|| {

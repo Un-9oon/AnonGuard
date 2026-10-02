@@ -4,7 +4,6 @@
 //! Standalone CLI daemon for the AnonGuard engine.
 
 use clap::Parser;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
@@ -66,6 +65,10 @@ struct Args {
     )]
     rmt_ensemble: String,
 
+    /// Enable background traffic chaffing (decoy TLS streams)
+    #[arg(long, default_value_t = false)]
+    chaffing: bool,
+
     /// Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
     #[arg(short, long, default_value_t = false)]
     relay: bool,
@@ -117,6 +120,10 @@ struct Args {
     /// Allow exit relays to connect to private/loopback networks (off by default to prevent SSRF)
     #[arg(long, default_value_t = false)]
     allow_private_exit: bool,
+
+    /// Acknowledge insecure configuration
+    #[arg(long, default_value_t = false)]
+    i_know_this_is_insecure: bool,
     #[arg(long, default_value_t = false)]
     is_exit: bool,
 
@@ -271,7 +278,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if args.status {
         println!("=== AnonGuard Daemon Status ===");
         println!("Version: 0.2.0");
-        println!("Status: ACTIVE / HEALTHY");
+        
+        let identity_path = args.identity_key_path.unwrap_or_else(|| {
+            let mut p = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()));
+            p.push(".local/share/anonguard/identity.key");
+            p
+        });
+        if identity_path.exists() {
+            println!("Status: ACTIVE / HEALTHY (Keys Loaded)");
+        } else {
+            println!("Status: DEGRADED (Identity Key Missing)");
+        }
+        
         println!(
             "Fail-Closed Guarantee: {}",
             if cfg!(target_os = "linux") {
@@ -353,6 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         chaos_rho: args.chaos_rho,
         chaos_beta: args.chaos_beta,
         enable_rmt_morphing: args.rmt_morphing,
+        enable_chaffing: args.chaffing,
         rmt_ensemble: args.rmt_ensemble.clone(),
         enable_onion_routing: args.onion,
         enforce_subnet_diversity: args.enforce_subnet_diversity,
@@ -379,6 +398,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }),
         ..GuardConfig::default()
     };
+
+    if (config.allow_open_socks5 || config.allow_private_exit) && !args.i_know_this_is_insecure {
+        error!("FATAL: You have enabled an insecure configuration flag (allow-open-socks5 or allow-private-exit).");
+        error!("This can lead to severe security and privacy compromises.");
+        error!("If you are absolutely sure you know what you are doing, re-run with --i-know-this-is-insecure.");
+        std::process::exit(1);
+    }
+    
+    if args.i_know_this_is_insecure {
+        warn!("=========================================================================");
+        warn!("WARNING: RUNNING IN INSECURE MODE. DO NOT USE THIS IN PRODUCTION.");
+        warn!("=========================================================================");
+    }
 
     #[cfg(target_os = "linux")]
     let firewall_enabled = args.enable_firewall_killswitch;

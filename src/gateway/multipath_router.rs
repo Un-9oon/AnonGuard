@@ -88,10 +88,10 @@ pub async fn stream_multipath_circuits(
                         cell_len = PAYLOAD_SIZE;
                     } else {
                         let chunk_size = std::cmp::min(client_buffer.len(), max_data);
-                        let mut chunk = vec![0u8; chunk_size];
-                        for b in chunk.iter_mut() {
-                            *b = client_buffer.pop_front().unwrap();
-                        }
+                        // BUG-04 FIX: Use drain() instead of repeated pop_front().unwrap().
+                        // pop_front().unwrap() in a loop is panic-prone. drain() is atomic
+                        // with respect to the current task and never panics.
+                        let chunk: Vec<u8> = client_buffer.drain(..chunk_size).collect();
                         cell_len = slicer.slice(&chunk, &mut sliced_buf);
                     }
 
