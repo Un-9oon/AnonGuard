@@ -418,7 +418,7 @@ mod tests {
         let diff = 10;
         
         // Find a valid nonce for 'now'
-        let nonce = solve_pow_bounded(node_id, ts_now, diff, 100_000).expect("Should find nonce");
+        let nonce = solve_pow_bounded(node_id, ts_now, diff).expect("Should find nonce");
         
         // 1. Valid exactly at ts_now
         assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now));
