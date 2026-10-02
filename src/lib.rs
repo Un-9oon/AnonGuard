@@ -1,4 +1,5 @@
 #![deny(dead_code, unused_variables)]
+#![forbid(unsafe_code)]
 
 //! # AnonGuard Core Engine
 //!

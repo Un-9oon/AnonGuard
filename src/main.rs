@@ -1,4 +1,5 @@
 #![deny(dead_code, unused_variables)]
+#![forbid(unsafe_code)]
 
 //! Standalone CLI daemon for the AnonGuard engine.
 
@@ -209,29 +210,46 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
             std::process::exit(1);
         }
     }
+    let mut temp_path = path.to_path_buf();
+    temp_path.set_extension("tmp");
     let mut f = match std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(path)
+        .open(&temp_path)
     {
         Ok(f) => f,
         Err(e) => {
-            error!("FATAL: Cannot create identity key file {:?}: {}", path, e);
+            error!("FATAL: Cannot create temporary identity key file {:?}: {}", temp_path, e);
             std::process::exit(1);
         }
     };
     if let Err(e) = f.write_all(&key.to_bytes()) {
-        error!("FATAL: Cannot write identity key file {:?}: {}", path, e);
+        error!("FATAL: Cannot write temporary identity key file {:?}: {}", temp_path, e);
+        let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
+    if let Err(e) = f.sync_all() {
+        error!("FATAL: Cannot sync temporary identity key file {:?}: {}", temp_path, e);
+        let _ = std::fs::remove_file(&temp_path);
+        std::process::exit(1);
+    }
+    
     // Belt-and-suspenders: set permissions explicitly in case umask interfered
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+    if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)) {
         error!(
-            "FATAL: Cannot set permissions on identity key file {:?}: {}",
-            path, e
+            "FATAL: Cannot set permissions on temporary identity key file {:?}: {}",
+            temp_path, e
         );
+        let _ = std::fs::remove_file(&temp_path);
+        std::process::exit(1);
+    }
+    
+    // Atomic rename
+    if let Err(e) = std::fs::rename(&temp_path, path) {
+        error!("FATAL: Cannot atomically rename identity key file to {:?}: {}", path, e);
+        let _ = std::fs::remove_file(&temp_path);
         std::process::exit(1);
     }
     key

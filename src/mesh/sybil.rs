@@ -410,4 +410,31 @@ mod tests {
             "second call: replay detected"
         );
     }
+    
+    #[test]
+    fn test_clock_skew_pow_verification() {
+        let ts_now = current_timestamp_secs();
+        let node_id = "test-node-skew";
+        let diff = 10;
+        
+        // Find a valid nonce for 'now'
+        let nonce = solve_pow_bounded(node_id, ts_now, diff, 100_000).expect("Should find nonce");
+        
+        // 1. Valid exactly at ts_now
+        assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now));
+        
+        // 2. Exact boundary tests (MAX_TIMESTAMP_DRIFT_SECS is 300)
+        assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now - 300));
+        assert!(verify_pow(node_id, ts_now, nonce, diff, ts_now + 300));
+        
+        // 3. Past-dated timestamp (expired) - fails closed
+        assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now - 301));
+        
+        // 4. Future-dated timestamp (clock skew attack) - fails closed
+        assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now + 301));
+        
+        // 5. Far future/past
+        assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now + 100000));
+        assert!(!verify_pow(node_id, ts_now, nonce, diff, ts_now - 100000));
+    }
 }

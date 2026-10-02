@@ -17,11 +17,23 @@ path = ".."
 # --- Fuzz Targets ---
 
 [[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_target_1"
 path = "fuzz_targets/fuzz_target_1.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "fuzz_peel_forward"
@@ -31,11 +43,23 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_decode_extend"
 path = "fuzz_targets/fuzz_decode_extend.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "fuzz_decode_relay_target"
@@ -45,11 +69,23 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_socks5_frame"
 path = "fuzz_targets/fuzz_socks5_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "fuzz_exit_policy"
@@ -59,6 +95,12 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_verify_pow"
 path = "fuzz_targets/fuzz_verify_pow.rs"
 test = false
@@ -66,11 +108,23 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_consensus_deser"
 path = "fuzz_targets/fuzz_consensus_deser.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_onion_cell_parse"
+path = "fuzz_targets/fuzz_onion_cell_parse.rs"
+test = false
+doc = false
 
 [[bin]]
 name = "fuzz_proxy_node_parse"
