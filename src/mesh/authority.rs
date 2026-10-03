@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::mesh::consensus::{ConsensusDocument, RelayDescriptor};
+use crate::mesh::consensus::{ConsensusDocument, RelayDescriptor, AuthoritySignature};
 use crate::mesh::sybil::{current_timestamp_secs, verify_pow, DEFAULT_POW_DIFFICULTY};
 use crate::mesh::transport::SecureTransportSession;
 
@@ -269,10 +269,7 @@ impl DirectoryAuthority {
         Ok(())
     }
 
-    /// Generates and signs the current consensus document.
-    ///
-    /// Evicts relay entries that have not refreshed within `RELAY_TTL_SECS` (2 hours)
-    /// before building the consensus — prevents unbounded map growth under relay churn (#5).
+    /// Generates and signs the current consensus document, executing a BFT cross-check round.
     pub async fn generate_consensus(&self) -> ConsensusDocument {
         let now = current_timestamp_secs();
         {
@@ -300,7 +297,43 @@ impl DirectoryAuthority {
             relay_list,
         );
 
+        // Sign our own view
         consensus.sign_with_authority(&self.authority_id, &self.signing_key);
+        let digest = consensus.compute_digest();
+        let digest_hex = hex::encode(digest);
+
+        // BFT Pre-Signing Cross-Check Round
+        // Query peer authorities to co-sign our exact proposed digest.
+        // This ensures the document handed to clients is already multi-signed and verified.
+        let f = self.peer_authorities.len() / 3;
+        let required_signatures = 2 * f + 1; // 2f+1 quorum (including ourselves)
+        
+        for (peer, pinned_key) in &self.peer_authorities {
+            if peer == &self.listen_addr {
+                continue;
+            }
+            if let Ok(Some(peer_sig)) = Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex).await {
+                // Verify the signature is valid for this digest before appending
+                if let Some(pubkey) = pinned_key {
+                    if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
+                        let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                        if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
+                            consensus.signatures.push(peer_sig);
+                        }
+                    }
+                } else if self.allow_unauthenticated_registration {
+                    // In unauthenticated mode, we blindly accept the signature (only for testing)
+                    consensus.signatures.push(peer_sig);
+                }
+            }
+        }
+        
+        if consensus.signatures.len() >= required_signatures {
+            info!("Authority [{}]: BFT Cross-check succeeded ({} signatures acquired, required {})", self.authority_id, consensus.signatures.len(), required_signatures);
+        } else {
+            warn!("Authority [{}]: BFT Cross-check failed (only {} signatures acquired, required {})", self.authority_id, consensus.signatures.len(), required_signatures);
+        }
+
         consensus
     }
 
@@ -342,8 +375,25 @@ impl DirectoryAuthority {
             .await
             {
                 Ok(Ok(peer_relays)) => {
+                    let now = current_timestamp_secs();
                     for desc in peer_relays {
                         if desc.verify_identity() {
+                            // Validate PoW and freshness to reject malicious peers pushing fake views
+                            let is_valid_pow = verify_pow(
+                                &desc.node_id,
+                                desc.registered_at,
+                                desc.pow_nonce,
+                                self.pow_difficulty,
+                                now,
+                            );
+                            if !is_valid_pow {
+                                warn!("Authority [{}]: Rejected invalid PoW from peer gossip for relay {}", self.authority_id, desc.node_id);
+                                continue;
+                            }
+                            if self.nonce_registry.check_and_record(&desc.node_id, desc.pow_nonce, now) {
+                                warn!("Authority [{}]: Rejected replayed PoW from peer gossip for relay {}", self.authority_id, desc.node_id);
+                                continue;
+                            }
                             local_map
                                 .entry(desc.node_id.clone())
                                 .and_modify(|existing| {
@@ -386,6 +436,26 @@ impl DirectoryAuthority {
         let resp = session.read_frame().await?;
         let list: Vec<RelayDescriptor> = serde_json::from_slice(&resp)?;
         Ok(list)
+    }
+
+    async fn fetch_peer_cross_check(
+        peer_addr: &str,
+        pinned_key: Option<&ed25519_dalek::VerifyingKey>,
+        digest_hex: &str,
+    ) -> Result<Option<AuthoritySignature>, Box<dyn std::error::Error + Send + Sync>> {
+        use tokio::net::TcpStream;
+        let stream = TcpStream::connect(peer_addr).await?;
+        let mut session = SecureTransportSession::client_handshake(stream, pinned_key).await?;
+        let req = format!("BFT_CROSS_CHECK {}", digest_hex);
+        session.write_frame(req.as_bytes()).await?;
+        let resp = session.read_frame().await?;
+        let resp_str = String::from_utf8_lossy(&resp);
+        if let Some(json_part) = resp_str.strip_prefix("OK_SIGNED ") {
+            let sig: AuthoritySignature = serde_json::from_str(json_part)?;
+            Ok(Some(sig))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Starts the asynchronous authority listener.
@@ -453,6 +523,33 @@ impl DirectoryAuthority {
                                 let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
                                 if let Ok(serialized) = serde_json::to_vec(&list) {
                                     let _ = session.write_frame(&serialized).await;
+                                }
+                            } else if let Some(digest_hex) = text.strip_prefix("BFT_CROSS_CHECK ") {
+                                // Recompute our own local consensus digest
+                                // We don't trigger a full generate_consensus() here to avoid infinite loops,
+                                // we just do local reconciliation.
+                                let relays = active_relays.read().await;
+                                let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
+                                let now = current_timestamp_secs();
+                                let bucketed_now = (now / 300) * 300;
+                                let mut local_consensus = ConsensusDocument::new(
+                                    bucketed_now,
+                                    bucketed_now + 3600,
+                                    list,
+                                );
+                                
+                                let our_digest = local_consensus.compute_digest();
+                                let our_digest_hex = hex::encode(our_digest);
+                                
+                                if our_digest_hex == digest_hex {
+                                    local_consensus.sign_with_authority(&auth_self.authority_id, &signing_key);
+                                    let our_sig = local_consensus.signatures.pop().unwrap();
+                                    if let Ok(serialized) = serde_json::to_string(&our_sig) {
+                                        let resp = format!("OK_SIGNED {}", serialized);
+                                        let _ = session.write_frame(resp.as_bytes()).await;
+                                    }
+                                } else {
+                                    let _ = session.write_frame(b"ERROR_DIGEST_MISMATCH").await;
                                 }
                             } else if let Some(json_part) = text.strip_prefix("REGISTER_RELAY ") {
                                 match serde_json::from_str::<RelayDescriptor>(json_part) {

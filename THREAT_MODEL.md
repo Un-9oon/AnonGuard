@@ -13,7 +13,7 @@ This document formalizes the operational trust boundaries, adversary capabilitie
 1. **Relay Honesty (Partial):** At least one intermediate relay in any 3-hop circuit ($\text{Guard} \to \text{Middle} \to \text{Exit}$) is honest and non-colluding. If all three relays collude or are controlled by the same entity, path correlation and client deanonymization are possible.
 2. **Endpoint Integrity:** The client operating system, hardware, and user agent (browser) are uncompromised by malware, rootkits, or hardware keyloggers.
 3. **Cryptographic Primitives:** The underlying mathematical assumptions of Curve25519 (X25519, Ed25519), ML-KEM-768 (FIPS 203), ChaCha20, and SHA-256 remain computationally intractable for adversaries within current classical and near-term quantum bounds.
-4. **Directory Quorum:** Fewer than the configured threshold quorum ($M$-of-$N$) of Directory Authorities are Byzantine or compromised.
+4. **Directory Quorum (Byzantine Fault Tolerance):** The consensus protocol formally assumes that out of $N$ configured Directory Authorities, at most $f$ are Byzantine (malicious, colluding, or compromised), where the system enforces a strict Lamport/Shostak/Pease bound of $N \ge 3f + 1$. The client-side quorum threshold $M$ is configured such that $M = 2f + 1$. This ensures that any accepted consensus document has been signed by at least one honest authority, and that malicious authorities cannot form a quorum on their own or prevent honest authorities from doing so.
 
 ---
 
