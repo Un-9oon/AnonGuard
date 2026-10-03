@@ -55,3 +55,11 @@ jobs:
           cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=60
           cargo +nightly fuzz run fuzz_consensus_deser -- -max_total_time=60
           cargo +nightly fuzz run fuzz_proxy_node_parse -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_onion_cell_parse -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_peel_forward -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_exit_policy -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_decode_extend -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_decode_relay_target -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_socks5_frame -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_verify_pow -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_multipath_reassembler -- -max_total_time=60

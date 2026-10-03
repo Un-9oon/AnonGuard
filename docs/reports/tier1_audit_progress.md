@@ -146,3 +146,147 @@ decoding, SOCKS5 frame parsing, and PoW verification targets all exist.
 - `src/gateway/server.rs` — not yet read
 - CI config for fuzz wiring (`.github/workflows/`)
 - Guard-state persistence tamper-resistance (`GuardState::save`/`load`)
+
+---
+
+## Session 3 Results
+
+### `src/gateway/multipath_router.rs` — REVIEWED, NO SECURITY FINDINGS
+
+**State-before-validation check:** No AEAD/signature/MAC/PoW logic in this file.
+State mutations:
+- `path_loads[c_idx] += 1` at line 107 — load-balancing counter, not a security-relevant
+  state. No validation to order it against.
+- `client_seqs[c_idx] += 1` at line 112 — onion-circuit sequence counter, advanced inside
+  a locked `circuits_fwd[c_idx]` guard, before the `OnionCell::new` call. No crypto check
+  here, but this is a local send-side counter with no security invariant depending on it
+  (the relay-side AEAD decryption in the receive path is what protects against replay —
+  verified separately in `transport.rs`). Not a state-before-validation instance.
+- `read_bytes[idx] += n` at line 200, then `reassembler.receive(data)` at line 215 —
+  the byte accumulator is not a security counter; it tracks how many bytes of the fixed-size
+  `ONION_CELL_SIZE` frame have arrived. `reassembler.receive()` validates the multipath
+  header. Order is correct.
+
+**`Exp::new(1.0 / 20.0).unwrap()` at line 50:** Rate is 0.05, valid positive finite f64.
+Unreachable by design. Consistent with audit doc's classification.
+
+**`tokio::select!` cancel-safety (Tier 4):** The `poll_fn` based read at lines 168–195
+manually tracks `read_bytes[i]` per upstream. This is cancel-safe by construction — the
+`poll_fn` is stateless; state lives in `read_bytes` which persists across polls.
+No data loss on cancellation. ✓
+
+**`stream_multipath_circuits` outer `tokio::select!` (lines 247–255):** Selects `bwd`
+vs. `fwd`. `fwd` is pinned and guarded with `if !fwd_done`, which is the standard Tokio
+pattern for re-polling a completed future. Cancel-safe. ✓
+
+**NOT audited:** Sphinx packet format (not in this file).
+
+---
+
+### `src/kernel/netns.rs` — REVIEWED, NO FINDINGS
+
+**State-before-validation check:** No state, no mutations. Pure nftables rule-generator
+and shell command wrapper.
+
+**`generate_nftables_rules`:** Validates `authorized_proxy_ip` via `str::parse::<IpAddr>()`
+(line 25), returning `Err` on invalid input **before** formatting any output. ✓
+
+**`apply_nftables_rules`:** Calls `generate_nftables_rules()?` at line 60 (propagating
+error), then pipes to `nft -f -`. Process exit code is checked (lines 74–80); on non-zero
+exit, returns `Err` with the stderr message. No state mutation on failure.
+
+**`flush_nftables_rules`:** Calls `nft delete table ...`, checks exit code at line 93.
+Returns `Err` on failure.
+
+**Kill-switch fail-closed under `kill -9` (master prompt's specific question for this
+module):** `netns.rs` generates and applies nftables rules. Once applied to the kernel,
+nftables rules persist independently of the process — if the daemon is `kill -9`'d, the
+rules remain in effect, blocking all non-proxy traffic. **This is the correct
+fail-closed behavior.** Flushing only happens in the graceful-exit path in `main.rs`
+(lines 752–762). A hard kill leaves rules intact. ✓
+
+---
+
+### `src/core/state_machine.rs` — REVIEWED, NO FINDINGS
+
+**State-before-validation check:** Not applicable — this module has no AEAD/sig/PoW checks.
+Its entire purpose is a type-state pattern enforcing that only `GuardedSocket<ActiveGuarded>`
+can transmit data, and that the `Verifying → ActiveGuarded` transition (via `mark_verified`)
+is only reachable by calling `begin_verification()` first, which can only be called on
+`Uninitialized`.
+
+**Kill-switch check:** `send_guarded` and `recv_guarded` both check the `AtomicBool` via
+`Ordering::SeqCst` before any I/O (lines 101, 115). `poll_read` and `poll_write` also check
+at the start of each poll (lines 156, 179). No data flows to/from a tripped socket.
+
+**`fail_verification` (line 86):** immediately `store(true, SeqCst)` on the kill-switch
+**before** returning the `DroppedFailClosed` socket. This is fail-closed: even if the
+caller doesn't inspect the returned socket, the kill-switch is already tripped.
+
+**`Drop` impl (line 218–226):** spawns a task to call `.shutdown()` on the inner stream.
+This is a best-effort graceful close; there is no panic or state-before-validation issue.
+
+---
+
+### `src/main.rs` — REVIEWED, ONE OPEN QUESTION
+
+**State-before-validation check:** No direct AEAD/sig/PoW mutations visible in `main.rs`
+itself. Consensus retrieval loop (lines 554–663) fetches documents, validates peer keys
+against `auth_keys`, and calls `load_from_multi_consensus` — all state mutations delegated
+to `pool.rs` (verified safe in Session 2).
+
+**`--enable-firewall-killswitch` nftables failure (lines 346–353):** On `apply_nftables_rules()`
+failure, the daemon **logs a warning and continues** without the kernel-level killswitch
+(falls back to process-level). This is exactly the "fail-open-with-a-warning" pattern that
+Part A Rule 7 identifies as not a real fix.
+
+**Citation:** `src/main.rs` lines 346–353.
+**Mechanism:** Operator enables `--enable-firewall-killswitch` expecting kernel-level
+traffic isolation. If `nft` is unavailable or `CAP_NET_ADMIN` is missing, the daemon
+continues with only the application-layer kill-switch, without any indication to the user
+beyond a log line that may not be visible.
+**Status:** SUSPECTED FINDING — mismatches Part A Rule 7 (warn-and-proceed ≠ fix).
+Downgraded from confirmed because `--strict-fail-closed` (line 155) exists as an operator
+escape hatch that will abort startup on precisely this condition. If `--strict-fail-closed`
+is always used alongside `--enable-firewall-killswitch`, the behavior is correct.
+The question is whether the documentation makes this coupling clear enough, or whether a
+user can accidentally run with `--enable-firewall-killswitch` alone and believe they have
+kernel-level isolation when they don't. **Not a code bug if documented clearly; needs a
+doc check against `THREAT_MODEL.md` or the README.**
+
+**`allow_open_socks5` / `allow_private_exit` gate (lines 415–420):** Requires explicit
+`--i-know-this-is-insecure` flag to proceed. Correct fail-closed design per Rule 4.
+
+**Consensus `quorum_threshold = 0` clamp (lines 529–536):** Clamps to 1 if authorities are
+configured and threshold is 0, with a warning. This is correct — 0-of-N consensus would be
+vacuously true.
+
+---
+
+## Tier 4 Fixes Applied This Session
+
+### CI fuzz wiring — FIXED
+**Citation:** `.github/workflows/ci.yml` lines 53–65 (after fix).
+**Before:** 3 of 10 targets ran in CI.
+**After:** All 10 existing targets + the new `fuzz_multipath_reassembler` now run
+for 60 seconds each on every push/PR to `main`.
+**Evidence:** diff committed in this session.
+
+### `fuzz_multipath_reassembler` — ADDED
+**Citation:** `fuzz/fuzz_targets/fuzz_multipath_reassembler.rs` (new file).
+**Coverage:** Exercises `MultiPathReassembler::receive` and `pop_next_buffered` with
+arbitrary byte inputs including frames shorter than 8 bytes, arbitrary sequence numbers,
+and sequences pushing the `MAX_SEQ_GAP`/`MAX_BUFFERED_ENTRIES` bounds established by the
+F5 fix. Registered in `fuzz/Cargo.toml` and wired into CI.
+
+---
+
+## Modules NOT Yet Covered (Remaining Open Tier 1 Work)
+
+- `src/gateway/chain.rs` — not yet read
+- `src/gateway/server.rs` — not yet read in full (only partial coverage of auth paths)
+- `src/mesh/authority.rs` — not yet fully audited
+- Sphinx packet format — location not yet confirmed (not in `multipath_router.rs`)
+- Guard-state persistence (`GuardState::save`/`load`) tamper-resistance
+- `--enable-firewall-killswitch` + `--strict-fail-closed` coupling documentation (open question from `main.rs` audit)
+

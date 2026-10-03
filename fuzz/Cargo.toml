@@ -85,3 +85,10 @@ path = "fuzz_targets/fuzz_proxy_node_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_multipath_reassembler"
+path = "fuzz_targets/fuzz_multipath_reassembler.rs"
+test = false
+doc = false
+bench = false
