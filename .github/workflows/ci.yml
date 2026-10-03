@@ -81,7 +81,7 @@ jobs:
         run: |
           cargo tarpaulin --out Xml --out Html
           # Verify module-level coverage manually for critical modules
-          cargo tarpaulin --fail-under 80
+          python scripts/coverage_enforcer.py cobertura.xml
       
       - name: Upload coverage reports
         uses: actions/upload-artifact@v4
