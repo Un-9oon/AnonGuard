@@ -312,20 +312,34 @@ impl DirectoryAuthority {
             if peer == &self.listen_addr {
                 continue;
             }
-            if let Ok(Some(peer_sig)) =
-                Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex).await
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex),
+            )
+            .await
             {
-                // Verify the signature is valid for this digest before appending
-                if let Some(pubkey) = pinned_key {
-                    if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
-                        let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
-                        if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
-                            consensus.signatures.push(peer_sig);
+                Ok(Ok(Some(peer_sig))) => {
+                    // Verify the signature is valid for this digest before appending
+                    if let Some(pubkey) = pinned_key {
+                        if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
+                            let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                            if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
+                                consensus.signatures.push(peer_sig);
+                            }
                         }
+                    } else {
+                        warn!("Authority [{}]: Skipping cross-check signature from unauthenticated peer {}", self.authority_id, peer);
                     }
-                } else if self.allow_unauthenticated_registration {
-                    // In unauthenticated mode, we blindly accept the signature (only for testing)
-                    consensus.signatures.push(peer_sig);
+                }
+                Ok(Ok(None)) => {
+                    // Peer explicitly rejected our digest (mismatch)
+                    warn!("Authority [{}]: Peer {} rejected our cross-check digest", self.authority_id, peer);
+                }
+                Ok(Err(e)) => {
+                    warn!("Authority [{}]: Failed to fetch cross-check from peer {}: {}", self.authority_id, peer, e);
+                }
+                Err(_) => {
+                    warn!("Authority [{}]: Timeout fetching cross-check from peer {}", self.authority_id, peer);
                 }
             }
         }

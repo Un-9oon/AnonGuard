@@ -25,7 +25,7 @@ async fn test_network_partition_no_split_brain() {
             addr.clone(),
             test_difficulty,
         );
-        auth.allow_unauthenticated_registration = true;
+        auth.allow_unauthenticated_registration = false;
         pinned_keys.insert(addr, auth.verifying_key());
         auths.push(auth);
     }
