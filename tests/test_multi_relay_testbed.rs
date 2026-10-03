@@ -4,7 +4,7 @@
 //! 1. Circuit success rate against cell-dropping malicious relays.
 //! 2. Subnet diversity defenses against targeted flooding from a single /16 block.
 
-use anonguard::mesh::node::ProxyNode;
+
 use anonguard::mesh::pool::ProxyPool;
 use anonguard::mesh::sybil::validate_circuit_diversity;
 

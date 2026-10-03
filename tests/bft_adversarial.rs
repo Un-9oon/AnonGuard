@@ -36,21 +36,20 @@ async fn test_adversarial_bft_cross_check() {
     }
     
     // Setup peer lists
-    for i in 0..4 {
+    for auth in auths.iter_mut().take(4) {
         let mut peers = Vec::new();
-        for j in 0..4 {
-            let addr = addrs[j].clone();
-            let key = pinned_keys.get(&addr).unwrap().clone();
-            peers.push((addr, Some(key)));
+        for addr in addrs.iter().take(4) {
+            let key = *pinned_keys.get(addr).unwrap();
+            peers.push((addr.clone(), Some(key)));
         }
-        auths[i].peer_authorities = peers;
+        auth.peer_authorities = peers;
     }
     
     // Spawn the honest authorities (0, 1, 2)
-    for i in 0..3 {
-        let auth = auths[i].clone();
+    for auth in auths.iter().take(3) {
+        let auth_clone = auth.clone();
         tokio::spawn(async move {
-            let _ = auth.run().await;
+            let _ = auth_clone.run().await;
         });
     }
     

@@ -363,10 +363,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::collections::HashMap::new();
     if let Some(ref keys_str) = args.authority_keys {
         for entry in keys_str.split(',') {
-            let parts: Vec<&str> = entry.trim().split(':').collect();
-            if parts.len() == 2 {
-                let id = parts[0].trim().to_string();
-                if let Some(bytes) = decode_hex_32(parts[1].trim()) {
+            // Split by the last colon to allow "ip:port:key" as well as "id:key"
+            if let Some((id_or_addr, key_hex)) = entry.trim().rsplit_once(':') {
+                let id = id_or_addr.trim().to_string();
+                if let Some(bytes) = decode_hex_32(key_hex.trim()) {
                     if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
                         trusted_authorities.insert(id, vk);
                     }
@@ -564,13 +564,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         let host_port = raw_addr.trim_start_matches("http://");
                         let pinned_key = if let Some(aid) = auth_id_opt {
                             auth_keys.get(aid).or_else(|| auth_keys.get(host_port))
-                        } else if let Some(k) = auth_keys.get(host_port) {
-                            Some(k)
-                        } else if auth_keys.len() == 1 {
-                            auth_keys.values().next()
                         } else {
-                            auth_keys.get(endpoint)
+                            auth_keys.get(host_port).or_else(|| auth_keys.get(endpoint))
                         };
+
+                        if !auth_keys.is_empty() && pinned_key.is_none() {
+                            tracing::error!(
+                                endpoint = %endpoint,
+                                "Rejected Directory Authority: --authority-keys is configured but no matching key was found for this specific endpoint"
+                            );
+                            continue;
+                        }
 
                         match tokio::net::TcpStream::connect(host_port).await {
                             Ok(stream) => {
@@ -580,19 +584,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 .await
                                 {
                                     Ok(mut session) => {
-                                        if let Some(peer_vk) = session.peer_verifying_key() {
-                                            // Strictly reject any peer key that is not in the trusted authority set if authority keys were configured.
-                                            // Never auto-insert (trust-first-seen) — callers must supply --authority-keys.
-                                            if !auth_keys.is_empty()
-                                                && !auth_keys.values().any(|vk| vk == &peer_vk)
-                                            {
-                                                tracing::error!(
-                                                    endpoint = %endpoint,
-                                                    "Rejected Directory Authority: peer key is not in --authority-keys"
-                                                );
-                                                continue;
-                                            }
-                                        }
+                                        // The handshake already verifies `pinned_key` strictly if it is `Some`.
+                                        // We no longer need the weak `auth_keys.values().any` check here, which
+                                        // was vulnerable to cross-authority MITM.
 
                                         if session.write_frame(b"GET_CONSENSUS").await.is_ok() {
                                             if let Ok(frame) = session.read_frame().await {

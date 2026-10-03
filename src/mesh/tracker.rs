@@ -165,8 +165,7 @@ async fn handle_connection(
 
             let mut dir = directory.write().await;
             if let Some(existing) = dir.get(&node_id) {
-                if !existing.auth_token.is_empty()
-                    && subtle::ConstantTimeEq::ct_eq(
+                if subtle::ConstantTimeEq::ct_eq(
                         existing.auth_token.as_bytes(),
                         auth_token.as_bytes(),
                     )
