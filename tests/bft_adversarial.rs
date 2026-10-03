@@ -86,7 +86,7 @@ async fn test_adversarial_bft_cross_check() {
     // Check that it got 3 signatures (from 0, 1, 2).
     // N=4 => f=1 => 2f+1 = 3 signatures required.
     assert!(
-        consensus.signatures.len() >= 3,
+        consensus.unwrap().signatures.len() >= 3,
         "Failed to reach quorum without the malicious node"
     );
 }

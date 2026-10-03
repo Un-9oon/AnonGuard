@@ -90,7 +90,8 @@ async fn test_gossip_impersonation_rejection() {
     let consensus_a = auth_a.generate_consensus().await;
 
     // Check that A still has K1, not K2!
-    let final_desc = consensus_a
+    let consensus_doc = consensus_a.unwrap();
+    let final_desc = consensus_doc
         .relays
         .iter()
         .find(|r| r.node_id == "relay-target")

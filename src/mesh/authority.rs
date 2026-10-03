@@ -270,7 +270,7 @@ impl DirectoryAuthority {
     }
 
     /// Generates and signs the current consensus document, executing a BFT cross-check round.
-    pub async fn generate_consensus(&self) -> ConsensusDocument {
+    pub async fn generate_consensus(&self) -> Result<ConsensusDocument, String> {
         let now = current_timestamp_secs();
         {
             let mut relays = self.active_relays.write().await;
@@ -337,16 +337,17 @@ impl DirectoryAuthority {
                 consensus.signatures.len(),
                 required_signatures
             );
+            Ok(consensus)
         } else {
-            warn!(
+            let msg = format!(
                 "Authority [{}]: BFT Cross-check failed (only {} signatures acquired, required {})",
                 self.authority_id,
                 consensus.signatures.len(),
                 required_signatures
             );
+            warn!("{}", msg);
+            Err(msg)
         }
-
-        consensus
     }
 
     /// Reconciles relay descriptors with peer authorities before consensus generation.
@@ -544,9 +545,15 @@ impl DirectoryAuthority {
                         {
                             let text = String::from_utf8_lossy(&frame);
                             if text.starts_with("GET_CONSENSUS") {
-                                let consensus = auth_self.generate_consensus().await;
-                                if let Ok(serialized) = serde_json::to_vec(&consensus) {
-                                    let _ = session.write_frame(&serialized).await;
+                                match auth_self.generate_consensus().await {
+                                    Ok(consensus) => {
+                                        if let Ok(serialized) = serde_json::to_vec(&consensus) {
+                                            let _ = session.write_frame(&serialized).await;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        let _ = session.write_frame(b"ERROR_BFT_QUORUM_NOT_REACHED").await;
+                                    }
                                 }
                             } else if text.starts_with("GET_RELAY_LIST") {
                                 let relays = active_relays.read().await;

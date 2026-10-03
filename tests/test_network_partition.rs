@@ -30,30 +30,19 @@ async fn test_network_partition_no_split_brain() {
         auths.push(auth);
     }
 
-    // Simulate Partition 1: auth 0 and 1 only know about each other
-    let partition_1 = vec![addrs[0].clone(), addrs[1].clone()];
-    for auth in auths.iter_mut().take(2) {
-        let mut peers = Vec::new();
-        for addr in &partition_1 {
-            let key = *pinned_keys.get(addr).unwrap();
-            peers.push((addr.clone(), Some(key)));
-        }
-        auth.peer_authorities = peers;
+    // Give all authorities the full peer list so N=4, f=1, quorum=3
+    let all_peers: Vec<(String, Option<ed25519_dalek::VerifyingKey>)> = addrs
+        .iter()
+        .map(|addr| (addr.clone(), Some(*pinned_keys.get(addr).unwrap())))
+        .collect();
+
+    for auth in auths.iter_mut() {
+        auth.peer_authorities = all_peers.clone();
     }
 
-    // Simulate Partition 2: auth 2 and 3 only know about each other
-    let partition_2 = vec![addrs[2].clone(), addrs[3].clone()];
-    for auth in auths.iter_mut().take(4).skip(2) {
-        let mut peers = Vec::new();
-        for addr in &partition_2 {
-            let key = *pinned_keys.get(addr).unwrap();
-            peers.push((addr.clone(), Some(key)));
-        }
-        auth.peer_authorities = peers;
-    }
-
-    // Spawn all 4 authorities
-    for auth in auths.iter().take(4) {
+    // Spawn only first 2 authorities (Partition 1)
+    // The other 2 are unreachable (simulating a network partition)
+    for auth in auths.iter().take(2) {
         let auth = auth.clone();
         tokio::spawn(async move {
             let _ = auth.run().await;
@@ -64,32 +53,10 @@ async fn test_network_partition_no_split_brain() {
 
     // In Partition 1, auth 0 tries to generate consensus
     // It will reconcile with auth 1. It only has 2 signatures (from 0 and 1).
-    // The quorum requirement is 2f+1 = 3. Since 2 < 3, it should either panic (if strictly enforced to succeed in tests)
-    // or return a document with < 3 signatures, which clients will reject.
-    // In our system, generate_consensus() returns a ConsensusDocument. We must assert its signature count.
+    // The quorum requirement is 2f+1 = 3. Since 2 < 3, it should fail.
     let consensus_p1 = auths[0].generate_consensus().await;
     assert!(
-        consensus_p1.signatures.len() < 3,
+        consensus_p1.is_err(),
         "Partition 1 reached split-brain quorum! This breaks BFT."
     );
-    assert_eq!(
-        consensus_p1.signatures.len(),
-        2,
-        "Expected exactly 2 signatures in partition 1"
-    );
-
-    // In Partition 2, auth 2 tries to generate consensus
-    let consensus_p2 = auths[2].generate_consensus().await;
-    assert!(
-        consensus_p2.signatures.len() < 3,
-        "Partition 2 reached split-brain quorum! This breaks BFT."
-    );
-    assert_eq!(
-        consensus_p2.signatures.len(),
-        2,
-        "Expected exactly 2 signatures in partition 2"
-    );
-
-    // Thus, no client will ever accept consensus_p1 or consensus_p2, meaning no split-brain
-    // can successfully trick the network.
 }

@@ -63,3 +63,30 @@ jobs:
           cargo +nightly fuzz run fuzz_socks5_frame -- -max_total_time=60
           cargo +nightly fuzz run fuzz_verify_pow -- -max_total_time=60
           cargo +nightly fuzz run fuzz_multipath_reassembler -- -max_total_time=60
+
+  coverage:
+    name: Code Coverage Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+
+      - name: Generate Coverage Report
+        run: |
+          cargo tarpaulin --out Xml --out Html
+          # Verify module-level coverage manually for critical modules
+          cargo tarpaulin --fail-under 80
+      
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report
+          path: |
+            cobertura.xml
+            tarpaulin-report.html
