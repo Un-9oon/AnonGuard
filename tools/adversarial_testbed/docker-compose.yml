@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  authority:
+    build:
+      context: ../../
+      dockerfile: tools/adversarial_testbed/Dockerfile
+    command: ["anonguard-daemon", "--role", "authority", "--port", "19000"]
+    networks:
+      - anonguard_net
+
+  relay-honest:
+    build:
+      context: ../../
+      dockerfile: tools/adversarial_testbed/Dockerfile
+    command: ["anonguard-daemon", "--role", "relay", "--port", "1080", "--authority", "authority:19000"]
+    networks:
+      - anonguard_net
+    deploy:
+      replicas: 10
+
+  relay-malicious:
+    build:
+      context: ../../
+      dockerfile: tools/adversarial_testbed/Dockerfile
+    command: ["anonguard-daemon", "--role", "relay", "--port", "1080", "--authority", "authority:19000", "--malicious-drop-cells", "--malicious-tamper-extend"]
+    networks:
+      - anonguard_net
+    deploy:
+      replicas: 5
+
+networks:
+  anonguard_net:
+    driver: bridge
