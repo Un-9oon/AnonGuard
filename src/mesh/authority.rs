@@ -239,13 +239,6 @@ impl DirectoryAuthority {
             return Err("Invalid or insufficient Proof-of-Work challenge solution".to_string());
         }
 
-        if self
-            .nonce_registry
-            .check_and_record(&descriptor.node_id, descriptor.pow_nonce, now)
-        {
-            return Err("PoW replay attack detected".to_string());
-        }
-
         let mut relays = self.active_relays.write().await;
         if let Some(existing) = relays.get(&descriptor.node_id) {
             if existing.identity_key_ed25519 != descriptor.identity_key_ed25519 {
@@ -259,6 +252,13 @@ impl DirectoryAuthority {
                     "Replay attack prevented: registration timestamp is not newer".to_string(),
                 );
             }
+        }
+
+        if self
+            .nonce_registry
+            .check_and_record(&descriptor.node_id, descriptor.pow_nonce, now)
+        {
+            return Err("PoW replay attack detected".to_string());
         }
 
         info!(
@@ -471,16 +471,8 @@ impl DirectoryAuthority {
                                             now,
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
-                                        } else if registry.check_and_record(
-                                            &desc.node_id,
-                                            desc.pow_nonce,
-                                            now,
-                                        ) {
-                                            let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
-                                            if existing.identity_key_ed25519
-                                                != desc.identity_key_ed25519
-                                            {
+                                            if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
                                                 let _ = session
                                                     .write_frame(
                                                         b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED",
@@ -490,10 +482,22 @@ impl DirectoryAuthority {
                                                 let _ = session
                                                     .write_frame(b"ERROR_REPLAY_DETECTED")
                                                     .await;
+                                            } else if registry.check_and_record(
+                                                &desc.node_id,
+                                                desc.pow_nonce,
+                                                now,
+                                            ) {
+                                                let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
                                             } else {
                                                 relays.insert(desc.node_id.clone(), desc);
                                                 let _ = session.write_frame(b"OK_REGISTERED").await;
                                             }
+                                        } else if registry.check_and_record(
+                                            &desc.node_id,
+                                            desc.pow_nonce,
+                                            now,
+                                        ) {
+                                            let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
                                         } else {
                                             relays.insert(desc.node_id.clone(), desc);
                                             let _ = session.write_frame(b"OK_REGISTERED").await;

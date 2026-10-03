@@ -65,21 +65,31 @@ impl GuardState {
         match serde_json::to_string_pretty(self) {
             Ok(json) => {
                 let temp_path = path.with_extension("tmp");
-                if let Err(e) = fs::write(&temp_path, json) {
+                #[cfg(unix)]
+                let write_result = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&temp_path)
+                        .and_then(|mut f| {
+                            use std::io::Write;
+                            f.write_all(json.as_bytes())?;
+                            f.sync_all()
+                        })
+                };
+                
+                #[cfg(not(unix))]
+                let write_result = fs::write(&temp_path, &json);
+
+                if let Err(e) = write_result {
                     error!(
-                        "Failed to write temporary guard state to {:?}: {}",
+                        "Failed to write temporary guard state securely to {:?}: {}",
                         temp_path, e
                     );
                     return;
-                }
-
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(mut perms) = fs::metadata(&temp_path).map(|m| m.permissions()) {
-                        perms.set_mode(0o600);
-                        let _ = fs::set_permissions(&temp_path, perms);
-                    }
                 }
 
                 if let Err(e) = fs::rename(&temp_path, path) {

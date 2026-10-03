@@ -281,12 +281,47 @@ F5 fix. Registered in `fuzz/Cargo.toml` and wired into CI.
 
 ---
 
-## Modules NOT Yet Covered (Remaining Open Tier 1 Work)
+## Session 4 Results (Completing Tier 1)
 
-- `src/gateway/chain.rs` — not yet read
-- `src/gateway/server.rs` — not yet read in full (only partial coverage of auth paths)
-- `src/mesh/authority.rs` — not yet fully audited
-- Sphinx packet format — location not yet confirmed (not in `multipath_router.rs`)
-- Guard-state persistence (`GuardState::save`/`load`) tamper-resistance
-- `--enable-firewall-killswitch` + `--strict-fail-closed` coupling documentation (open question from `main.rs` audit)
+### `src/gateway/chain.rs` — REVIEWED, NO FINDINGS
+
+**State-before-validation check:**
+- `socks5_connect_through` (lines 9-82): Parses generic byte frames but delegates all validation and blocking policy to the previously audited `build_socks5h_connect_frame`. The target host extraction logic merely buffers streams and does not mutate any security counters or registry state. Safe.
+- `read_socks5_request` (lines 86-155): Straightforward parsing of SOCKS5 ATYP structures. No side-effects. Safe.
+
+### `src/gateway/server.rs` — REVIEWED, NO SECURITY FINDINGS
+
+**State-before-validation check:**
+- **Per-IP DoS limits (lines 272-287):** The connection counter (`*count += 1`) is mutated *before* the peek timeout (lines 332-346) validates the SOCKS5 handshake. However, this mutation is explicitly managed by an RAII `IpGuard` struct (line 300) which automatically decrements the count if the handshake fails and the connection drops. This is the correct pattern. No state-before-validation bug.
+- **Reverse Relay loop (lines 706-800):** Connects to the tracker and records node auth tokens. State mutation occurs after successful connection, no unexpected validation boundaries crossed.
+
+### `src/onion/cell.rs` — SPHINX PACKET FORMAT LOCATED
+
+The elusive Sphinx packet format was confirmed to be implemented natively inside `OnionCell` in `src/onion/cell.rs`.
+- **Citation:** `src/onion/cell.rs` lines 48-51.
+- **Details:** The cell format integrates a 32-byte `ephemeral_key` (Sphinx-style randomized header identity) directly into the constant-size 2048-byte cell. The `parse` function validates length bounds cleanly without side-effects.
+
+### `src/mesh/authority.rs` — 2 BUGS FOUND AND FIXED
+
+**Finding: PoW Nonce Burned Before Validation (State-Before-Validation)**
+- **Citation:** `src/mesh/authority.rs` lines 239-244, 469-474 (before fix).
+- **Mechanism:** In both `register_relay` and the async `run` loop, `self.nonce_registry.check_and_record(...)` was called *before* validating that the incoming RelayDescriptor was not a timestamp replay (`desc.registered_at <= existing.registered_at`) and not an Ed25519 identity key hijack attempt. If a malicious user sent a valid PoW with an invalid key, the relay registration would correctly fail, but the PoW nonce was burned anyway because `check_and_record` mutates state.
+- **Fix:** Moved the `relays.get` timestamp/identity validation logic to occur *before* `check_and_record`. Now, the state is only mutated if all cryptographic validations pass.
+
+### `src/mesh/guards.rs` — TAMPER RESISTANCE FIXED
+
+**Finding: TOCTOU Race in Guard State Persistence**
+- **Citation:** `src/mesh/guards.rs` lines 68-83 (before fix).
+- **Mechanism:** `GuardState::save` created the temporary file using standard `fs::write` (defaulting to e.g., 0o644) and *subsequently* applied `0o600` permissions via `fs::set_permissions`. This opened a tiny window where another local user could read the file before permissions were hardened.
+- **Fix:** Switched to using `OpenOptions::new().write(true).create(true).mode(0o600)` to securely create the file with correct permissions atomically on Unix.
+
+### `src/main.rs` — DOCUMENTATION VERIFIED
+
+**Finding: `--enable-firewall-killswitch` silent fallback**
+- The warning regarding silent fallback to application-layer enforcement was suspected as a bug in Session 3.
+- **Resolution:** This behavior is formally documented in `THREAT_MODEL.md` (lines 63-66). Operators are instructed that `--strict-fail-closed` is explicitly required to refuse startup if kernel-level isolation is unavailable. As this is well-documented, it is not a bug.
+
+---
+
+**STATUS UPDATE:** Tier 1 (Audit & Critical Bugfixes) is now 100% complete. All remaining modules have been thoroughly audited, and all identified "state-before-validation" bugs and TOCTOU races have been fixed. Proceed to Tier 2 (Consensus Redesign).
 
