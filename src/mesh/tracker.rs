@@ -171,11 +171,11 @@ async fn handle_connection(
             let mut dir = directory.write().await;
             if let Some(existing) = dir.get(&node_id) {
                 if subtle::ConstantTimeEq::ct_eq(
-                        existing.auth_token.as_bytes(),
-                        auth_token.as_bytes(),
-                    )
-                    .unwrap_u8()
-                        == 0
+                    existing.auth_token.as_bytes(),
+                    auth_token.as_bytes(),
+                )
+                .unwrap_u8()
+                    == 0
                 {
                     warn!(
                         "Rejected REGISTER_REVERSE for node {} (auth token mismatch/hijacking attempt)",

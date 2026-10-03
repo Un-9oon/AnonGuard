@@ -1,5 +1,3 @@
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
 #[tokio::test]
 async fn test_multipath_and_poisson_routing() {
     // This test simulates the VM environment setup.
@@ -8,7 +6,6 @@ async fn test_multipath_and_poisson_routing() {
 
     // In a real environment, this tests the pipeline from the client SOCKS port
     // through the Gateway, to the Exit node.
-    assert!(true, "Routing simulation initiated.");
 
     // Detailed test implementation would require spinning up the Gateway and Exit instances
     // and passing traffic between them over loopback TCP sockets.

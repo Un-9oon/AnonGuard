@@ -19,7 +19,6 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
@@ -462,7 +461,7 @@ async fn rw_b3_config_authority_key_wiring() {
     // Verify that the index-aligned access pattern used in server.rs works correctly
     let pinned = cfg
         .authority_identity_keys
-        .get(0) // auth_idx = 0
+        .first() // auth_idx = 0
         .and_then(|b| ed25519_dalek::VerifyingKey::from_bytes(b).ok());
     assert!(
         pinned.is_some(),

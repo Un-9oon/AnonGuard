@@ -16,7 +16,7 @@ async fn test_direct_registration_rejects_pow_replay() {
 
     let now = current_timestamp_secs();
     let nonce = solve_pow_bounded("relay-replay-test", now, test_difficulty).unwrap();
-    
+
     let mut desc1 = RelayDescriptor::new(
         "relay-replay-test".to_string(),
         "1.1.1.1".to_string(),
@@ -49,5 +49,8 @@ async fn test_direct_registration_rejects_pow_replay() {
     desc2.sign_with_key(&relay_key2);
 
     let res2 = auth.register_relay(desc2).await;
-    assert!(res2.is_err(), "Second registration with replayed PoW nonce must fail");
+    assert!(
+        res2.is_err(),
+        "Second registration with replayed PoW nonce must fail"
+    );
 }

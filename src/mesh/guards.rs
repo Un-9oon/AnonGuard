@@ -80,7 +80,7 @@ impl GuardState {
                             f.sync_all()
                         })
                 };
-                
+
                 #[cfg(not(unix))]
                 let write_result = fs::write(&temp_path, &json);
 

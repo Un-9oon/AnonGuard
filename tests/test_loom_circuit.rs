@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 #![cfg(loom)]
 
 use loom::sync::{Arc, Mutex, RwLock};
@@ -12,13 +13,16 @@ fn test_lock_ordering_tracker() {
         }
 
         let directory = Arc::new(RwLock::new(HashMap::new()));
-        
+
         // Initial state setup
         {
             let mut dir = directory.write().unwrap();
-            dir.insert("node1".to_string(), ReverseNodeEntry {
-                streams: Arc::new(Mutex::new(Vec::new())),
-            });
+            dir.insert(
+                "node1".to_string(),
+                ReverseNodeEntry {
+                    streams: Arc::new(Mutex::new(Vec::new())),
+                },
+            );
         }
 
         let dir_clone1 = directory.clone();

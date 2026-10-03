@@ -12,7 +12,7 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use crate::mesh::consensus::{ConsensusDocument, RelayDescriptor, AuthoritySignature};
+use crate::mesh::consensus::{AuthoritySignature, ConsensusDocument, RelayDescriptor};
 use crate::mesh::sybil::{current_timestamp_secs, verify_pow, DEFAULT_POW_DIFFICULTY};
 use crate::mesh::transport::SecureTransportSession;
 
@@ -307,12 +307,14 @@ impl DirectoryAuthority {
         // This ensures the document handed to clients is already multi-signed and verified.
         let f = self.peer_authorities.len() / 3;
         let required_signatures = 2 * f + 1; // 2f+1 quorum (including ourselves)
-        
+
         for (peer, pinned_key) in &self.peer_authorities {
             if peer == &self.listen_addr {
                 continue;
             }
-            if let Ok(Some(peer_sig)) = Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex).await {
+            if let Ok(Some(peer_sig)) =
+                Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex).await
+            {
                 // Verify the signature is valid for this digest before appending
                 if let Some(pubkey) = pinned_key {
                     if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
@@ -327,11 +329,21 @@ impl DirectoryAuthority {
                 }
             }
         }
-        
+
         if consensus.signatures.len() >= required_signatures {
-            info!("Authority [{}]: BFT Cross-check succeeded ({} signatures acquired, required {})", self.authority_id, consensus.signatures.len(), required_signatures);
+            info!(
+                "Authority [{}]: BFT Cross-check succeeded ({} signatures acquired, required {})",
+                self.authority_id,
+                consensus.signatures.len(),
+                required_signatures
+            );
         } else {
-            warn!("Authority [{}]: BFT Cross-check failed (only {} signatures acquired, required {})", self.authority_id, consensus.signatures.len(), required_signatures);
+            warn!(
+                "Authority [{}]: BFT Cross-check failed (only {} signatures acquired, required {})",
+                self.authority_id,
+                consensus.signatures.len(),
+                required_signatures
+            );
         }
 
         consensus
@@ -400,7 +412,9 @@ impl DirectoryAuthority {
                             local_map
                                 .entry(desc.node_id.clone())
                                 .and_modify(|existing| {
-                                    if desc.registered_at > existing.registered_at {
+                                    if desc.identity_key_ed25519 != existing.identity_key_ed25519 {
+                                        warn!("Authority [{}]: Rejected impersonation attempt via gossip for node_id {}: identity key mismatch", self.authority_id, desc.node_id);
+                                    } else if desc.registered_at > existing.registered_at {
                                         *existing = desc.clone();
                                     }
                                 })
@@ -429,6 +443,12 @@ impl DirectoryAuthority {
         // so we don't have to re-fetch them successfully on every round.
         let mut active = self.active_relays.write().await;
         for (id, desc) in &local_map {
+            if let Some(existing) = active.get(id) {
+                if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
+                    warn!("Authority [{}]: Rejected impersonation attempt during local persist for node_id {}: identity key mismatch", self.authority_id, id);
+                    continue;
+                }
+            }
             active.insert(id.clone(), desc.clone());
         }
 
@@ -542,17 +562,15 @@ impl DirectoryAuthority {
                                 let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
                                 let now = current_timestamp_secs();
                                 let bucketed_now = (now / 300) * 300;
-                                let mut local_consensus = ConsensusDocument::new(
-                                    bucketed_now,
-                                    bucketed_now + 3600,
-                                    list,
-                                );
-                                
+                                let mut local_consensus =
+                                    ConsensusDocument::new(bucketed_now, bucketed_now + 3600, list);
+
                                 let our_digest = local_consensus.compute_digest();
                                 let our_digest_hex = hex::encode(our_digest);
-                                
+
                                 if our_digest_hex == digest_hex {
-                                    local_consensus.sign_with_authority(&auth_self.authority_id, &signing_key);
+                                    local_consensus
+                                        .sign_with_authority(&auth_self.authority_id, &signing_key);
                                     let our_sig = local_consensus.signatures.pop().unwrap();
                                     if let Ok(serialized) = serde_json::to_string(&our_sig) {
                                         let resp = format!("OK_SIGNED {}", serialized);
@@ -579,7 +597,9 @@ impl DirectoryAuthority {
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
-                                            if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
+                                            if existing.identity_key_ed25519
+                                                != desc.identity_key_ed25519
+                                            {
                                                 let _ = session
                                                     .write_frame(
                                                         b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED",
@@ -594,7 +614,8 @@ impl DirectoryAuthority {
                                                 desc.pow_nonce,
                                                 now,
                                             ) {
-                                                let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
+                                                let _ =
+                                                    session.write_frame(b"ERROR_POW_REPLAY").await;
                                             } else {
                                                 relays.insert(desc.node_id.clone(), desc);
                                                 let _ = session.write_frame(b"OK_REGISTERED").await;
