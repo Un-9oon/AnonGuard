@@ -390,10 +390,13 @@ impl DirectoryAuthority {
                                 warn!("Authority [{}]: Rejected invalid PoW from peer gossip for relay {}", self.authority_id, desc.node_id);
                                 continue;
                             }
-                            if self.nonce_registry.check_and_record(&desc.node_id, desc.pow_nonce, now) {
-                                warn!("Authority [{}]: Rejected replayed PoW from peer gossip for relay {}", self.authority_id, desc.node_id);
-                                continue;
-                            }
+                            // BUG FIX: Removed `self.nonce_registry.check_and_record()` from the gossip path.
+                            // The descriptor is already signature-verified by `verify_identity()` above,
+                            // and the PoW is verified by `verify_pow()`. Gossip naturally re-propagates
+                            // the identical registration (with the same PoW nonce) across rounds.
+                            // Rejecting it as a "replay" here prevents consensus from converging.
+                            // The PoW replay check remains correctly enforced on the direct
+                            // registration path (`register_relay()`).
                             local_map
                                 .entry(desc.node_id.clone())
                                 .and_modify(|existing| {
@@ -420,6 +423,13 @@ impl DirectoryAuthority {
                     );
                 }
             }
+        }
+
+        // Persist confirmed-good gossiped descriptors back into `self.active_relays`
+        // so we don't have to re-fetch them successfully on every round.
+        let mut active = self.active_relays.write().await;
+        for (id, desc) in &local_map {
+            active.insert(id.clone(), desc.clone());
         }
 
         local_map.into_values().collect()
