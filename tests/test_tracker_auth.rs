@@ -8,24 +8,16 @@ use anonguard::mesh::tracker::TrackerServer;
 
 #[tokio::test]
 async fn test_tracker_re_registration_auth() {
-    let listen_addr = "127.0.0.1:0".to_string();
-    let tracker = TrackerServer::with_difficulty(listen_addr, DEFAULT_POW_DIFFICULTY);
+    let test_difficulty = 8;
+    let port = 40999;
+    let addr_str = format!("127.0.0.1:{}", port);
+    let tracker = TrackerServer::with_difficulty(addr_str.clone(), test_difficulty);
     
     // Start tracker
     let tracker_arc = std::sync::Arc::new(tracker);
     let tracker_clone = tracker_arc.clone();
-    
-    // We need to bind to get the actual port
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let local_addr = listener.local_addr().unwrap();
-    let addr_str = local_addr.to_string();
-    
-    // Since tracker run() does its own bind, let's create a custom instance
-    let test_difficulty = 8;
-    let tracker = TrackerServer::with_difficulty(addr_str.clone(), test_difficulty);
-    
     tokio::spawn(async move {
-        let _ = tracker.run().await;
+        tracker_arc.run().await.unwrap();
     });
     
     sleep(Duration::from_millis(100)).await;
@@ -46,7 +38,7 @@ async fn test_tracker_re_registration_auth() {
     sleep(Duration::from_millis(50)).await;
     
     // (b) Attempt to register node X again with a DIFFERENT token (and new PoW since nonces can't be replayed)
-    let now2 = current_timestamp_secs();
+    let now2 = current_timestamp_secs() + 1;
     let nonce2 = solve_pow_bounded(node_id, now2, test_difficulty).unwrap();
     
     let mut stream2 = TcpStream::connect(&addr_str).await.unwrap();
@@ -56,28 +48,38 @@ async fn test_tracker_re_registration_auth() {
     stream2.write_all(reg2.as_bytes()).await.unwrap();
     
     let mut buf = [0u8; 1024];
+    println!("Reading from stream2");
     let n = stream2.read(&mut buf).await.unwrap();
+    println!("Read from stream2: {}", n);
     let response = String::from_utf8_lossy(&buf[..n]);
     
     // (c) Assert the second attempt is rejected
     assert!(response.contains("ERROR_AUTH_TOKEN_MISMATCH"), "Second attempt with empty token should be rejected, got: {}", response);
     
     // Also try with a DIFFERENT non-empty token
-    let now3 = current_timestamp_secs();
-    let nonce3 = solve_pow_bounded(node_id, now3, DEFAULT_POW_DIFFICULTY).unwrap();
+    let now3 = current_timestamp_secs() + 2;
+    println!("Solving PoW 3");
+    let nonce3 = solve_pow_bounded(node_id, now3, test_difficulty).unwrap();
+    println!("Connecting stream3");
     let mut stream3 = TcpStream::connect(&addr_str).await.unwrap();
     let reg3 = format!("REGISTER_REVERSE {} {} {} {}\n", node_id, "wrong-token", now3, nonce3);
     stream3.write_all(reg3.as_bytes()).await.unwrap();
+    println!("Reading from stream3");
     let n = stream3.read(&mut buf).await.unwrap();
+    println!("Read from stream3: {}", n);
     let response3 = String::from_utf8_lossy(&buf[..n]);
     assert!(response3.contains("ERROR_AUTH_TOKEN_MISMATCH"), "Second attempt with wrong token should be rejected, got: {}", response3);
     
     // And confirm CONNECT_REVERSE for X still receives the stream pushed by token T (stream1)
+    println!("Connecting client");
     let mut client = TcpStream::connect(&addr_str).await.unwrap();
     let connect_cmd = format!("CONNECT_REVERSE {} {}\n", node_id, token_t);
     client.write_all(connect_cmd.as_bytes()).await.unwrap();
     
+    println!("Reading from client");
     let n = client.read(&mut buf).await.unwrap();
+    println!("Read from client: {}", n);
     let response_client = String::from_utf8_lossy(&buf[..n]);
     assert!(response_client.contains("OK"), "Legitimate client should connect successfully, got: {}", response_client);
+    println!("Test complete!");
 }

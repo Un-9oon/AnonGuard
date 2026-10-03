@@ -43,6 +43,7 @@ impl TrackerServer {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
+        eprintln!("TRACKER LISTENING ON {}", self.listen_addr);
         info!(
             "Rendezvous Tracker listening on {} (max {} concurrent connections)",
             self.listen_addr, DEFAULT_MAX_TRACKER_CONNECTIONS
@@ -50,6 +51,7 @@ impl TrackerServer {
 
         loop {
             let (stream, addr) = listener.accept().await?;
+            eprintln!("TRACKER ACCEPTED CONNECTION FROM {}", addr);
             let permit = match self.connection_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
@@ -91,7 +93,9 @@ async fn handle_connection(
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(_)) => {
+            eprintln!("TRACKER read line: {:?}", first_line);
+        }
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             warn!("Tracker read timed out (Slowloris defense)");
@@ -104,6 +108,7 @@ async fn handle_connection(
     }
 
     let cmd = first_line.trim().to_string();
+    eprintln!("TRACKER received cmd: {}", cmd);
 
     if cmd.starts_with("REGISTER_REVERSE") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -176,9 +181,11 @@ async fn handle_connection(
                         "Rejected REGISTER_REVERSE for node {} (auth token mismatch/hijacking attempt)",
                         node_id
                     );
+                    println!("TRACKER sending ERROR_AUTH_TOKEN_MISMATCH");
                     use tokio::io::AsyncWriteExt;
                     let mut s = reader.into_inner();
                     let _ = s.write_all(b"ERROR_AUTH_TOKEN_MISMATCH\n").await;
+                    println!("TRACKER sent ERROR_AUTH_TOKEN_MISMATCH");
                     return Ok(());
                 }
             }
