@@ -59,6 +59,9 @@ jobs:
       - name: Check all fuzz harness APIs before campaigns
         run: cargo check --locked --manifest-path fuzz/Cargo.toml --all-targets
 
+      - name: Replay proof-of-work short-header regression
+        run: cargo +nightly fuzz run fuzz_verify_pow fuzz/regressions/verify-pow-short-header.input -- -runs=1
+
       - name: Run Fuzz Targets
         run: |
           campaign_result=0

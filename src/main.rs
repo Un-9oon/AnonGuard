@@ -190,104 +190,16 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
 }
 
 fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::SigningKey {
-    use std::io::Write;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
-
-    use zeroize::Zeroize;
-
-    if path.exists() {
-        match std::fs::read(path) {
-            Ok(mut bytes) => match <[u8; 32]>::try_from(bytes.as_slice()) {
-                Ok(mut arr) => {
-                    let key = ed25519_dalek::SigningKey::from_bytes(&arr);
-                    arr.zeroize();
-                    bytes.zeroize();
-                    return key;
-                }
-                Err(_) => {
-                    bytes.zeroize();
-                    error!(
-                        "FATAL: Identity key file {:?} is corrupt (expected 32 bytes, got {}). \
-                        Delete it to generate a fresh key — existing relays will need to \
-                        re-handshake after the change.",
-                        path,
-                        bytes.len()
-                    );
-                    std::process::exit(1);
-                }
-            },
-            Err(e) => {
-                error!("FATAL: Cannot read identity key file {:?}: {}", path, e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Key file does not exist — create it with strict permissions
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            error!("FATAL: Cannot create key directory {:?}: {}", parent, e);
-            std::process::exit(1);
-        }
-    }
-    let mut temp_path = path.to_path_buf();
-    temp_path.set_extension("tmp");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut f = match options.open(&temp_path) {
-        Ok(f) => f,
+    match anonguard::core::storage::load_or_create_signing_key(path) {
+        Ok(key) => key,
         Err(e) => {
             error!(
-                "FATAL: Cannot create temporary identity key file {:?}: {}",
-                temp_path, e
+                "FATAL: Cannot load or persist identity key {:?}: {}",
+                path, e
             );
             std::process::exit(1);
         }
-    };
-    if let Err(e) = f.write_all(&key.to_bytes()) {
-        error!(
-            "FATAL: Cannot write temporary identity key file {:?}: {}",
-            temp_path, e
-        );
-        let _ = std::fs::remove_file(&temp_path);
-        std::process::exit(1);
     }
-    if let Err(e) = f.sync_all() {
-        error!(
-            "FATAL: Cannot sync temporary identity key file {:?}: {}",
-            temp_path, e
-        );
-        let _ = std::fs::remove_file(&temp_path);
-        std::process::exit(1);
-    }
-
-    // Belt-and-suspenders: set permissions explicitly in case umask interfered
-    #[cfg(unix)]
-    if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)) {
-        error!(
-            "FATAL: Cannot set permissions on temporary identity key file {:?}: {}",
-            temp_path, e
-        );
-        let _ = std::fs::remove_file(&temp_path);
-        std::process::exit(1);
-    }
-
-    // Atomic rename
-    if let Err(e) = std::fs::rename(&temp_path, path) {
-        error!(
-            "FATAL: Cannot atomically rename identity key file to {:?}: {}",
-            path, e
-        );
-        let _ = std::fs::remove_file(&temp_path);
-        std::process::exit(1);
-    }
-    key
 }
 
 #[tokio::main]

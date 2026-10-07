@@ -461,8 +461,7 @@ impl RelayCircuitHop {
                     "Sequence gap too large".to_string(),
                 ));
             }
-            // Only advance state after all checks pass
-            self.expected_recv_seq = seq + 1;
+            let next_seq = seq.checked_add(1).ok_or(CircuitError::SequenceExhausted)?;
 
             let command = CellCommand::from_u8(raw[8]).ok_or_else(|| {
                 CircuitError::ParseError(format!("Unknown cell command: {}", raw[8]))
@@ -471,6 +470,8 @@ impl RelayCircuitHop {
             if length as usize > PAYLOAD_SIZE {
                 return Err(CircuitError::PayloadTooShort);
             }
+            // Commit replay state only after the authenticated frame is valid.
+            self.expected_recv_seq = next_seq;
             return Ok(PeelOutcome::AddressedToThisRelay {
                 command,
                 len: (length as usize).min(PAYLOAD_SIZE),
@@ -1063,5 +1064,38 @@ mod aead_key_derivation_tests {
         }
         assert_ne!(leak_attempt, ck1_h0.forward_key);
         assert_ne!(leak_attempt, ck1_h1.forward_key);
+    }
+}
+
+#[cfg(test)]
+mod hostile_forward_frame_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_exhausted_and_malformed_frames_do_not_advance_replay_state() {
+        for (seq, command, length) in [
+            (u32::MAX, CellCommand::Data as u8, 1),
+            (1, 255, 1),
+            (1, CellCommand::Data as u8, PAYLOAD_SIZE as u16 + 1),
+        ] {
+            let mut relay = RelayCircuitHop::new(9, derive_hop_keys(&[71; 64]).unwrap(), 0);
+            relay.expected_recv_seq = seq;
+            let mut raw = OnionCell::new(9, seq, CellCommand::Data, 1, b"x")
+                .unwrap()
+                .serialize();
+            raw[8] = command;
+            raw[11..13].copy_from_slice(&length.to_be_bytes());
+            let (header, body) = raw.split_at_mut(8);
+            let (payload, tag) = body.split_at_mut(ONION_CELL_SIZE - 24);
+            let auth = relay
+                .crypt
+                .seal_forward(&build_nonce(1, 0, seq), &header[4..], payload);
+            tag.copy_from_slice(&auth);
+            let error = relay.peel_forward(&mut raw).unwrap_err();
+            if seq == u32::MAX {
+                assert!(matches!(error, CircuitError::SequenceExhausted));
+            }
+            assert_eq!(relay.expected_recv_seq, seq);
+        }
     }
 }

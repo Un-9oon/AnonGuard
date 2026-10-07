@@ -95,110 +95,16 @@ impl DirectoryAuthority {
     /// calls `std::process::exit(1)`.  Silently generating a new key on corruption would
     /// invalidate all pinned consensus documents already distributed to relays.
     pub fn load_or_create_signing_key(key_path: impl AsRef<Path>) -> SigningKey {
-        use std::io::Read;
-
         let path = key_path.as_ref();
-        if path.exists() {
-            // Load existing key
-            let mut file = match std::fs::File::open(path) {
-                Ok(f) => f,
-                Err(e) => {
-                    error!("FATAL: Cannot open authority key file {:?}: {}", path, e);
-                    std::process::exit(1);
-                }
-            };
-            let mut bytes = Vec::new();
-            if let Err(e) = file.read_to_end(&mut bytes) {
-                error!("FATAL: Cannot read authority key file {:?}: {}", path, e);
-                std::process::exit(1);
-            }
-            use zeroize::Zeroize;
-            let mut arr: [u8; 32] = match bytes.as_slice().try_into() {
-                Ok(a) => a,
-                Err(_) => {
-                    bytes.zeroize();
-                    error!(
-                        "FATAL: Authority key file {:?} is corrupt (expected 32 bytes, got {}). \
-                        Delete the file to generate a fresh key, but note this will invalidate \
-                        all previously distributed consensus documents.",
-                        path,
-                        bytes.len()
-                    );
-                    std::process::exit(1);
-                }
-            };
-            let key = SigningKey::from_bytes(&arr);
-            arr.zeroize();
-            bytes.zeroize();
-            key
-        } else {
-            // Create new key and persist it at 0o600
-            let key = SigningKey::generate(&mut OsRng);
-            Self::write_key_file(path, key.as_bytes());
-            key
-        }
-    }
-
-    fn write_key_file(path: &Path, bytes: &[u8; 32]) {
-        use std::io::Write;
-        #[cfg(unix)]
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut temp_path = path.to_path_buf();
-        temp_path.set_extension("tmp");
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = match options.open(&temp_path) {
-            Ok(f) => f,
+        match crate::core::storage::load_or_create_signing_key(path) {
+            Ok(key) => key,
             Err(e) => {
                 error!(
-                    "FATAL: Cannot create temporary authority key file {:?}: {}",
-                    temp_path, e
+                    "FATAL: Cannot load or persist authority key {:?}: {}",
+                    path, e
                 );
                 std::process::exit(1);
             }
-        };
-        if let Err(e) = file.write_all(bytes) {
-            error!(
-                "FATAL: Cannot write temporary authority key file {:?}: {}",
-                temp_path, e
-            );
-            let _ = std::fs::remove_file(&temp_path);
-            std::process::exit(1);
-        }
-        if let Err(e) = file.sync_all() {
-            error!(
-                "FATAL: Cannot sync temporary authority key file {:?}: {}",
-                temp_path, e
-            );
-            let _ = std::fs::remove_file(&temp_path);
-            std::process::exit(1);
-        }
-        // Ensure the OS-level permissions are 0o600 even on existing files
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
-        #[cfg(unix)]
-        if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
-        {
-            error!(
-                "FATAL: Cannot set permissions on temporary authority key file {:?}: {}",
-                temp_path, e
-            );
-            let _ = std::fs::remove_file(&temp_path);
-            std::process::exit(1);
-        }
-
-        // Atomic rename
-        if let Err(e) = std::fs::rename(&temp_path, path) {
-            error!(
-                "FATAL: Cannot atomically rename authority key file to {:?}: {}",
-                path, e
-            );
-            let _ = std::fs::remove_file(&temp_path);
-            std::process::exit(1);
         }
     }
 

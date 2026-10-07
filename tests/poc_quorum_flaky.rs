@@ -19,7 +19,7 @@ async fn fetch(addr: &str, vk: &VerifyingKey) -> ConsensusDocument {
 }
 
 #[tokio::test]
-async fn poc_quorum_depends_on_wall_clock_second() {
+async fn same_snapshot_quorum_survives_fetch_delays() {
     let now = current_timestamp_secs();
     let rk = SigningKey::generate(&mut OsRng);
     let nonce = solve_pow_bounded("relay-a", now, 8).unwrap();
@@ -66,8 +66,14 @@ async fn poc_quorum_depends_on_wall_clock_second() {
             let mut m = fetch("127.0.0.1:19301", &v1).await;
             tokio::time::sleep(Duration::from_millis(gap_ms)).await;
             let other = fetch("127.0.0.1:19302", &v2).await;
+            let matching_snapshot = m.compute_digest() == other.compute_digest();
             m.merge_signatures_from(&other);
-            if m.verify_quorum(&trusted, 2, current_timestamp_secs()) {
+            let verified = m.verify_quorum(&trusted, 2, current_timestamp_secs());
+            assert_eq!(
+                verified, matching_snapshot,
+                "Quorum must combine only signatures over the same snapshot"
+            );
+            if verified {
                 ok += 1;
             }
         }

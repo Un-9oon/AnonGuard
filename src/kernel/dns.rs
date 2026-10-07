@@ -15,13 +15,30 @@ pub enum TargetAddress {
     IPv6([u8; 16]),
 }
 
+/// Validate the wire domain without resolving it locally.
+pub(crate) fn validate_domain(domain: &str) -> Result<()> {
+    if domain.is_empty()
+        || domain.len() > 255
+        || !domain.is_ascii()
+        || domain
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+    {
+        return Err(Error::new(ErrorKind::InvalidInput, "Invalid SOCKS5 domain"));
+    }
+    Ok(())
+}
+
 /// Serializes target host and port into a strict SOCKS5h request frame.
-/// Guarantees that domains are formatted as FQDNs (AddrType 0x03) so resolution happens on the proxy.
+/// Domains retain address type 0x03 so resolution happens on the proxy.
 pub fn build_socks5h_connect_frame(
     target: &TargetAddress,
     port: u16,
     block_ipv6: bool,
 ) -> Result<Vec<u8>> {
+    if port == 0 {
+        return Err(Error::new(ErrorKind::InvalidInput, "Zero destination port"));
+    }
     let mut frame = Vec::with_capacity(32);
     frame.push(0x05); // SOCKS version 5
     frame.push(CMD_CONNECT); // Command 0x01 (CONNECT)
@@ -29,12 +46,7 @@ pub fn build_socks5h_connect_frame(
 
     match target {
         TargetAddress::Domain(domain) => {
-            if domain.len() > 255 {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    "Domain name exceeds 255 bytes",
-                ));
-            }
+            validate_domain(domain)?;
             frame.push(ADDR_TYPE_DOMAIN);
             frame.push(domain.len() as u8);
             frame.extend_from_slice(domain.as_bytes());

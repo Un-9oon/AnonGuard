@@ -8,6 +8,8 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - Per-link circuit identifiers, signed hybrid handshake transcripts and context-bound key derivation.
 - Unambiguous signed relay descriptors, exact-snapshot quorum verification, durable authority votes and client rollback/equivocation rejection.
 - Identity-pinned persistent guards and entry-only cooldowns.
+- Shared private signing-key storage with exclusive publication under concurrent startup, bounded reads and Unix permission checks.
+- Strict SOCKS5 method negotiation and destination parsing; bounded optional decoy operations.
 - Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
 - Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes.
 - Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.
@@ -33,6 +35,6 @@ Required before a production release:
 
 The Debian service uses a dynamic user and private persistent state. Configure `/etc/anonguard/runtime.env` with real endpoint-bound pins and a valid quorum; the daemon does not parse the former sample config.toml. Kernel isolation needs administrative namespace privileges and is a separate operational mode, not a privilege automatically granted by the packaged service.
 
-Empty, expired, conflicting or insufficient directories fail new circuit construction. Preserve and protect identity keys, authority vote journals, guard state and accepted-directory state. Corrupt state fails startup. Test migrations in an isolated testnet before upgrading all participants together.
+Empty, expired, conflicting or insufficient directories fail new circuit construction. Preserve and protect identity keys, authority vote journals, guard state and accepted-directory state. Corrupt state fails startup. Existing Unix signing keys must deny group/other access (`chmod 600`). Key storage requires a filesystem supporting hard links; unsupported storage fails startup rather than replacing a concurrent identity. Windows ACL verification remains a release gate. Test migrations in an isolated testnet before upgrading all participants together.
 
 Windows and macOS currently support application transport only. Public network readiness, Tor compatibility, onion services and protection against global traffic correlation are not certified or implemented by this work.

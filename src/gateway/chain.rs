@@ -17,7 +17,7 @@ pub async fn socks5_connect_through(
 
     let mut auth_resp = [0u8; 2];
     stream.read_exact(&mut auth_resp).await?;
-    if auth_resp[0] != 0x05 || auth_resp[1] == 0xFF {
+    if auth_resp[0] != 0x05 || auth_resp[1] != 0x00 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "SOCKS5 proxy rejected no-auth",
@@ -40,7 +40,7 @@ pub async fn socks5_connect_through(
     let mut resp_header = [0u8; 4];
     stream.read_exact(&mut resp_header).await?;
 
-    if resp_header[0] != 0x05 || resp_header[1] != 0x00 {
+    if resp_header[0] != 0x05 || resp_header[1] != 0x00 || resp_header[2] != 0x00 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             format!(
@@ -67,6 +67,12 @@ pub async fn socks5_connect_through(
             // Domain
             let mut len_buf = [0u8; 1];
             stream.read_exact(&mut len_buf).await?;
+            if len_buf[0] == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Empty bound domain",
+                ));
+            }
             let mut addr = vec![0u8; len_buf[0] as usize + 2];
             stream.read_exact(&mut addr).await?;
         }
@@ -101,6 +107,14 @@ where
     let mut methods = vec![0u8; num_methods];
     stream.read_exact(&mut methods).await?;
 
+    if !methods.contains(&0x00) {
+        stream.write_all(&[0x05, 0xff]).await?;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "No supported authentication method",
+        ));
+    }
+
     // Reply NO AUTH REQUIRED
     stream.write_all(&[0x05, 0x00]).await?;
 
@@ -108,7 +122,7 @@ where
     let mut req_header = [0u8; 4];
     stream.read_exact(&mut req_header).await?;
 
-    if req_header[0] != 0x05 || req_header[1] != 0x01 {
+    if req_header[0] != 0x05 || req_header[1] != 0x01 || req_header[2] != 0x00 {
         // Only support CONNECT
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -137,7 +151,10 @@ where
             stream.read_exact(&mut len_buf).await?;
             let mut domain = vec![0u8; len_buf[0] as usize];
             stream.read_exact(&mut domain).await?;
-            host = String::from_utf8_lossy(&domain).to_string();
+            host = String::from_utf8(domain).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid domain encoding")
+            })?;
+            crate::kernel::dns::validate_domain(&host)?;
         }
         _ => {
             return Err(std::io::Error::new(
@@ -151,6 +168,12 @@ where
     stream.read_exact(&mut port_buf).await?;
     let port = ((port_buf[0] as u16) << 8) | (port_buf[1] as u16);
 
+    if port == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Zero destination port",
+        ));
+    }
     Ok((host, port))
 }
 

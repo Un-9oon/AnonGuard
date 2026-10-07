@@ -4,12 +4,11 @@ use rand_distr::{Distribution, Exp};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info};
 
-/// A Traffic Chaffing Engine that injects fake SOCKS5 TCP streams locally
-/// to confuse Deep Learning (DL) Website Fingerprinting classifiers.
-/// It mimics a user browsing a decoy site concurrently.
+/// Experimental decoy traffic generator. Classifier resistance is unverified.
+/// Decoys use the configured proxy and do not provide traffic-analysis guarantees.
 pub struct ChaffingEngine {
     proxy_addr: String,
     decoy_targets: Vec<(&'static str, u16)>,
@@ -59,8 +58,23 @@ impl ChaffingEngine {
     }
 
     async fn inject_decoy_stream(&self) {
-        // Connect to the local SOCKS5 proxy
-        let mut stream = match TcpStream::connect(&self.proxy_addr).await {
+        if timeout(Duration::from_secs(15), self.send_decoy())
+            .await
+            .is_err()
+        {
+            debug!("[AnonGuard Chaffing] Decoy operation timed out");
+        }
+    }
+
+    async fn send_decoy(&self) {
+        let Some(&(host, port)) = self.decoy_targets.get(if self.decoy_targets.is_empty() {
+            0
+        } else {
+            OsRng.gen_range(0..self.decoy_targets.len())
+        }) else {
+            return;
+        };
+        let stream = match TcpStream::connect(&self.proxy_addr).await {
             Ok(s) => s,
             Err(e) => {
                 error!(
@@ -70,54 +84,72 @@ impl ChaffingEngine {
                 return;
             }
         };
-
-        // Select a random decoy target
-        let target_idx = OsRng.gen_range(0..self.decoy_targets.len());
-        let (host, port) = self.decoy_targets[target_idx];
-
-        // Perform SOCKS5 Handshake
-        // 1. Greeting
-        if stream.write_all(&[0x05, 0x01, 0x00]).await.is_err() {
-            return;
-        }
-        let mut auth_resp = [0u8; 2];
-        if stream.read_exact(&mut auth_resp).await.is_err() || auth_resp[1] != 0x00 {
-            return;
-        }
-
-        // 2. Connection Request (Domain Name)
-        let mut req = vec![0x05, 0x01, 0x00, 0x03]; // ATYP 0x03 = Domain Name
-        let host_bytes = host.as_bytes();
-        req.push(host_bytes.len() as u8);
-        req.extend_from_slice(host_bytes);
-        req.push((port >> 8) as u8);
-        req.push((port & 0xFF) as u8);
-
-        if stream.write_all(&req).await.is_err() {
-            return;
-        }
-
-        let mut conn_resp = [0u8; 10];
-        if stream.read_exact(&mut conn_resp).await.is_err() || conn_resp[1] != 0x00 {
-            debug!("[AnonGuard Chaffing] Proxy rejected decoy SOCKS5 connection");
-            return;
-        }
-
-        // 3. Connection established! Send fake TLS/HTTP noise
+        let mut stream = match super::chain::socks5_connect_through(stream, host, port, true).await
+        {
+            Ok(s) => s,
+            Err(_) => {
+                debug!("[AnonGuard Chaffing] Proxy rejected decoy SOCKS5 connection");
+                return;
+            }
+        };
         let mut fake_data = vec![0u8; OsRng.gen_range(500..4000)];
         OsRng.fill(&mut fake_data[..]);
-
-        // Send a burst
         if stream.write_all(&fake_data).await.is_err() {
             return;
         }
-
-        // Wait a little bit to simulate downloading, then randomly drop or read
         sleep(Duration::from_millis(OsRng.gen_range(200..1500))).await;
-
         let mut response = [0u8; 1024];
-        let _ = stream.read(&mut response).await; // Consume incoming dummy data
+        let _ = stream.read(&mut response).await;
+    }
+}
 
-        debug!("[AnonGuard Chaffing] Decoy stream completed successfully");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn decoy_uses_remote_dns_and_handles_ipv6_bound_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = ChaffingEngine {
+            proxy_addr: listener.local_addr().unwrap().to_string(),
+            decoy_targets: vec![("local.test", 443)],
+            mean_chaff_interval: Duration::from_secs(10),
+        };
+        let proxy = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+            let mut request = [0; 17];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[..5], &[5, 1, 0, 3, 10]);
+            assert_eq!(&request[5..15], b"local.test");
+            assert_eq!(&request[15..], &443u16.to_be_bytes());
+            let mut reply = vec![5, 0, 0, 4];
+            reply.extend_from_slice(&[0; 18]);
+            stream.write_all(&reply).await.unwrap();
+            let mut data = [0; 500];
+            stream.read_exact(&mut data).await.unwrap();
+            stream.write_all(b"reply").await.unwrap();
+        });
+        timeout(Duration::from_secs(5), engine.inject_decoy_stream())
+            .await
+            .unwrap();
+        proxy.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_proxy_has_bounded_decoy_lifetime() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let engine = ChaffingEngine::new(listener.local_addr().unwrap().to_string());
+        let task = tokio::spawn(async move { engine.inject_decoy_stream().await });
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let mut greeting = [0; 3];
+        peer.read_exact(&mut greeting).await.unwrap();
+        tokio::time::advance(Duration::from_secs(16)).await;
+        task.await.unwrap();
+        assert_eq!(peer.read(&mut greeting).await.unwrap(), 0);
     }
 }

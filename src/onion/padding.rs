@@ -9,9 +9,8 @@ pub enum WtfPadState {
     Gap,
 }
 
-/// A padding state machine based on the WTF-PAD protocol for Website Fingerprinting Defense.
-/// It transitions between Burst and Gap states. During Gap states, it schedules dummy cells
-/// to hide the silence and mask traffic bursts.
+/// Experimental burst/gap padding scheduler inspired by WTF-PAD.
+/// This is not an evaluated WTF-PAD implementation or a proven fingerprinting defense.
 pub struct AdaptivePaddingEngine {
     state: WtfPadState,
     last_real_packet_time: Instant,
@@ -22,7 +21,11 @@ pub struct AdaptivePaddingEngine {
 }
 
 impl AdaptivePaddingEngine {
+    /// Intervals are bounded to one day; gap means are at least one millisecond.
+    /// These limits prevent zero-rate and timestamp overflow in experimental callers.
     pub fn new(burst_timeout: Duration, gap_mean_iat: Duration) -> Self {
+        let burst_timeout = burst_timeout.min(Duration::from_secs(86400));
+        let gap_mean_iat = gap_mean_iat.clamp(Duration::from_millis(1), Duration::from_secs(86400));
         Self {
             state: WtfPadState::Burst,
             last_real_packet_time: Instant::now(),
@@ -93,7 +96,7 @@ impl AdaptivePaddingEngine {
         // Sample from Exp(lambda) where lambda = 1 / mean
         let lambda = 1.0 / self.gap_mean_iat.as_secs_f64();
         let exp = Exp::new(lambda).unwrap();
-        let delay_secs = exp.sample(&mut OsRng);
+        let delay_secs = exp.sample(&mut OsRng).clamp(0.001, 86400.0);
         let delay = Duration::from_secs_f64(delay_secs);
         self.next_padding_time = Some(now + delay);
     }
@@ -103,6 +106,27 @@ impl AdaptivePaddingEngine {
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn extreme_configuration_is_bounded_and_real_traffic_cancels_padding() {
+        for (burst, gap) in [
+            (Duration::ZERO, Duration::ZERO),
+            (Duration::MAX, Duration::MAX),
+        ] {
+            let mut engine = AdaptivePaddingEngine::new(burst, gap);
+            assert!(engine.next_event_delay() <= Duration::from_secs(86400));
+            engine.state = WtfPadState::Gap;
+            engine.next_padding_time = Some(Instant::now());
+            assert!(engine.should_send_padding());
+            let delay = engine.next_event_delay();
+            assert!(delay <= Duration::from_secs(86400));
+            engine.record_real_packet();
+            assert_eq!(engine.state, WtfPadState::Burst);
+            assert!(engine.next_padding_time.is_none());
+        }
+        let engine = AdaptivePaddingEngine::default_config();
+        assert!(!engine.next_event_delay().is_zero());
+    }
 
     #[test]
     fn test_wtf_pad_transitions() {

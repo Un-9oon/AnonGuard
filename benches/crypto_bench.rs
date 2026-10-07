@@ -1,7 +1,7 @@
 use anonguard::mesh::sybil::{solve_pow_bounded, verify_pow};
 use anonguard::onion::cell::{CellCommand, OnionCell};
-use anonguard::onion::circuit::{HopKeys, RelayCircuitHop};
-use criterion::{criterion_group, criterion_main, Criterion};
+use anonguard::onion::circuit::{derive_hop_keys, OnionCircuit, PeelOutcome, RelayCircuitHop};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use std::hint::black_box;
 
 fn bench_pow(c: &mut Criterion) {
@@ -33,33 +33,36 @@ fn bench_pow(c: &mut Criterion) {
 fn bench_aead(c: &mut Criterion) {
     let mut group = c.benchmark_group("AEAD Cell Crypto");
 
-    let forward_key = [1u8; 32];
-    let backward_key = [2u8; 32];
-    let mac_key = [3u8; 32];
-    let mut hop = RelayCircuitHop::new(
-        1234,
-        HopKeys {
-            forward_key,
-            backward_key,
-            forward_mac: mac_key,
-            backward_mac: mac_key,
-            forward_aead_key: [0u8; 32],
-            backward_aead_key: [0u8; 32],
-        },
-        0,
-    );
-
+    let shared_secret = [71; 64];
+    let mut client = OnionCircuit::new(1234);
+    client
+        .add_hop(derive_hop_keys(&shared_secret).unwrap())
+        .unwrap();
     let payload = vec![0u8; 995];
-    let cell = OnionCell::new(1234, 1, CellCommand::Data, 1, &payload).unwrap();
-    let raw = cell.serialize();
 
-    group.bench_function("peel_forward", |b| {
-        b.iter(|| {
-            let mut scratch = raw;
-            let seq = hop.expected_recv_seq;
-            scratch[4..8].copy_from_slice(&seq.to_be_bytes());
-            black_box(hop.peel_forward(&mut scratch).unwrap())
-        })
+    group.bench_function("peel_forward_authenticated", |b| {
+        b.iter_batched(
+            || {
+                let mut cell = OnionCell::new(1234, 0, CellCommand::Data, 1, &payload).unwrap();
+                let raw = client.wrap_forward(&mut cell).unwrap();
+                let mut relay =
+                    RelayCircuitHop::new(1234, derive_hop_keys(&shared_secret).unwrap(), 0);
+                relay.expected_recv_seq = cell.sequence_no;
+                (relay, raw)
+            },
+            |(mut relay, mut raw)| {
+                let outcome = relay.peel_forward(black_box(&mut raw)).unwrap();
+                assert!(matches!(
+                    outcome,
+                    PeelOutcome::AddressedToThisRelay {
+                        command: CellCommand::Data,
+                        len: 995
+                    }
+                ));
+                black_box(outcome)
+            },
+            BatchSize::SmallInput,
+        )
     });
 
     group.finish();

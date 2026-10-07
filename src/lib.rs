@@ -3,7 +3,8 @@
 
 //! # AnonGuard Core Engine
 //!
-//! A cross-layer anonymity and anti-attribution framework with zero-leak guarantees.
+//! An experimental anonymity framework with fail-closed transport controls.
+//! Security and anonymity guarantees require independent review and deployment validation.
 
 pub mod core;
 pub mod crypto;
