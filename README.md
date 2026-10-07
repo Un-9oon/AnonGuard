@@ -1,5 +1,7 @@
 # AnonGuard
 
+> **Experimental research software. Not approved for production anonymity use.** Passing tests do not establish anonymity. Independent protocol review, live-network evaluation, and operational validation remain required. No superiority to Tor has been established.
+
 > **An Authenticated, Research-Backed Decentralized Anonymity Network built in Rust.**  
 > Engineered to counter AI-driven flow correlation, website fingerprinting, and metadata leaks through telescopic onion routing, traffic morphing, and fail-closed leak prevention.
 
@@ -7,8 +9,6 @@
 [![Language](https://img.shields.io/badge/language-Rust-orange)](#)
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#)
 [![Research](https://img.shields.io/badge/research-Oxford%20PhD-purple)](#)
-[![Clippy](https://img.shields.io/badge/clippy-0%20warnings-brightgreen)](#)
-[![Tests](https://img.shields.io/badge/tests-29%20passing-brightgreen)](#)
 
 ---
 
@@ -16,13 +16,13 @@
 
 AnonGuard is an open-source, defense-in-depth anonymity gateway combining statistical physics with authenticated cryptographic routing:
 
-1. **Sphinx-Wrapped Multi-Path Cryptography (3-Hop Circuit Routing)** — Constant 2048-byte cells wrapped with 61-byte Sphinx headers (featuring per-hop randomized 32-byte X25519 Ephemeral Keys). Packets are split across load-aware Multi-Path parallel circuits to maintain real-time streaming bandwidth while destroying timing correlation. ChaCha20-Poly1305 AEAD ensures strict integrity. No intermediate relay ever sees both source and destination.
-2. **Bounded Poisson Organic Traffic Morphing** — Overhauling static delays with a Bounded Poisson metronome (5ms - 35ms bounds), mimicking organic human timing noise. Drives mutual information to $0.00$ bits while maintaining stream continuity.
-3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via Ed25519 threshold signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
+1. **Sphinx-Wrapped Multi-Path Cryptography (3-Hop Circuit Routing)** — Constant 2048-byte cells wrapped with 61-byte Sphinx headers (featuring per-hop randomized 32-byte X25519 Ephemeral Keys). Packets are split across load-aware Multi-Path parallel circuits to maintain real-time streaming bandwidth while attempting to reduce timing correlation. ChaCha20-Poly1305 AEAD ensures strict integrity. No intermediate relay ever sees both source and destination.
+2. **Bounded Poisson Organic Traffic Morphing** — Overhauling static delays with a Bounded Poisson metronome (5ms - 35ms bounds in the multipath scheduler; optional gateway jitter uses 5ms - 45ms), mimicking organic human timing noise. Drives mutual information to $0.00$ bits while maintaining stream continuity.
+3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via multiple Ed25519 authority signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
 4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
 5. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization. *(Note: Optional kernel-level `nftables` output filtering is strictly Linux-only via `--enable-firewall-killswitch`).*
 
-AnonGuard compiles cleanly with **zero Clippy warnings (`-D warnings`)**, passes **all 30 integration & unit tests**, and is cross-platform (Linux, macOS, Windows). Releases are verified via **Sigstore Cosign** binary signatures and embedded **cargo-auditable SBOMs** (see [Supply-Chain Guide](docs/README.md#supply-chain-integrity--verification-guide)).
+Build and test status must be verified for the exact release commit in CI. Release workflows include signing and SBOM generation; artifact verification and platform deployment remain release requirements. See [production readiness](docs/PRODUCTION_READINESS.md).
 
 ---
 
@@ -139,11 +139,11 @@ python3 eval/real_pcap_collector.py --interface lo --proxy-port 9050
 
 ### 1. 🧅 Sphinx-Wrapped Multi-Path Circuit Routing
 Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds an authentic **cryptographic 3-hop telescopic circuit**:
-- **Sphinx Cryptographic Wrapping:** Packets use a fixed 2048-byte cell format featuring an expanded 61-byte Sphinx header. Every hop enforces a randomized 32-byte X25519 Ephemeral Key, making packets perfectly mathematically unlinkable as they traverse the network.
+- **Sphinx Cryptographic Wrapping:** Packets use a fixed 2048-byte cell format featuring an expanded 61-byte Sphinx header. Every hop enforces a randomized 32-byte X25519 Ephemeral Key, intended to reduce header linkability; this does not establish resistance to end-to-end traffic correlation.
 - **Load-Aware Multi-Path Splitting:** `MultiPathSlicer` analyzes circuit congestion and automatically splits traffic over the most optimal parallel paths to preserve real-time streaming bandwidth.
 
 ### 2. 🔬 Bounded Poisson Organic Metronomes
-To destroy correlation without grinding video streams to a halt, AnonGuard uses a **Bounded Poisson Process** for timing delays (bounded between 5ms and 35ms). This perfectly mimics organic traffic noise while guaranteeing continuity.
+To destroy correlation without grinding video streams to a halt, AnonGuard uses a **Bounded Poisson Process** for timing delays (bounded between 5ms and 35ms). This is an experimental timing defense requiring live-network evaluation.
 
 ### 3. 🛡️ Sybil Attack Resistance
 To prevent a botnet or hostile entity from flooding the directory with rogue nodes:
@@ -151,7 +151,7 @@ To prevent a botnet or hostile entity from flooding the directory with rogue nod
 - Circuit path selection enforces strict **BGP `/16` CIDR Subnet Diversity**, ensuring that Guard, Middle, and Exit nodes never share the same `/16` network prefix or autonomous system.
 
 ### 4. 🌐 Distributed Multi-Authority Consensus & Key Binding
-AnonGuard eliminates single points of failure. The directory consensus is maintained by independent Directory Authorities using **Ed25519 threshold signatures**. Clients only trust consensus documents verified by an $M$-of-$N$ quorum. Relays must sign registrations with their Ed25519 identity key, eliminating unauthorized last-write-wins overwriting.
+AnonGuard eliminates single points of failure. The directory consensus is maintained by independent Directory Authorities using **multiple Ed25519 authority signatures**. Clients only trust consensus documents verified by an $M$-of-$N$ quorum. Relays must sign registrations with their Ed25519 identity key, eliminating unauthorized last-write-wins overwriting.
 
 ---
 
@@ -271,7 +271,7 @@ cargo fmt --check
 
 All unit and integration tests verify:
 - 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
-- Fixed 1024-byte OnionCell serialization, explicit nonces, ChaCha20-Poly1305 AEAD, and monotonic sequence anti-replay validation
+- Fixed 2048-byte OnionCell serialization, explicit nonces, ChaCha20-Poly1305 AEAD, and monotonic sequence anti-replay validation
 - SOCKS5 handshake negotiation, error status codes (`0x00`, `0x01`, `0x02`, `0x04`, `0x05`), and RFC 1928 compliance
 - Multi-authority consensus voting, Ed25519 quorum validation, and key pinning
 - Proof-of-Work mining and verification with configurable difficulty

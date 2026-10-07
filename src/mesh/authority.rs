@@ -129,18 +129,17 @@ impl DirectoryAuthority {
 
     fn write_key_file(path: &Path, bytes: &[u8; 32]) {
         use std::io::Write;
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
 
         let mut temp_path = path.to_path_buf();
         temp_path.set_extension("tmp");
 
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp_path)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = match options.open(&temp_path) {
             Ok(f) => f,
             Err(e) => {
                 error!(
@@ -167,7 +166,9 @@ impl DirectoryAuthority {
             std::process::exit(1);
         }
         // Ensure the OS-level permissions are 0o600 even on existing files
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
         if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))
         {
             error!(
@@ -333,13 +334,22 @@ impl DirectoryAuthority {
                 }
                 Ok(Ok(None)) => {
                     // Peer explicitly rejected our digest (mismatch)
-                    warn!("Authority [{}]: Peer {} rejected our cross-check digest", self.authority_id, peer);
+                    warn!(
+                        "Authority [{}]: Peer {} rejected our cross-check digest",
+                        self.authority_id, peer
+                    );
                 }
                 Ok(Err(e)) => {
-                    warn!("Authority [{}]: Failed to fetch cross-check from peer {}: {}", self.authority_id, peer, e);
+                    warn!(
+                        "Authority [{}]: Failed to fetch cross-check from peer {}: {}",
+                        self.authority_id, peer, e
+                    );
                 }
                 Err(_) => {
-                    warn!("Authority [{}]: Timeout fetching cross-check from peer {}", self.authority_id, peer);
+                    warn!(
+                        "Authority [{}]: Timeout fetching cross-check from peer {}",
+                        self.authority_id, peer
+                    );
                 }
             }
         }
@@ -566,7 +576,9 @@ impl DirectoryAuthority {
                                         }
                                     }
                                     Err(_) => {
-                                        let _ = session.write_frame(b"ERROR_BFT_QUORUM_NOT_REACHED").await;
+                                        let _ = session
+                                            .write_frame(b"ERROR_BFT_QUORUM_NOT_REACHED")
+                                            .await;
                                     }
                                 }
                             } else if text.starts_with("GET_RELAY_LIST") {

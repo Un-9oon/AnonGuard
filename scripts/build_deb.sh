@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-VERSION="0.1.0"
+VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
 ARCH="amd64"
 PKG_NAME="anonguard"
 DIST_DIR="${ROOT_DIR}/dist"
@@ -12,7 +12,7 @@ STAGING_DIR="${ROOT_DIR}/target/deb_staging"
 
 echo "[*] Building AnonGuard release binary..."
 cd "${ROOT_DIR}"
-cargo build --release
+cargo build --locked --release
 
 echo "[*] Preparing Debian package filesystem layout..."
 rm -rf "${STAGING_DIR}"
@@ -32,8 +32,9 @@ cp "${ROOT_DIR}/contrib/anonguard.service" "${STAGING_DIR}/lib/systemd/system/an
 chmod 644 "${STAGING_DIR}/lib/systemd/system/anonguard.service"
 
 # 3. Default configuration
-cp "${ROOT_DIR}/contrib/anonguard.default.conf" "${STAGING_DIR}/etc/anonguard/config.toml"
-chmod 644 "${STAGING_DIR}/etc/anonguard/config.toml"
+cp "${ROOT_DIR}/contrib/runtime.env" "${STAGING_DIR}/etc/anonguard/runtime.env"
+chmod 640 "${STAGING_DIR}/etc/anonguard/runtime.env"
+printf '/etc/anonguard/runtime.env\n' > "${STAGING_DIR}/DEBIAN/conffiles"
 
 # 4. Documentation
 cp "${ROOT_DIR}/README.md" "${STAGING_DIR}/usr/share/doc/anonguard/README.md"
@@ -59,7 +60,7 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
-Description: Authenticated decentralized anonymity gateway with Quantum Chaos morphing and 3-hop layered onion routing.
+Description: Authenticated decentralized anonymity gateway with statistical traffic morphing and 3-hop layered onion routing.
  AnonGuard mitigates AI-driven traffic correlation, website fingerprinting,
  and flow-correlation attacks using Wigner Surmise level repulsion,
  3-hop telescopic onion circuits, and fail-closed kill switches.

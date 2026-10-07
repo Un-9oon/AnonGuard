@@ -472,17 +472,13 @@ impl GatewayServer {
                     let mut circuits = Vec::new();
 
                     for _ in 0..num_paths {
-                        let chain = if config.enforce_subnet_diversity {
-                            pool.get_diverse_onion_chain(
-                                config.min_chain_length,
-                                config.max_chain_length,
+                        let chain = pool
+                            .get_diverse_onion_chain(
+                                config.min_chain_length.max(3),
+                                config.max_chain_length.max(3),
                                 config.enforce_subnet_diversity,
                             )
-                            .await
-                        } else {
-                            pool.get_random_chain(config.min_chain_length, config.max_chain_length)
-                                .await
-                        };
+                            .await;
 
                         if chain.is_empty() {
                             continue;

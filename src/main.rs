@@ -150,6 +150,10 @@ struct Args {
     #[arg(long)]
     identity_key_path: Option<PathBuf>,
 
+    /// Path to persist entry guard pins (must be writable by the daemon user)
+    #[arg(long)]
+    guard_state_path: Option<PathBuf>,
+
     /// Refuse to start if hardware/kernel-level fail-closed enforcement (Linux nftables) is unavailable
     #[arg(long, default_value_t = false)]
     strict_fail_closed: bool,
@@ -164,7 +168,7 @@ struct Args {
 }
 
 fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
+    if s.len() != 64 || !s.is_ascii() {
         return None;
     }
     let mut bytes = [0u8; 32];
@@ -176,7 +180,9 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
 
 fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::SigningKey {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     use zeroize::Zeroize;
@@ -219,13 +225,11 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
     }
     let mut temp_path = path.to_path_buf();
     temp_path.set_extension("tmp");
-    let mut f = match std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&temp_path)
-    {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut f = match options.open(&temp_path) {
         Ok(f) => f,
         Err(e) => {
             error!(
@@ -253,6 +257,7 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
     }
 
     // Belt-and-suspenders: set permissions explicitly in case umask interfered
+    #[cfg(unix)]
     if let Err(e) = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600)) {
         error!(
             "FATAL: Cannot set permissions on temporary identity key file {:?}: {}",
@@ -287,6 +292,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::process::exit(1);
     }
 
+    #[cfg(target_os = "linux")]
+    if args.strict_fail_closed && !args.enable_firewall_killswitch {
+        return Err("--strict-fail-closed requires --enable-firewall-killswitch".into());
+    }
+
     if args.status {
         println!("=== AnonGuard Daemon Status ===");
         println!("Version: 0.2.0");
@@ -298,20 +308,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             p
         });
         if identity_path.exists() {
-            println!("Status: ACTIVE / HEALTHY (Keys Loaded)");
+            println!("Identity: PRESENT (daemon health not checked)");
         } else {
-            println!("Status: DEGRADED (Identity Key Missing)");
+            println!("Identity: MISSING (daemon health not checked)");
         }
 
         println!(
             "Fail-Closed Guarantee: {}",
             if cfg!(target_os = "linux") {
-                "KERNEL-LEVEL (Linux nftables)"
+                "AVAILABLE ON LINUX; installation not checked"
             } else {
                 "APPLICATION-LAYER ONLY"
             }
         );
         return Ok(());
+    }
+
+    if args.onion && args.authorities.is_none() && args.pool.is_none() && args.proxy.is_none() {
+        return Err("Onion mode requires configured directory authorities or a relay pool".into());
+    }
+    if !args.jitter_lambda.is_finite() || args.jitter_lambda <= 0.0 {
+        return Err("--jitter-lambda must be finite and positive".into());
+    }
+    if !matches!(args.rmt_ensemble.to_lowercase().as_str(), "goe" | "gue") {
+        return Err("--rmt-ensemble must be goe or gue".into());
+    }
+    if args.authorities.is_some() && (args.authority_keys.is_none() || args.quorum_threshold == 0) {
+        return Err(
+            "Directory authorities require pinned keys and a positive quorum threshold".into(),
+        );
     }
 
     if let Some(ref addr_str) = args.metrics_addr {
@@ -348,7 +373,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 info!("Successfully applied OS/kernel-level nftables firewall killswitch");
             }
             Err(e) => {
-                warn!("Failed to apply kernel nftables rules (requires root / CAP_NET_ADMIN): {}. Falling back to process-level killswitch.", e);
+                return Err(
+                    format!("Requested kernel firewall could not be installed: {e}").into(),
+                );
             }
         }
     }
@@ -363,16 +390,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::collections::HashMap::new();
     if let Some(ref keys_str) = args.authority_keys {
         for entry in keys_str.split(',') {
-            // Split by the last colon to allow "ip:port:key" as well as "id:key"
-            if let Some((id_or_addr, key_hex)) = entry.trim().rsplit_once(':') {
-                let id = id_or_addr.trim().to_string();
-                if let Some(bytes) = decode_hex_32(key_hex.trim()) {
-                    if let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&bytes) {
-                        trusted_authorities.insert(id, vk);
-                    }
-                }
+            let (id_or_addr, key_hex) = entry
+                .trim()
+                .rsplit_once(':')
+                .ok_or("Invalid authority key: expected id:64_HEX_KEY")?;
+            let id = id_or_addr.trim().to_string();
+            if id.is_empty() {
+                return Err("Authority key identifier must not be empty".into());
+            }
+            let bytes = decode_hex_32(key_hex.trim()).ok_or("Invalid authority key hex")?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)?;
+            if trusted_authorities.insert(id, vk).is_some() {
+                return Err("Duplicate authority key identifier".into());
             }
         }
+    }
+    if !directory_authorities.is_empty() && args.quorum_threshold > trusted_authorities.len() {
+        return Err("Quorum threshold exceeds the number of trusted authority keys".into());
     }
 
     let config = GuardConfig {
@@ -407,6 +441,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/etc/anonguard"));
             p.push(".local/share/anonguard/identity.key");
+            p
+        }),
+        guard_state_path: args.guard_state_path.unwrap_or_else(|| {
+            let mut p = std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."));
+            p.push(".local/share/anonguard/guards.json");
             p
         }),
         ..GuardConfig::default()

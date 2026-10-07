@@ -272,8 +272,25 @@ async fn poc_relay_burst_loss_rate() {
         wr.write_all(&burst).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for delivery, not an assumed wall-clock rate: the segmenting proxy
+    // deliberately sleeps for every 700-byte fragment and timer resolution varies.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if received.lock().unwrap().len() >= TOTAL * 6 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("all burst cells must reach the destination within the deadline");
     let got = received.lock().unwrap().clone();
+    let expected = (0..TOTAL).map(|n| format!("T{n:05}")).collect::<String>();
+    assert_eq!(
+        got,
+        expected.as_bytes(),
+        "upload must preserve every byte in order"
+    );
     let mut delivered = 0usize;
     let mut i = 0;
     while i + 6 <= got.len() {

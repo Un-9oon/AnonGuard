@@ -221,7 +221,7 @@ impl ProxyPool {
             healthy = list.values().cloned().collect();
         }
 
-        if healthy.is_empty() {
+        if min_hops == 0 || max_hops < min_hops || healthy.len() < min_hops {
             return Vec::new();
         }
 
@@ -275,7 +275,7 @@ impl ProxyPool {
             }
         };
 
-        if all_healthy.is_empty() {
+        if min_hops == 0 || max_hops < min_hops || all_healthy.len() < min_hops {
             return Vec::new();
         }
 
@@ -409,6 +409,9 @@ impl ProxyPool {
             }
         }
 
+        if selected.len() != path_len {
+            return Vec::new();
+        }
         selected
     }
 
