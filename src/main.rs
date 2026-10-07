@@ -390,6 +390,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         authority_peers.push((addr.to_string(), Some(*key)));
     }
 
+    // Validate the same bounded endpoint/pin contract for every daemon role,
+    // including authorities that return before the directory refresh loop starts.
+    if !authority_endpoints.is_empty() {
+        anonguard::mesh::PinnedDirectoryClient::new(
+            authority_endpoints.clone(),
+            args.quorum_threshold,
+        )?;
+    }
+
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
         enable_jitter: args.jitter,

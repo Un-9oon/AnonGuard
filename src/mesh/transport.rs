@@ -517,3 +517,196 @@ mod tests {
         server_handle.await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod transport_boundary_tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+    use tokio::net::TcpListener;
+
+    async fn pair() -> (SecureTransportSession, SecureTransportSession) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            SecureTransportSession::client_handshake(
+                TcpStream::connect(endpoint).await.unwrap(),
+                None,
+            )
+            .await
+            .unwrap()
+        });
+        let (socket, _) = listener.accept().await.unwrap();
+        let server = SecureTransportSession::server_handshake(socket, None)
+            .await
+            .unwrap();
+        (client.await.unwrap(), server)
+    }
+
+    #[tokio::test]
+    async fn peer_handshake_corruption_and_non_contributory_keys_are_rejected() {
+        for case in 0..6 {
+            let identity = SigningKey::from_bytes(&[73; 32]);
+            let pin = identity.verifying_key();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut hello = [0; 40];
+                socket.read_exact(&mut hello).await.unwrap();
+                assert_eq!(&hello[..8], VERSION);
+                let ephemeral = if case >= 4 { [0; 32] } else { [9; 32] };
+                socket.write_all(&ephemeral).await.unwrap();
+                let flag = match case {
+                    0 => 2,
+                    1 | 4 => 0,
+                    _ => 1,
+                };
+                socket.write_all(&[flag]).await.unwrap();
+                if flag == 1 {
+                    let public = if case == 2 {
+                        (0..=255)
+                            .map(|byte| [byte; 32])
+                            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
+                            .unwrap()
+                    } else {
+                        identity.verifying_key().to_bytes()
+                    };
+                    socket.write_all(&public).await.unwrap();
+                    let signature = if case == 5 {
+                        let client: [u8; 32] = hello[8..].try_into().unwrap();
+                        identity
+                            .sign(&transcript(&client, &ephemeral, &public, 1))
+                            .to_bytes()
+                    } else {
+                        [0; 64]
+                    };
+                    socket.write_all(&signature).await.unwrap();
+                }
+            });
+            let socket = TcpStream::connect(endpoint).await.unwrap();
+            let pinned = if case == 1 || case == 5 {
+                Some(&pin)
+            } else {
+                None
+            };
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                SecureTransportSession::client_handshake(socket, pinned),
+            )
+            .await
+            .unwrap();
+            let error = result.err().expect("Malformed handshake was accepted");
+            assert_eq!(
+                error.kind(),
+                if case == 0 || case == 2 {
+                    io::ErrorKind::InvalidData
+                } else {
+                    io::ErrorKind::PermissionDenied
+                }
+            );
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn server_rejects_old_protocol_and_zero_client_public_key() {
+        for old_version in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
+            client
+                .write_all(if old_version { b"AGDIR002" } else { VERSION })
+                .await
+                .unwrap();
+            if !old_version {
+                client.write_all(&[0; 32]).await.unwrap();
+            }
+            let error = SecureTransportSession::server_handshake(socket, None)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                if old_version {
+                    io::ErrorKind::InvalidData
+                } else {
+                    io::ErrorKind::PermissionDenied
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_size_rejection_preserves_fresh_session_and_empty_frames_work() {
+        let (mut client, mut server) = pair().await;
+        assert_eq!(
+            server
+                .write_frame(&vec![0; MAX_FRAME_LEN + 1])
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(server.send_counter, 0);
+        server.write_frame(b"").await.unwrap();
+        assert!(client.read_frame().await.unwrap().is_empty());
+        client.write_frame(b"still synchronized").await.unwrap();
+        assert_eq!(server.read_frame().await.unwrap(), b"still synchronized");
+        for length in [0, 15, (MAX_FRAME_LEN + 17) as u32, u32::MAX] {
+            let (mut client, server) = pair().await;
+            let mut raw = server.into_inner();
+            raw.write_all(&length.to_be_bytes()).await.unwrap();
+            assert_eq!(
+                client.read_frame().await.unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(client.recv_counter, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_frames_cannot_wrap_either_nonce_counter() {
+        let (mut client, mut server) = pair().await;
+        server.send_counter = u64::MAX - 1;
+        client.recv_counter = u64::MAX - 1;
+        server.write_frame(b"last usable nonce").await.unwrap();
+        assert_eq!(client.read_frame().await.unwrap(), b"last usable nonce");
+        assert!(server.write_frame(b"must not wrap").await.is_err());
+        assert_eq!(server.send_counter, u64::MAX);
+        let ciphertext = server
+            .send_cipher
+            .encrypt(&make_nonce(u64::MAX), b"authenticated overflow".as_ref())
+            .unwrap();
+        server
+            .stream
+            .write_all(&(ciphertext.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        server.stream.write_all(&ciphertext).await.unwrap();
+        assert!(client.read_frame().await.is_err());
+        assert_eq!(client.recv_counter, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn stalled_frame_headers_and_payloads_hit_read_deadlines() {
+        let waits = [false, true].map(|send_header| async move {
+            let (mut client, server) = pair().await;
+            let mut peer = server.into_inner();
+            if send_header {
+                peer.write_all(&16u32.to_be_bytes()).await.unwrap();
+            }
+            let result = client.read_frame().await;
+            drop(peer);
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            assert_eq!(client.recv_counter, 0);
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            futures::future::join_all(waits),
+        )
+        .await
+        .expect("Stalled directory frames exceeded their bounded lifetime");
+    }
+}

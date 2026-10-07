@@ -18,7 +18,6 @@ pub const DEFAULT_MAX_TRACKER_CONNECTIONS: usize = 512;
 
 pub struct TrackerServer {
     listen_addr: String,
-    directory: Directory,
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
@@ -32,7 +31,6 @@ impl TrackerServer {
     pub fn with_difficulty(listen_addr: String, pow_difficulty: u32) -> Self {
         Self {
             listen_addr,
-            directory: Arc::new(RwLock::new(HashMap::new())),
             pow_difficulty,
             connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAX_TRACKER_CONNECTIONS,
@@ -43,6 +41,15 @@ impl TrackerServer {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
+        self.run_listener(listener).await
+    }
+
+    async fn run_listener(
+        &self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let directory: Directory = Arc::new(RwLock::new(HashMap::new()));
+        let mut tasks = tokio::task::JoinSet::new();
         eprintln!("TRACKER LISTENING ON {}", self.listen_addr);
         info!(
             "Rendezvous Tracker listening on {} (max {} concurrent connections)",
@@ -50,6 +57,7 @@ impl TrackerServer {
         );
 
         loop {
+            while tasks.try_join_next().is_some() {}
             let (stream, addr) = listener.accept().await?;
             eprintln!("TRACKER ACCEPTED CONNECTION FROM {}", addr);
             let permit = match self.connection_semaphore.clone().try_acquire_owned() {
@@ -62,10 +70,10 @@ impl TrackerServer {
                     continue;
                 }
             };
-            let dir = self.directory.clone();
+            let dir = directory.clone();
             let pow_difficulty = self.pow_difficulty;
             let registry = self.nonce_registry.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 if let Err(e) =
                     handle_connection(stream, dir, pow_difficulty, registry, permit).await
                 {
@@ -93,9 +101,7 @@ async fn handle_connection(
     )
     .await
     {
-        Ok(Ok(_)) => {
-            eprintln!("TRACKER read line: {:?}", first_line);
-        }
+        Ok(Ok(_)) => {}
         Ok(Err(e)) => return Err(e),
         Err(_) => {
             warn!("Tracker read timed out (Slowloris defense)");
@@ -108,7 +114,6 @@ async fn handle_connection(
     }
 
     let cmd = first_line.trim().to_string();
-    eprintln!("TRACKER received cmd: {}", cmd);
 
     if cmd.starts_with("REGISTER_REVERSE") {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
@@ -490,5 +495,99 @@ mod tests {
         let huge_garbage = vec![b'A'; 8192];
         spammer.write_all(&huge_garbage).await.unwrap();
         drop(spammer);
+    }
+}
+
+#[cfg(test)]
+mod listener_boundary_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn start() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let tracker = TrackerServer::with_difficulty(endpoint.to_string(), 0);
+        let server = tokio::spawn(async move {
+            tracker.run_listener(listener).await.unwrap();
+        });
+        (endpoint, server)
+    }
+    async fn request(endpoint: std::net::SocketAddr, command: &str) -> String {
+        let mut client = TcpStream::connect(endpoint).await.unwrap();
+        client.write_all(command.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn malformed_registrations_are_rejected_without_directory_entries() {
+        let (endpoint, server) = start().await;
+        let now = crate::mesh::sybil::current_timestamp_secs();
+        let cases = [
+            (
+                "REGISTER_REVERSE short\n".to_string(),
+                "ERROR_POW_REQUIRED\n",
+            ),
+            (
+                "REGISTER_REVERSE node private-token bad-time 1\n".to_string(),
+                "ERROR_INVALID_TIMESTAMP\n",
+            ),
+            (
+                format!("REGISTER_REVERSE node private-token {now} bad-nonce\n"),
+                "ERROR_INVALID_NONCE\n",
+            ),
+            (
+                format!("REGISTER_REVERSE node private-token {} 1\n", now - 301),
+                "ERROR_INVALID_POW\n",
+            ),
+            (
+                "CONNECT_REVERSE missing private-token\n".to_string(),
+                "ERROR_NODE_NOT_FOUND\n",
+            ),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(request(endpoint, &command).await, expected);
+        }
+        let discovery = request(endpoint, "GET /nodes\n").await;
+        assert!(discovery.ends_with("Content-Length: 0\r\n\r\n"));
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancellation_closes_queued_reverse_streams_and_partial_requests() {
+        let (endpoint, server) = start().await;
+        let mut registered = TcpStream::connect(endpoint).await.unwrap();
+        let now = crate::mesh::sybil::current_timestamp_secs();
+        registered
+            .write_all(format!("REGISTER_REVERSE owned private-token {now} 1\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if request(endpoint, "GET /nodes\n").await.ends_with("owned") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut pending = TcpStream::connect(endpoint).await.unwrap();
+        pending.write_all(b"REGISTER").await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        for mut connection in [registered, pending] {
+            let mut byte = [0];
+            let result = tokio::time::timeout(Duration::from_secs(2), connection.read(&mut byte))
+                .await
+                .expect("Tracker cancellation retained a client socket");
+            assert!(matches!(result, Ok(0) | Err(_)));
+        }
     }
 }

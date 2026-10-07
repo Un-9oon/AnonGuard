@@ -540,13 +540,21 @@ impl DirectoryAuthority {
     /// Starts the asynchronous authority listener.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
+        self.run_listener(listener).await
+    }
+
+    async fn run_listener(
+        &self,
+        listener: TcpListener,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut tasks = tokio::task::JoinSet::new();
         info!(
             "Directory Authority [{}] listening securely on {}",
             self.authority_id, self.listen_addr
         );
 
         let active_relays_eviction = self.active_relays.clone();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
@@ -558,6 +566,7 @@ impl DirectoryAuthority {
         });
 
         loop {
+            while tasks.try_join_next().is_some() {}
             let (stream, addr) = listener.accept().await?;
             let permit = match self.connection_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
@@ -573,7 +582,7 @@ impl DirectoryAuthority {
             let active_relays = self.active_relays.clone();
             let signing_key = self.signing_key.clone();
 
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 let _permit = permit;
                 let handshake_res = tokio::time::timeout(
                     tokio::time::Duration::from_secs(15),
@@ -919,5 +928,38 @@ mod tests {
 
         assert_zeroize(secret);
         assert_zeroize(key_vec);
+    }
+}
+
+#[cfg(test)]
+mod listener_ownership_tests {
+    use super::*;
+    use tokio::net::TcpStream;
+    #[tokio::test]
+    async fn listener_cancellation_closes_authenticated_sessions() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let authority =
+            DirectoryAuthority::with_difficulty("owned".into(), endpoint.to_string(), 0);
+        let pin = authority.verifying_key();
+        let server = tokio::spawn(async move {
+            authority.run_listener(listener).await.unwrap();
+        });
+        let mut client = SecureTransportSession::client_handshake(
+            TcpStream::connect(endpoint).await.unwrap(),
+            Some(&pin),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), client.read_frame())
+            .await
+            .expect("Authenticated session survived authority cancellation")
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+        ));
     }
 }

@@ -30,7 +30,7 @@ jobs:
         run: cargo test --locked --all-targets --verbose
 
       - name: Install namespace test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps
 
       - name: Verify protected namespace and crash isolation
         run: sudo env RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" "$(command -v cargo)" test --locked --test namespace_isolation_live -- --ignored
@@ -96,11 +96,22 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
-      - name: Generate Coverage Report
+      - name: Install namespace coverage prerequisites
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps
+
+      - name: Verify coverage aggregation
+        run: python3 scripts/test_merge_coverage.py
+
+      - name: Generate normal coverage report
+        run: cargo tarpaulin --engine llvm --locked --timeout 120 --out Xml --out Html --output-dir coverage-normal
+
+      - name: Measure privileged namespace isolation
+        run: sudo env PATH="$PATH" RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" "$(command -v cargo-tarpaulin)" --engine llvm --skip-clean --locked --timeout 120 --test namespace_isolation_live --ignored --out Xml --out Html --output-dir coverage-namespace
+
+      - name: Combine measured line coverage and enforce release gates
         run: |
-          cargo tarpaulin --engine llvm --timeout 120 --out Xml --out Html
-          # Verify module-level coverage manually for critical modules
-          python scripts/coverage_enforcer.py cobertura.xml
+          python3 scripts/merge_coverage.py cobertura.xml coverage-normal/cobertura.xml coverage-namespace/cobertura.xml
+          python3 scripts/coverage_enforcer.py cobertura.xml
       
       - name: Upload coverage reports
         if: always()
@@ -109,7 +120,8 @@ jobs:
           name: code-coverage-report
           path: |
             cobertura.xml
-            tarpaulin-report.html
+            coverage-normal/
+            coverage-namespace/
 
   platform-build:
     name: Platform compilation

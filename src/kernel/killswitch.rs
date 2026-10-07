@@ -1,4 +1,4 @@
-//! Sub-millisecond atomic fail-closed kill switch controller.
+//! Kill-switch state and socket cancellation controller.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,8 +27,8 @@ impl KillSwitchController {
     /// Creates a controller with a custom trip threshold and counting window.
     ///
     /// **Tradeoff**: a lower threshold is more sensitive to transient failures and produces
-    /// more false-positive trips; a higher threshold gives a larger window in which leaks
-    /// could occur before fail-closed engages.
+    /// more false-positive trips; a higher threshold delays socket cancellation.
+    /// Namespace packet policy is enforced independently of this threshold.
     pub fn with_threshold(trip_threshold: usize, window: Duration) -> Self {
         let (tx, rx) = watch::channel(false);
         Self {
@@ -94,11 +94,13 @@ impl KillSwitchController {
     /// Uses poison-recovering lock access for the same reason as `trip()`: a poisoned
     /// mutex must not prevent the operator from resetting the controller.
     pub fn reset(&self) {
-        self.tripped.store(false, Ordering::SeqCst);
-        self.failures
+        let mut failures = self
+            .failures
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Serialize both state publications with trip(), including its notification.
+        self.tripped.store(false, Ordering::SeqCst);
+        failures.clear();
         let _ = self.notifier_tx.send(false);
     }
 

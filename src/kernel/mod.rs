@@ -1,4 +1,4 @@
-//! Kernel and L3/L4 zero-leak isolation layer.
+//! Kernel and L3/L4 network isolation helpers.
 
 pub mod dns;
 pub mod exit_policy;

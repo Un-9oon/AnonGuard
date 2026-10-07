@@ -271,6 +271,9 @@ impl ProxyPool {
 
     /// Retrieves the next alive proxy using round-robin rotation.
     pub async fn get_next(&self) -> Option<ProxyNode> {
+        if self.directory_expired() {
+            return None;
+        }
         let list = self.nodes.read().await;
         let count = list.len();
         if count == 0 {
@@ -294,6 +297,9 @@ impl ProxyPool {
 
     /// Retrieves a random chain of unique healthy proxies
     pub async fn get_random_chain(&self, min_hops: usize, max_hops: usize) -> Vec<ProxyNode> {
+        if self.directory_expired() {
+            return Vec::new();
+        }
         let list = self.nodes.read().await;
         let mut healthy: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
 
@@ -321,8 +327,9 @@ impl ProxyPool {
         healthy.into_iter().take(path_len).collect()
     }
 
-    /// Retrieves a random chain of proxies that strictly enforces BGP /16 subnet diversity
-    /// to defeat Sybil attacks and correlation by colluding single-provider nodes.
+    /// Retrieves a chain enforcing IPv4 /16 and IPv6 /32 address-prefix diversity.
+    /// Prefix diversity is a selection constraint, not proof of independent operators
+    /// or resistance to Sybil attacks and traffic correlation.
     ///
     /// When `require_exit_at_last` is true (the default for onion routing), the final hop
     /// is chosen only from relays that carry `is_exit == true` in the consensus descriptor.
