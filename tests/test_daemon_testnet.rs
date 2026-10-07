@@ -7,8 +7,8 @@ use std::{
     fs,
     net::SocketAddr,
     path::PathBuf,
-    process::{Child, Command},
-    time::Duration,
+    process::{Child, Command, Stdio},
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -58,6 +58,35 @@ impl Testnet {
                 .unwrap(),
         );
     }
+    fn interrupt(daemon: &mut Child) -> std::io::Result<()> {
+        if daemon.try_wait()?.is_none() {
+            let result = Command::new("/bin/kill")
+                .args(["-INT", &daemon.id().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            if !result.success() {
+                return Err(std::io::Error::other("Could not interrupt test daemon"));
+            }
+        }
+        Ok(())
+    }
+    fn stop_gracefully(&mut self, index: usize) {
+        let daemon = &mut self.daemons[index];
+        Self::interrupt(daemon).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = daemon.try_wait().unwrap() {
+                assert!(
+                    status.success(),
+                    "Daemon failed during graceful shutdown: {status}"
+                );
+                return;
+            }
+            assert!(Instant::now() < deadline, "Daemon did not stop on SIGINT");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     fn diagnostics(&self) -> String {
         fs::read_dir(&self.directory)
             .unwrap()
@@ -82,10 +111,17 @@ impl Testnet {
 }
 impl Drop for Testnet {
     fn drop(&mut self) {
+        // Preserve normal shutdown behavior for surviving processes. The relay
+        // loss scenario still uses an abrupt kill, independently of this cleanup.
         for daemon in &mut self.daemons {
-            let _ = daemon.kill();
+            let _ = Self::interrupt(daemon);
         }
+        let deadline = Instant::now() + Duration::from_secs(5);
         for daemon in &mut self.daemons {
+            while matches!(daemon.try_wait(), Ok(None)) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let _ = daemon.kill();
             let _ = daemon.wait();
         }
         let _ = fs::remove_dir_all(&self.directory);
@@ -295,4 +331,19 @@ async fn exercise() {
         .await
         .unwrap()
         .unwrap();
+    // A live, unfinished SOCKS session must close on graceful daemon shutdown.
+    let mut waiting = TcpStream::connect(addresses[7]).await.unwrap();
+    waiting.write_all(&[5, 1, 0]).await.unwrap();
+    let mut choice = [0; 2];
+    waiting.read_exact(&mut choice).await.unwrap();
+    assert_eq!(choice, [5, 0]);
+    testnet.stop_gracefully(7);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), waiting.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "Graceful gateway shutdown retained a client connection"
+    );
 }
