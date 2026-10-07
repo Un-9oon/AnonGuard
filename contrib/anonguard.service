@@ -1,5 +1,5 @@
 [Unit]
-Description=AnonGuard Research-Grade Anonymity Gateway
+Description=Experimental AnonGuard Transport
 After=network.target network-online.target
 Wants=network-online.target
 Documentation=https://github.com/Un-9oon/AnonGuard
@@ -11,7 +11,7 @@ StateDirectory=anonguard
 StateDirectoryMode=0700
 UMask=0077
 EnvironmentFile=/etc/anonguard/runtime.env
-ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --rmt-morphing --enforce-subnet-diversity --identity-key-path /var/lib/anonguard/identity.key --guard-state-path /var/lib/anonguard/guards.json $ANONGUARD_ARGS
+ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --enforce-subnet-diversity --identity-key-path /var/lib/anonguard/identity.key --guard-state-path /var/lib/anonguard/guards.json $ANONGUARD_ARGS
 Restart=on-failure
 RestartSec=5s
 

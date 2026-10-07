@@ -1,4 +1,6 @@
-# AnonGuard Testnet Report (Beta)
+# AnonGuard Testnet Report Template
+
+This unfilled template is not evidence of a deployed testnet or an independent review. Local automated CLI tests use one host and do not establish geographic independence or anonymity.
 
 ## Dates of Operation
 **Start Date:** YYYY-MM-DD  
@@ -21,22 +23,22 @@
 ### 1. Sybil Relay Domination Attempt
 - **Date:** 
 - **Method:** Span multiple Sybil nodes across various IPs.
-- **Outcome:** (Verify PoW + subnet diversity prevented them from dominating circuit selection)
+- **Outcome:** (Record attacker identities, IP/subnet allocation, computing budget and observed selection share. PoW and subnet diversity alone do not prove Sybil resistance.)
 
 ### 2. Mid-Circuit Relay Kill
 - **Date:**
 - **Method:** Terminate process on a middle relay actively routing traffic.
-- **Outcome:** (Verify client fail-over and kill-switch behavior worked as expected)
+- **Outcome:** (Measure connection closure and new circuit construction. Do not replay arbitrary TCP transactions; verify application isolation separately with direct IPv4/IPv6/DNS attempts.)
 
 ### 3. Authority Partitioning (Split-Brain)
 - **Date:**
 - **Method:** Isolate 2 authorities from the other 2.
-- **Outcome:** (Verify `ERROR_BFT_QUORUM_NOT_REACHED` is triggered per Phase 0 fix)
+- **Outcome:** (Record exact-snapshot vote counts, rejection of insufficient/conflicting certificates, retained snapshot expiry and recovery time after reconnection. Distinct frozen views may stall until the next epoch.)
 
 ### 4. Malicious Exit Node
 - **Date:**
 - **Method:** Intentionally throttle or tamper with exit traffic.
-- **Outcome:** (Verify graceful handling by clients and the network)
+- **Outcome:** (Record availability effects and authenticated cell rejection. An exit can observe or alter unencrypted destination traffic; test end-to-end TLS separately.)
 
 ## Incidents & Resolutions
 *(Log any unplanned downtime, real incidents, or unexpected behavior here, and how the runbook was applied)*

@@ -77,6 +77,25 @@ fn failed_atomic_replacement_cleans_temp_files() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
+async fn seed_directory(authority: &anonguard::mesh::authority::DirectoryAuthority, exit: bool) {
+    use anonguard::mesh::{consensus::RelayDescriptor, sybil::current_timestamp_secs};
+    for i in 0..3 {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[40 + i; 32]);
+        let mut relay = RelayDescriptor::new(
+            format!("seed-{i}"),
+            format!("{}.1.1.1", i + 1),
+            9001,
+            [i; 32],
+            key.verifying_key().to_bytes(),
+            exit && i == 2,
+            1,
+            current_timestamp_secs() - 1,
+        );
+        relay.sign_with_key(&key);
+        authority.register_relay(relay).await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn authority_restart_retains_its_signed_snapshot() {
     use anonguard::mesh::{
@@ -86,6 +105,7 @@ async fn authority_restart_retains_its_signed_snapshot() {
     let path = directory.path().join("authority.key");
     let authority =
         DirectoryAuthority::with_persistent_key("authority".into(), "127.0.0.1:0".into(), 0, &path);
+    seed_directory(&authority, true).await;
     let first = authority.generate_consensus().await.unwrap();
     drop(authority);
     let restarted =
@@ -108,7 +128,7 @@ async fn authority_restart_retains_its_signed_snapshot() {
     if second.valid_after == first.valid_after {
         assert_eq!(second.compute_digest(), first.compute_digest());
         assert_eq!(second.signatures, first.signatures);
-        assert!(second.relays.is_empty());
+        assert_eq!(second.relays.len(), 3);
     }
     let pinned = std::collections::HashMap::from([("authority".into(), restarted.verifying_key())]);
     assert!(second.verify_quorum(&pinned, 1, current_timestamp_secs()));
@@ -126,6 +146,7 @@ async fn authority_does_not_issue_a_vote_when_persistence_fails() {
     let path = directory.path().join("authority.key");
     let authority =
         DirectoryAuthority::with_persistent_key("authority".into(), "127.0.0.1:0".into(), 0, &path);
+    seed_directory(&authority, true).await;
     let votes = path.with_extension("votes.json");
     std::fs::create_dir(&votes).unwrap();
     assert!(authority
@@ -164,4 +185,44 @@ async fn authority_rejects_clock_rollback_after_restart() {
         .await
         .unwrap_err()
         .contains("clock rollback"));
+}
+
+#[tokio::test]
+async fn production_bootstrap_does_not_freeze_an_unusable_partial_directory() {
+    use anonguard::mesh::{
+        authority::DirectoryAuthority, consensus::RelayDescriptor, sybil::current_timestamp_secs,
+    };
+    let directory = TestDirectory::new();
+    let path = directory.path().join("authority.key");
+    let authority =
+        DirectoryAuthority::with_persistent_key("authority".into(), "127.0.0.1:0".into(), 0, &path);
+    assert!(authority
+        .generate_consensus()
+        .await
+        .unwrap_err()
+        .contains("voting deferred"));
+    seed_directory(&authority, false).await;
+    assert!(authority
+        .generate_consensus()
+        .await
+        .unwrap_err()
+        .contains("voting deferred"));
+    assert!(!path.with_extension("votes.json").exists());
+    let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let mut exit = RelayDescriptor::new(
+        "seed-2".into(),
+        "3.1.1.1".into(),
+        9001,
+        [2; 32],
+        key.verifying_key().to_bytes(),
+        true,
+        2,
+        current_timestamp_secs(),
+    );
+    exit.sign_with_key(&key);
+    authority.register_relay(exit).await.unwrap();
+    let snapshot = authority.generate_consensus().await.unwrap();
+    assert_eq!(snapshot.relays.len(), 3);
+    assert!(snapshot.relays.iter().any(|relay| relay.is_exit));
+    assert!(path.with_extension("votes.json").exists());
 }

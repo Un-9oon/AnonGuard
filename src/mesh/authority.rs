@@ -40,6 +40,9 @@ pub struct DirectoryAuthority {
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
     pub peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
     pub allow_unauthenticated_registration: bool,
+    /// Production authorities defer voting until the advertised network can
+    /// support a three-hop circuit with an exit. Ephemeral consensus tests may opt out.
+    pub require_usable_snapshot: bool,
     signed_epochs: Arc<RwLock<HashMap<u64, ConsensusDocument>>>,
     vote_path: Option<std::path::PathBuf>,
 }
@@ -71,6 +74,7 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
             allow_unauthenticated_registration: false,
+            require_usable_snapshot: false,
             signed_epochs: Arc::new(RwLock::new(HashMap::new())),
             vote_path: None,
         }
@@ -155,6 +159,7 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
             allow_unauthenticated_registration: false,
+            require_usable_snapshot: true,
             signed_epochs: Arc::new(RwLock::new(signed_epochs)),
             vote_path: Some(vote_path),
         }
@@ -171,6 +176,11 @@ impl DirectoryAuthority {
             return Err("Authority clock rollback rejected".into());
         }
         if let Some(doc) = votes.get(&epoch) {
+            if self.require_usable_snapshot
+                && (doc.relays.len() < 3 || !doc.relays.iter().any(|r| r.is_exit))
+            {
+                return Err("Persisted epoch snapshot cannot support a usable circuit; waiting for next epoch".into());
+            }
             return Ok(doc.clone());
         }
         if relays.len() > crate::mesh::consensus::MAX_DIRECTORY_RELAYS {
@@ -179,6 +189,11 @@ impl DirectoryAuthority {
         relays.retain(|r| {
             r.verify_identity() && r.registered_at <= now && now - r.registered_at <= RELAY_TTL_SECS
         });
+        if self.require_usable_snapshot && (relays.len() < 3 || !relays.iter().any(|r| r.is_exit)) {
+            return Err(
+                "Directory has no usable three-hop circuit with an exit; voting deferred".into(),
+            );
+        }
         let mut doc = ConsensusDocument::new(epoch, epoch + 600, relays);
         doc.sign_with_authority(&self.authority_id, &self.signing_key);
         let mut next = votes.clone();
@@ -474,10 +489,19 @@ impl DirectoryAuthority {
             {
                 continue;
             }
+            // A direct registration may have advanced this identity while peer RPCs
+            // were in flight. Gossip must never roll its descriptor back.
+            if active
+                .get(id)
+                .is_some_and(|existing| existing.registered_at >= desc.registered_at)
+            {
+                continue;
+            }
             active.insert(id.clone(), desc.clone());
         }
 
-        local_map.into_values().collect()
+        // Return the admitted, current state rather than the stale pre-RPC clone.
+        active.values().cloned().collect()
     }
 
     async fn fetch_peer_relay_list(
@@ -644,6 +668,131 @@ impl DirectoryAuthority {
 mod tests {
     use super::*;
     use crate::mesh::sybil::solve_pow_bounded;
+
+    #[tokio::test]
+    async fn delayed_gossip_cannot_roll_back_a_concurrent_registration() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_key = SigningKey::generate(&mut OsRng);
+        let mut authority =
+            DirectoryAuthority::with_difficulty("authority".into(), "127.0.0.1:0".into(), 0);
+        authority.peer_authorities = vec![(
+            listener.local_addr().unwrap().to_string(),
+            Some(peer_key.verifying_key()),
+        )];
+        let authority = Arc::new(authority);
+        let key = SigningKey::generate(&mut OsRng);
+        let mut old = RelayDescriptor::new(
+            "relay".into(),
+            "1.1.1.1".into(),
+            9001,
+            [1; 32],
+            key.verifying_key().to_bytes(),
+            false,
+            1,
+            current_timestamp_secs() - 1,
+        );
+        old.sign_with_key(&key);
+        authority.register_relay(old.clone()).await.unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, proceed) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut session = SecureTransportSession::server_handshake(socket, Some(&peer_key))
+                .await
+                .unwrap();
+            assert_eq!(session.read_frame().await.unwrap(), b"GET_RELAY_LIST");
+            started.send(()).unwrap();
+            proceed.await.unwrap();
+            session
+                .write_frame(&serde_json::to_vec(&vec![old]).unwrap())
+                .await
+                .unwrap();
+        });
+        let reconciling = authority.clone();
+        let task = tokio::spawn(async move { reconciling.reconcile_relays().await });
+        ready.await.unwrap();
+        let mut newer = RelayDescriptor::new(
+            "relay".into(),
+            "2.2.2.2".into(),
+            9002,
+            [2; 32],
+            key.verifying_key().to_bytes(),
+            false,
+            2,
+            current_timestamp_secs(),
+        );
+        newer.sign_with_key(&key);
+        authority.register_relay(newer.clone()).await.unwrap();
+        release.send(()).unwrap();
+        let snapshot = task.await.unwrap();
+        peer.await.unwrap();
+        assert_eq!(snapshot, vec![newer.clone()]);
+        assert_eq!(
+            authority.active_relays.read().await.get("relay"),
+            Some(&newer)
+        );
+    }
+
+    #[tokio::test]
+    async fn returned_gossip_snapshot_excludes_concurrent_endpoint_conflicts() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer_key = SigningKey::generate(&mut OsRng);
+        let mut authority =
+            DirectoryAuthority::with_difficulty("authority".into(), "127.0.0.1:0".into(), 0);
+        authority.peer_authorities = vec![(
+            listener.local_addr().unwrap().to_string(),
+            Some(peer_key.verifying_key()),
+        )];
+        let authority = Arc::new(authority);
+        let now = current_timestamp_secs();
+        let peer_relay_key = SigningKey::generate(&mut OsRng);
+        let mut advertised = RelayDescriptor::new(
+            "gossip".into(),
+            "1.1.1.1".into(),
+            9001,
+            [1; 32],
+            peer_relay_key.verifying_key().to_bytes(),
+            false,
+            1,
+            now,
+        );
+        advertised.sign_with_key(&peer_relay_key);
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, proceed) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut session = SecureTransportSession::server_handshake(socket, Some(&peer_key))
+                .await
+                .unwrap();
+            assert_eq!(session.read_frame().await.unwrap(), b"GET_RELAY_LIST");
+            started.send(()).unwrap();
+            proceed.await.unwrap();
+            session
+                .write_frame(&serde_json::to_vec(&vec![advertised]).unwrap())
+                .await
+                .unwrap();
+        });
+        let reconciling = authority.clone();
+        let task = tokio::spawn(async move { reconciling.reconcile_relays().await });
+        ready.await.unwrap();
+        let local_key = SigningKey::generate(&mut OsRng);
+        let mut local = RelayDescriptor::new(
+            "direct".into(),
+            "1.1.1.1".into(),
+            9001,
+            [2; 32],
+            local_key.verifying_key().to_bytes(),
+            false,
+            2,
+            now,
+        );
+        local.sign_with_key(&local_key);
+        authority.register_relay(local.clone()).await.unwrap();
+        release.send(()).unwrap();
+        let snapshot = task.await.unwrap();
+        peer.await.unwrap();
+        assert_eq!(snapshot, vec![local]);
+    }
 
     #[tokio::test]
     async fn directory_admission_rejects_duplicate_keys_and_endpoints() {

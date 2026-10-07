@@ -2,6 +2,7 @@
 
 pub mod authority;
 pub mod consensus;
+pub mod directory_client;
 pub mod guards;
 pub mod node;
 pub mod pool;
@@ -11,6 +12,7 @@ pub mod transport;
 
 pub use authority::DirectoryAuthority;
 pub use consensus::{AuthoritySignature, ConsensusDocument, RelayDescriptor};
+pub use directory_client::PinnedDirectoryClient;
 pub use node::{ProxyNode, ProxyProtocol};
 pub use pool::ProxyPool;
 pub use sybil::{

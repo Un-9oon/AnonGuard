@@ -1,6 +1,7 @@
 name: Continuous Integration & Verification
 
 on:
+  workflow_call:
   push:
     branches: [ main ]
   pull_request:

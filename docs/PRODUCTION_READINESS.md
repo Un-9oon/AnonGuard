@@ -13,13 +13,15 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
 - Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes.
 - Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.
+- Bounded concurrent pinned directory retrieval, admission reconciliation against concurrent registrations, and deferred production votes until three relays including an exit are present.
+- Gateway and namespace bridge workers scoped to their listeners; aborting a listener cancels its existing connections.
 - Explicitly retired unsupported multipath gateway behavior and unsupported anonymity claims.
 
 These changes require a coordinated v3 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.
 
 ## Verification and release gates
 
-Locked tests and strict lint checks cover implemented contracts, including pinned identity rejection, three-hop telescoping, credit errors, directory conflicts/restart rollback and a 128 KiB half-closed request/response. CI separately exercises privileged namespace isolation and cross-platform compilation. Passing normal tests alone is insufficient for deployment approval.
+Locked tests and strict lint checks cover implemented contracts, including pinned identity rejection, three-hop telescoping, credit errors, directory conflicts/restart rollback and a 128 KiB half-closed request/response. A local CLI testnet also starts four authorities, three relays and a gateway, verifies a 128 KiB half-closed transfer, and checks connection closure after relay loss. This single-host test uses zero-cost PoW and explicitly permitted private exits; neither setting is a production recommendation. CI separately exercises privileged namespace isolation and cross-platform compilation. Passing normal tests alone is insufficient for deployment approval.
 
 Required before a production release:
 
@@ -33,8 +35,12 @@ Required before a production release:
 
 ## Packaging and operation
 
+Release packaging now depends on the full reusable verification workflow and dependency audit at the release commit. Tagged releases remain explicitly marked as experimental prereleases. Distribution archives include a runtime argument example rather than an unsupported config.toml; the checksum manifest and binaries are signed by the release workflow. Passing these engineering gates does not substitute for independent review.
+
 The Debian service uses a dynamic user and private persistent state. Configure `/etc/anonguard/runtime.env` with real endpoint-bound pins and a valid quorum; the daemon does not parse the former sample config.toml. Kernel isolation needs administrative namespace privileges and is a separate operational mode, not a privilege automatically granted by the packaged service.
 
 Empty, expired, conflicting or insufficient directories fail new circuit construction. Preserve and protect identity keys, authority vote journals, guard state and accepted-directory state. Corrupt state fails startup. Existing Unix signing keys must deny group/other access (`chmod 600`). Key storage requires a filesystem supporting hard links; unsupported storage fails startup rather than replacing a concurrent identity. Windows ACL verification remains a release gate. Test migrations in an isolated testnet before upgrading all participants together.
+
+The required first production release targets Linux, macOS and Windows with full application network isolation. Native macOS and Windows providers are not implemented; strict isolation refuses these platforms. Implementation and live IPv4/IPv6/DNS/UDP/crash validation on both platforms are release blockers. No deployed multi-region testnet or independent reviewer arrangement is recorded in this repository.
 
 Windows and macOS currently support application transport only. Public network readiness, Tor compatibility, onion services and protection against global traffic correlation are not certified or implemented by this work.

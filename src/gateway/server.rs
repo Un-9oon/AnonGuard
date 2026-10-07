@@ -98,6 +98,7 @@ impl GatewayServer {
 
     /// Starts the asynchronous listener loop with global and per-IP connection bounds.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut tasks = tokio::task::JoinSet::new();
         self.pool
             .init_guard_state(self.config.guard_state_path.clone())
             .await?;
@@ -121,14 +122,18 @@ impl GatewayServer {
 
         // Step 2: Spawn the Website Fingerprinting Traffic Chaffing Engine
         if self.config.enable_chaffing {
-            crate::gateway::chaffing::ChaffingEngine::new(self.config.listen_addr.clone()).spawn();
+            let engine =
+                crate::gateway::chaffing::ChaffingEngine::new(self.config.listen_addr.clone());
+            tasks.spawn(async move {
+                engine.run_loop().await;
+            });
         }
 
         if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
             let auths = self.config.authority_endpoints.clone();
             let identity_key = self.relay_identity_key.clone();
             let config = self.config.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 loop {
                     let now = crate::mesh::sybil::current_timestamp_secs();
                     let pub_key_bytes = identity_key.verifying_key().to_bytes();
@@ -254,6 +259,7 @@ impl GatewayServer {
         }
 
         loop {
+            while tasks.try_join_next().is_some() {}
             // If kill switch is active, do not accept new connections
             if self.kill_switch.is_tripped() {
                 warn!("[AnonGuard Gateway] Kill switch active: refusing incoming connections.");
@@ -301,7 +307,7 @@ impl GatewayServer {
             let ip_tracker = self.ip_connections.clone();
             let relay_identity_key = self.relay_identity_key.clone();
 
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 let mut cancellation = kill_switch.subscribe();
                 let work = async move {
                     let _permit = permit;
@@ -734,6 +740,7 @@ impl GatewayServer {
         tracker_url: &str,
         node_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut tasks = tokio::task::JoinSet::new();
         let host_port = tracker_url.trim_start_matches("http://");
         // Generate a cryptographically secure authorization token for this reverse relay instance
         let auth_token = format!("{:016x}", rand::random::<u64>());
@@ -752,7 +759,7 @@ impl GatewayServer {
             let identity_key = self.relay_identity_key.clone();
             let pool = self.pool.clone();
 
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 loop {
                     match TcpStream::connect(&hp).await {
                         Ok(mut stream) => {
@@ -1304,6 +1311,7 @@ async fn handle_relay_inner(
     let mut is_currently_exit_hop = false;
     let mut upload_closed = false;
     let mut downstream_id = 0u32;
+    let mut downstream_write_failed_at: Option<tokio::time::Instant> = None;
     let mut exit_window = crate::onion::flow::SendWindow::default();
     let mut received_data = 0u32;
     let mut destination_eof = false;
@@ -1395,7 +1403,7 @@ async fn handle_relay_inner(
                     break;
                 };
                 tokio::select! {
-                    cell = client_cell_rx.recv() => {
+                    cell = client_cell_rx.recv(), if downstream_write_failed_at.is_none() => {
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Extend, .. }) => {
@@ -1408,12 +1416,21 @@ async fn handle_relay_inner(
                                 }
                                 client_buf[..4].copy_from_slice(&downstream_id.to_be_bytes());
                                 if !matches!(tokio::time::timeout(std::time::Duration::from_secs(30), ds_w.write_all(&client_buf)).await, Ok(Ok(()))) {
-                                    break;
+                                    // A downstream close can race a queued final response.
+                                    // Stop forward writes and drain the bounded backward queue.
+                                    downstream_write_failed_at = Some(tokio::time::Instant::now());
                                 }
                             }
                             _ => break,
                         }
                     }
+                    _ = async {
+                        if let Some(failed_at) = downstream_write_failed_at {
+                            tokio::time::sleep_until(failed_at + std::time::Duration::from_secs(5)).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => break,
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
                         error!("Idle circuit timeout (intermediate mode)");
                         break;
@@ -1690,5 +1707,65 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "MITM must be rejected with PermissionDenied, not silently accepted"
         );
+    }
+}
+
+#[cfg(test)]
+mod listener_lifetime_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn dropping_listener_future_closes_in_progress_client_handshakes() {
+        let reserved = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = reserved.local_addr().unwrap();
+        drop(reserved);
+        let directory =
+            std::env::temp_dir().join(format!("ag-gateway-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&directory).unwrap();
+        let config = GuardConfig {
+            listen_addr: address.to_string(),
+            guard_state_path: directory.join("guards.json"),
+            ..GuardConfig::default()
+        };
+        let server = Arc::new(GatewayServer::new(
+            config,
+            ProxyPool::new(),
+            KillSwitchController::new(),
+            Arc::new(Ed25519SigningKey::from_bytes(&[71; 32])),
+        ));
+        let task = tokio::spawn(async move { server.run().await });
+        let mut connection = None;
+        for _ in 0..100 {
+            if let Ok(stream) = TcpStream::connect(address).await {
+                connection = Some(stream);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut client = connection.expect("Gateway did not start");
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut selection = [0; 2];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_exact(&mut selection),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(selection, [5, 0]);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.read(&mut selection)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            0
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -41,7 +41,7 @@ impl ChaffingEngine {
         });
     }
 
-    async fn run_loop(&self) {
+    pub(crate) async fn run_loop(&self) {
         loop {
             // Wait for a random interval modeled by an exponential distribution
             let lambda = 1.0 / self.mean_chaff_interval.as_secs_f64();

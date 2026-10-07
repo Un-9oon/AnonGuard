@@ -4,15 +4,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-ARCH="amd64"
+VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${ROOT_DIR}/Cargo.toml" | head -n 1)"
+ARCH="$(dpkg --print-architecture)"
 PKG_NAME="anonguard"
 DIST_DIR="${ROOT_DIR}/dist"
 STAGING_DIR="${ROOT_DIR}/target/deb_staging"
 
-echo "[*] Building AnonGuard release binary..."
+echo "[*] Preparing AnonGuard release binary..."
 cd "${ROOT_DIR}"
-cargo build --locked --release
+case "${1:-}" in
+    "") cargo build --locked --release ;;
+    --prebuilt) ;;
+    *) echo "Usage: $0 [--prebuilt]" >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ] || [ ! -x "${ROOT_DIR}/target/release/anonguard-daemon" ]; then
+    echo "Expected one executable release binary and at most one option" >&2
+    exit 2
+fi
 
 echo "[*] Preparing Debian package filesystem layout..."
 rm -rf "${STAGING_DIR}"
@@ -22,6 +30,7 @@ mkdir -p "${STAGING_DIR}/lib/systemd/system"
 mkdir -p "${STAGING_DIR}/etc/anonguard"
 mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard"
 mkdir -p "${DIST_DIR}"
+find "${STAGING_DIR}" -type d -exec chmod 755 {} +
 
 # 1. Binary
 cp "${ROOT_DIR}/target/release/anonguard-daemon" "${STAGING_DIR}/usr/bin/anonguard-daemon"
@@ -60,10 +69,10 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
-Description: Authenticated decentralized anonymity gateway with statistical traffic morphing and 3-hop layered onion routing.
- AnonGuard mitigates AI-driven traffic correlation, website fingerprinting,
- and flow-correlation attacks using Wigner Surmise level repulsion,
- 3-hop telescopic onion circuits, and fail-closed kill switches.
+Description: Experimental authenticated three-hop anonymity transport
+ AnonGuard provides pinned relay links, layered circuits and optional Linux
+ application namespace isolation. Production anonymity and resistance to
+ traffic correlation have not been independently established.
 EOF
 chmod 644 "${STAGING_DIR}/DEBIAN/control"
 

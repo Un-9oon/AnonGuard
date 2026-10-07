@@ -9,9 +9,9 @@ def check_coverage(xml_path):
     overall_pct = overall_line_rate * 100
 
     print(f"Overall Coverage: {overall_pct:.2f}%")
-    if overall_pct < 80.0:
+    overall_passed = overall_pct >= 80.0
+    if not overall_passed:
         print("ERROR: Overall coverage below 80%.")
-        sys.exit(1)
 
     # Check packages/classes
     mesh_lines = 0
@@ -44,7 +44,7 @@ def check_coverage(xml_path):
             return False
         return True
 
-    success = True
+    success = overall_passed
     success &= report('src/mesh/', mesh_hits, mesh_lines, 90.0)
     success &= report('src/onion/', onion_hits, onion_lines, 90.0)
 

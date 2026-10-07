@@ -7,14 +7,20 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  verification:
+    uses: ./.github/workflows/ci.yml
+
+  dependency-audit:
+    uses: ./.github/workflows/security.yml
+
   build-linux:
+    needs: [verification, dependency-audit]
     name: Build Linux Binary & Debian Package
     runs-on: ubuntu-latest
     steps:
@@ -30,14 +36,14 @@ jobs:
       - name: Build Debian Package & Release Binary with SBOM
         run: |
           chmod +x scripts/build_deb.sh
-          cargo auditable build --release
-          ./scripts/build_deb.sh
+          cargo auditable build --locked --release
+          ./scripts/build_deb.sh --prebuilt
 
       - name: Create Linux Tarball & Checksums
         run: |
           mkdir -p target/package_linux
           cp target/release/anonguard-daemon target/package_linux/
-          cp contrib/anonguard.default.conf target/package_linux/config.toml
+          cp contrib/runtime.env target/package_linux/runtime.env.example
           cp README.md target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
           cd dist && sha256sum anonguard-linux-amd64.tar.gz > anonguard-linux-amd64.tar.gz.sha256
@@ -49,6 +55,7 @@ jobs:
           path: dist/*
 
   build-windows:
+    needs: [verification, dependency-audit]
     name: Build Windows Executable Bundle
     runs-on: windows-latest
     steps:
@@ -62,7 +69,7 @@ jobs:
         run: cargo install cargo-auditable --locked
 
       - name: Build Release Binary with SBOM
-        run: cargo auditable build --release
+        run: cargo auditable build --locked --release
 
       - name: Package Windows Zip & Checksums
         shell: pwsh
@@ -70,10 +77,11 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force
           New-Item -ItemType Directory -Path target/package_windows -Force
           Copy-Item target/release/anonguard-daemon.exe target/package_windows/
-          Copy-Item contrib/anonguard.default.conf target/package_windows/config.toml
+          Copy-Item contrib/runtime.env target/package_windows/runtime.env.example
           Copy-Item README.md target/package_windows/
           Compress-Archive -Path target/package_windows/* -DestinationPath dist/anonguard-windows-amd64.zip
-          Get-FileHash dist/anonguard-windows-amd64.zip -Algorithm SHA256 | Format-List > dist/anonguard-windows-amd64.zip.sha256
+          $archiveHash = (Get-FileHash dist/anonguard-windows-amd64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$archiveHash  anonguard-windows-amd64.zip" | Set-Content -Encoding ascii dist/anonguard-windows-amd64.zip.sha256
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
@@ -82,6 +90,7 @@ jobs:
           path: dist/*
 
   build-macos:
+    needs: [verification, dependency-audit]
     name: Build macOS Universal Binary
     runs-on: macos-latest
     steps:
@@ -98,8 +107,8 @@ jobs:
 
       - name: Build Apple Silicon (ARM64) and Intel (x86_64) with SBOM
         run: |
-          cargo auditable build --release --target aarch64-apple-darwin
-          cargo auditable build --release --target x86_64-apple-darwin
+          cargo auditable build --locked --release --target aarch64-apple-darwin
+          cargo auditable build --locked --release --target x86_64-apple-darwin
 
       - name: Create Universal Binary with Lipo & Checksums
         run: |
@@ -108,7 +117,7 @@ jobs:
             target/aarch64-apple-darwin/release/anonguard-daemon \
             target/x86_64-apple-darwin/release/anonguard-daemon
           chmod +x target/package_macos/anonguard-daemon
-          cp contrib/anonguard.default.conf target/package_macos/config.toml
+          cp contrib/runtime.env target/package_macos/runtime.env.example
           cp README.md target/package_macos/
           tar -czvf dist/anonguard-macos-universal.tar.gz -C target/package_macos .
           cd dist && shasum -a 256 anonguard-macos-universal.tar.gz > anonguard-macos-universal.tar.gz.sha256
@@ -120,6 +129,9 @@ jobs:
           path: dist/*
 
   publish-release:
+    permissions:
+      contents: write
+      id-token: write
     name: Publish GitHub Release & Sign Artifacts
     needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
@@ -134,6 +146,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release_assets
+          pattern: "*-dist"
           merge-multiple: true
 
       - name: Display Release Files
@@ -142,7 +155,7 @@ jobs:
       - name: Generate SHA256SUMS Manifest
         run: |
           cd release_assets
-          sha256sum *.tar.gz *.zip *.deb > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.deb > SHA256SUMS
 
       - name: Sign Release Assets with Cosign
         if: startsWith(github.ref, 'refs/tags/')
@@ -150,7 +163,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           cd release_assets
-          for file in *.tar.gz *.zip *.deb; do
+          for file in SHA256SUMS *.tar.gz *.zip *.deb; do
             if [ -f "$file" ]; then
               cosign sign-blob --yes "$file" --bundle "$file.sigstore.json"
             fi
@@ -163,4 +176,4 @@ jobs:
           files: release_assets/*
           generate_release_notes: true
           draft: false
-          prerelease: false
+          prerelease: true

@@ -169,32 +169,7 @@ pub fn start_isolation(
     let listener = UnixListener::bind(socket)?;
     std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))?;
     config.apply_nftables_rules()?;
-    let bridge = tokio::spawn(async move {
-        let limit = Arc::new(Semaphore::new(64));
-        loop {
-            let permit = limit
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| io::Error::other("Bridge closed"))?;
-            let (mut client, _) = listener.accept().await?;
-            let mut cancellation = kill.subscribe();
-            if kill.is_tripped() {
-                return Err(io::Error::other("Isolation kill switch active"));
-            }
-            tokio::spawn(async move {
-                let _permit = permit;
-                tokio::select! {
-                    _ = async {
-                        if let Ok(Ok(mut proxy)) = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(endpoint)).await {
-                            let _ = tokio::time::timeout(std::time::Duration::from_secs(3600), tokio::io::copy_bidirectional(&mut client, &mut proxy)).await;
-                        }
-                    } => {}
-                    _ = cancellation.changed() => {}
-                }
-            });
-        }
-    });
+    let bridge = tokio::spawn(run_host_bridge(listener, endpoint, kill));
     let mut command = tokio::process::Command::new("ip");
     command.args(["netns", "exec", &config.namespace_name]);
     command
@@ -221,13 +196,48 @@ pub fn start_isolation(
     }
 }
 
+async fn run_host_bridge(
+    listener: UnixListener,
+    endpoint: std::net::SocketAddr,
+    kill: KillSwitchController,
+) -> io::Result<()> {
+    let mut tasks = tokio::task::JoinSet::new();
+    let limit = Arc::new(Semaphore::new(64));
+    loop {
+        while tasks.try_join_next().is_some() {}
+        let permit = limit
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| io::Error::other("Bridge closed"))?;
+        let (mut client, _) = listener.accept().await?;
+        let mut cancellation = kill.subscribe();
+        if kill.is_tripped() {
+            return Err(io::Error::other("Isolation kill switch active"));
+        }
+        tasks.spawn(async move {
+                let _permit = permit;
+                tokio::select! {
+                    _ = async {
+                        if let Ok(Ok(mut proxy)) = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(endpoint)).await {
+                            let _ = tokio::time::timeout(std::time::Duration::from_secs(3600), tokio::io::copy_bidirectional(&mut client, &mut proxy)).await;
+                        }
+                    } => {}
+                    _ = cancellation.changed() => {}
+                }
+            });
+    }
+}
+
 pub async fn run_namespace_proxy(config: &NetnsConfig, socket: &Path) -> io::Result<()> {
     let ip = config.validate()?;
     config.verify_current_namespace()?;
     let listener =
         TcpListener::bind(std::net::SocketAddr::new(ip, config.authorized_proxy_port)).await?;
     let limit = Arc::new(Semaphore::new(64));
+    let mut tasks = tokio::task::JoinSet::new();
     loop {
+        while tasks.try_join_next().is_some() {}
         let permit = limit
             .clone()
             .acquire_owned()
@@ -235,7 +245,7 @@ pub async fn run_namespace_proxy(config: &NetnsConfig, socket: &Path) -> io::Res
             .map_err(|_| io::Error::other("Namespace proxy closed"))?;
         let (mut client, _) = listener.accept().await?;
         let path = socket.to_path_buf();
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             let _permit = permit;
             if let Ok(Ok(mut host)) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), UnixStream::connect(path))
@@ -248,5 +258,59 @@ pub async fn run_namespace_proxy(config: &NetnsConfig, socket: &Path) -> io::Res
                 .await;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod bridge_lifetime_tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn bridge_abort_and_kill_switch_close_existing_connections() {
+        for abort_owner in [true, false] {
+            let directory =
+                std::env::temp_dir().join(format!("ag-bridge-{:032x}", rand::random::<u128>()));
+            std::fs::create_dir(&directory).unwrap();
+            let socket = directory.join("bridge.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = target.local_addr().unwrap();
+            let echo = tokio::spawn(async move {
+                let (mut stream, _) = target.accept().await.unwrap();
+                let mut message = [0; 4];
+                stream.read_exact(&mut message).await.unwrap();
+                assert_eq!(&message, b"ping");
+                stream.write_all(b"pong").await.unwrap();
+                assert_eq!(stream.read(&mut message).await.unwrap(), 0);
+            });
+            let kill = KillSwitchController::with_threshold(1, Duration::from_secs(1));
+            let bridge = tokio::spawn(run_host_bridge(listener, endpoint, kill.clone()));
+            let mut client = UnixStream::connect(&socket).await.unwrap();
+            client.write_all(b"ping").await.unwrap();
+            let mut response = [0; 4];
+            client.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"pong");
+            if abort_owner {
+                bridge.abort();
+            } else {
+                kill.trip("test shutdown");
+            }
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), client.read(&mut response))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+            tokio::time::timeout(Duration::from_secs(2), echo)
+                .await
+                .unwrap()
+                .unwrap();
+            bridge.abort();
+            let _ = bridge.await;
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 }

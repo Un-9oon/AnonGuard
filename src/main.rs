@@ -390,8 +390,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         authority_peers.push((addr.to_string(), Some(*key)));
     }
 
-    trusted_authorities = bound_authorities;
-
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
         enable_jitter: args.jitter,
@@ -458,6 +456,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             args.pow_difficulty,
             config.identity_key_path,
         );
+        if let Some(own) = config
+            .authority_endpoints
+            .iter()
+            .find(|endpoint| endpoint.identity == authority.authority_id)
+        {
+            if own.public_key != authority.verifying_key().to_bytes() {
+                return Err(
+                    "Authority identity key does not match its configured bootstrap pin".into(),
+                );
+            }
+        }
         authority.peer_authorities = authority_peers;
         let res = tokio::select! {
             r = authority.run() => r,
@@ -539,134 +548,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !args.reverse_relay {
         // Wire Multi-Authority Consensus retrieval & cryptographic quorum verification
         if !config.directory_authorities.is_empty() {
+            let client = anonguard::mesh::PinnedDirectoryClient::new(
+                config.authority_endpoints.clone(),
+                args.quorum_threshold,
+            )?;
             let pool_clone = pool.clone();
-            let auth_endpoints = config.directory_authorities.clone();
-            let auth_keys = trusted_authorities.clone();
-            let quorum_thresh = if args.quorum_threshold == 0
-                && !config.directory_authorities.is_empty()
-            {
-                warn!("--quorum-threshold 0 is unsafe when --authorities is set; clamping to 1");
-                1
-            } else {
-                args.quorum_threshold
-            };
-
             tokio::spawn(async move {
                 loop {
-                    // Fix for Critical Bug #1 ("directory trust is effectively 1-of-N"):
-                    //
-                    // Each Directory Authority only ever signs the ConsensusDocument it built
-                    // from its own local view, so no single authority's GET_CONSENSUS response
-                    // can carry more than one valid signature. Previously this loop broke out
-                    // as soon as ANY one authority answered, meaning `quorum_threshold >= 2`
-                    // could never actually be satisfied — the "M-of-N" consensus model
-                    // silently degraded to trusting whichever single authority answered first.
-                    //
-                    // The fix: query every configured authority in this round, fetch each
-                    // one's self-signed document, and merge together the documents that agree
-                    // on content (same digest — see `ConsensusDocument::merge_signatures_from`)
-                    // into one multi-signed document *before* running `verify_quorum` against
-                    // it. Only after that merge does `quorum_threshold` mean anything real.
-                    let mut fetched_docs: Vec<(String, anonguard::mesh::ConsensusDocument)> =
-                        Vec::new();
-
-                    for endpoint in &auth_endpoints {
-                        let (auth_id_opt, raw_addr) =
-                            if let Some((id, addr)) = endpoint.split_once('@') {
-                                (Some(id.trim()), addr.trim())
-                            } else {
-                                (None, endpoint.as_str())
-                            };
-                        let host_port = raw_addr.trim_start_matches("http://");
-                        let pinned_key = if let Some(aid) = auth_id_opt {
-                            auth_keys.get(aid).or_else(|| auth_keys.get(host_port))
-                        } else {
-                            auth_keys.get(host_port).or_else(|| auth_keys.get(endpoint))
-                        };
-
-                        if !auth_keys.is_empty() && pinned_key.is_none() {
-                            tracing::error!(
-                                endpoint = %endpoint,
-                                "Rejected Directory Authority: --authority-keys is configured but no matching key was found for this specific endpoint"
-                            );
-                            continue;
-                        }
-
-                        match tokio::net::TcpStream::connect(host_port).await {
-                            Ok(stream) => {
-                                match anonguard::mesh::SecureTransportSession::client_handshake(
-                                    stream, pinned_key,
-                                )
-                                .await
-                                {
-                                    Ok(mut session) => {
-                                        // The handshake already verifies `pinned_key` strictly if it is `Some`.
-                                        // We no longer need the weak `auth_keys.values().any` check here, which
-                                        // was vulnerable to cross-authority MITM.
-
-                                        if session.write_frame(b"GET_CONSENSUS").await.is_ok() {
-                                            if let Ok(frame) = session.read_frame().await {
-                                                if let Ok(doc) = serde_json::from_slice::<
-                                                    anonguard::mesh::ConsensusDocument,
-                                                >(
-                                                    &frame
-                                                ) {
-                                                    fetched_docs.push((endpoint.clone(), doc));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            error = %e,
-                                            endpoint = %endpoint,
-                                            "[AnonGuard Consensus] Secure transport handshake with Directory Authority failed"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    endpoint = %endpoint,
-                                    "[AnonGuard Consensus] Failed to connect to Directory Authority"
-                                );
-                            }
+                    match client.refresh(&pool_clone).await {
+                        Ok(loaded) => tracing::info!(
+                            loaded,
+                            "[AnonGuard Consensus] Loaded certified directory snapshot"
+                        ),
+                        Err(error) => {
+                            tracing::warn!(%error, "[AnonGuard Consensus] Directory refresh rejected; retained state remains subject to expiry")
                         }
                     }
-
-                    let docs: Vec<anonguard::mesh::ConsensusDocument> =
-                        fetched_docs.iter().map(|(_, doc)| doc.clone()).collect();
-                    let now = anonguard::mesh::current_timestamp_secs();
-
-                    let mut quorum_reached = false;
-                    match pool_clone
-                        .load_from_multi_consensus(&docs, &auth_keys, quorum_thresh, now)
-                        .await
-                    {
-                        Ok(loaded) => {
-                            tracing::info!(
-                                loaded = loaded,
-                                responders = docs.len(),
-                                "[AnonGuard Consensus] Verified M-of-N consensus (intersection across authorities) and loaded active relays"
-                            );
-                            quorum_reached = true;
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                "[AnonGuard Consensus] Failed to load relays from directory consensus"
-                            );
-                        }
-                    }
-                    if !quorum_reached && !fetched_docs.is_empty() {
-                        tracing::warn!(
-                            responders = fetched_docs.len(),
-                            threshold = quorum_thresh,
-                            "[AnonGuard Consensus] No consensus candidate reached quorum this round"
-                        );
-                    }
-
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 }
             });
