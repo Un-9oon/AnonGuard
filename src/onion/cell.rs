@@ -18,6 +18,8 @@ pub enum CellCommand {
     Data = 7,
     DataAck = 8,
     Dummy = 9,
+    /// End the upload direction while preserving downstream responses.
+    End = 10,
 }
 
 impl CellCommand {
@@ -32,6 +34,7 @@ impl CellCommand {
             7 => Some(Self::Data),
             8 => Some(Self::DataAck),
             9 => Some(Self::Dummy),
+            10 => Some(Self::End),
             _ => None,
         }
     }

@@ -361,25 +361,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "[AnonGuard] Starting Research-Grade Anonymity Gateway..."
     );
 
-    #[cfg(target_os = "linux")]
-    if args.enable_firewall_killswitch {
-        let (proxy_ip, proxy_port) = match args.listen.split_once(':') {
-            Some((ip, p)) => (ip, p.parse::<u16>().unwrap_or(9050)),
-            None => ("127.0.0.1", 9050),
-        };
-        let netns = anonguard::kernel::NetnsConfig::new("anonguard", proxy_ip, proxy_port);
-        match netns.apply_nftables_rules() {
-            Ok(_) => {
-                info!("Successfully applied OS/kernel-level nftables firewall killswitch");
-            }
-            Err(e) => {
-                return Err(
-                    format!("Requested kernel firewall could not be installed: {e}").into(),
-                );
-            }
-        }
-    }
-
     let directory_authorities = if let Some(ref auths) = args.authorities {
         auths.split(',').map(|s| s.trim().to_string()).collect()
     } else {
@@ -409,6 +390,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Err("Quorum threshold exceeds the number of trusted authority keys".into());
     }
 
+    let mut authority_identity_keys = Vec::new();
+    let mut authority_peers = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+    for endpoint in &directory_authorities {
+        let (id, addr) = endpoint.split_once('@').unwrap_or((endpoint, endpoint));
+        let addr = addr.trim_start_matches("http://");
+        let key = trusted_authorities
+            .get(id)
+            .or_else(|| trusted_authorities.get(addr))
+            .ok_or("Every authority endpoint requires a matching pinned key")?;
+        if !seen_keys.insert(key.to_bytes()) {
+            return Err("Authority endpoints must have distinct signing keys".into());
+        }
+        authority_identity_keys.push(key.to_bytes());
+        authority_peers.push((addr.to_string(), Some(*key)));
+    }
+
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
         enable_jitter: args.jitter,
@@ -425,6 +423,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         authority_mode: args.authority,
         authority_id: args.authority_id.clone(),
         directory_authorities,
+        authority_identity_keys,
         relay_mode: args.relay,
         allow_open_socks5: args.allow_open_socks5,
         allow_private_exit: args.allow_private_exit,
@@ -467,15 +466,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     #[cfg(target_os = "linux")]
+    if args.enable_firewall_killswitch {
+        let (proxy_ip, proxy_port) = match args.listen.split_once(':') {
+            Some((ip, p)) => (ip, p.parse::<u16>().unwrap_or(9050)),
+            None => ("127.0.0.1", 9050),
+        };
+        let netns = anonguard::kernel::NetnsConfig::new("anonguard", proxy_ip, proxy_port);
+        match netns.apply_nftables_rules() {
+            Ok(_) => {
+                info!("Successfully applied OS/kernel-level nftables firewall killswitch");
+            }
+            Err(e) => {
+                return Err(
+                    format!("Requested kernel firewall could not be installed: {e}").into(),
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     let firewall_enabled = args.enable_firewall_killswitch;
 
     if args.authority {
-        let authority = anonguard::mesh::DirectoryAuthority::with_persistent_key(
+        let mut authority = anonguard::mesh::DirectoryAuthority::with_persistent_key(
             args.authority_id,
             args.listen,
             args.pow_difficulty,
             config.identity_key_path,
         );
+        authority.peer_authorities = authority_peers;
         let res = tokio::select! {
             r = authority.run() => r,
             _ = tokio::signal::ctrl_c() => {

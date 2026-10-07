@@ -297,3 +297,145 @@ async fn test_mitm_identity_key_mismatch_is_rejected() {
         "Error message must indicate a security rejection, got: {err_msg}"
     );
 }
+
+#[tokio::test]
+async fn test_upload_half_close_preserves_exit_response() {
+    // 1. Destination Echo Server
+    let dest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dest_addr = dest_listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let (mut s, _) = dest_listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(&buf[..], b"GET /onion-test HTTP/1.1\r\n\r\n");
+        s.write_all(b"HTTP/1.1 200 OK\r\n\r\nONION_E2E_VERIFIED")
+            .await
+            .unwrap();
+    });
+
+    // 2. Generate identity keys for each relay hop
+    let (exit_sk, exit_pk) = gen_relay_key();
+    let (middle_sk, middle_pk) = gen_relay_key();
+    let (guard_sk, guard_pk) = gen_relay_key();
+
+    // 3. Spawn Hop 2 (Exit) - allow private network for local test harness
+    let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit_addr = exit_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = exit_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 4. Spawn Hop 1 (Middle)
+    let middle_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let middle_addr = middle_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = middle_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &middle_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 5. Spawn Hop 0 (Guard)
+    let guard_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let guard_addr = guard_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = guard_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &guard_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 6. Build ProxyNode chain for client
+    let chain = vec![
+        ProxyNode::parse(&format!("socks5://{}", guard_addr)).unwrap(),
+        ProxyNode::parse(&format!("socks5://{}", middle_addr)).unwrap(),
+        ProxyNode::parse(&format!("socks5://{}", exit_addr)).unwrap(),
+    ];
+
+    // Pinned identity keys from the consensus (in order: guard, middle, exit)
+    let pinned_keys = vec![guard_pk, middle_pk, exit_pk];
+
+    // 7. Connect client directly to Guard node only
+    let mut guard_stream = TcpStream::connect(guard_addr).await.unwrap();
+    let circuit_id = 0x1a2b3c4d;
+
+    let mut circuit = build_telescopic_circuit(
+        &mut guard_stream,
+        circuit_id,
+        &chain,
+        &pinned_keys,
+        &dest_addr.ip().to_string(),
+        dest_addr.port(),
+    )
+    .await
+    .expect("Telescopic circuit build and exit relay connection failed");
+
+    assert_eq!(circuit.hop_count(), 3);
+
+    // 8. Client sends encrypted Data cell through the 3-hop circuit
+    let req_data = b"GET /onion-test HTTP/1.1\r\n\r\n";
+    let mut data_cell = OnionCell::new(circuit_id, 2, CellCommand::Data, 1, req_data).unwrap();
+    let wire_forward = circuit.wrap_forward(&mut data_cell).unwrap();
+    guard_stream.write_all(&wire_forward).await.unwrap();
+
+    let mut end = OnionCell::new(circuit_id, 0, CellCommand::End, 1, &[]).unwrap();
+    guard_stream
+        .write_all(&circuit.wrap_forward(&mut end).unwrap())
+        .await
+        .unwrap();
+
+    // The destination only responds after receiving EOF.
+    let mut wire_backward = [0u8; ONION_CELL_SIZE];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        guard_stream.read_exact(&mut wire_backward),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+
+    assert_eq!(resp_cell.1.command, CellCommand::Data);
+    let len = resp_cell.1.length as usize;
+    assert_eq!(
+        &resp_cell.1.payload[..len],
+        b"HTTP/1.1 200 OK\r\n\r\nONION_E2E_VERIFIED"
+    );
+}

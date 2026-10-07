@@ -6,7 +6,7 @@ use rand::Rng;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -17,6 +17,7 @@ pub struct ProxyPool {
     /// Keyed by "host:port" — inserting the same key overwrites, preventing duplicates (#6).
     nodes: Arc<RwLock<IndexMap<String, ProxyNode>>>,
     cursor: Arc<AtomicUsize>,
+    consensus_deadline: Arc<AtomicU64>,
     /// Maps "host:port" -> Ed25519 identity key from the directory consensus.
     /// Only populated when nodes are loaded via `load_from_consensus`.
     identity_keys: Arc<RwLock<IndexMap<String, [u8; 32]>>>,
@@ -31,10 +32,16 @@ impl ProxyPool {
         Self {
             nodes: Arc::new(RwLock::new(IndexMap::new())),
             cursor: Arc::new(AtomicUsize::new(0)),
+            consensus_deadline: Arc::new(AtomicU64::new(0)),
             identity_keys: Arc::new(RwLock::new(IndexMap::new())),
             guard_state: Arc::new(RwLock::new(crate::mesh::guards::GuardState::new())),
             guard_state_path: Arc::new(RwLock::new(None)),
         }
+    }
+
+    fn directory_expired(&self) -> bool {
+        let deadline = self.consensus_deadline.load(Ordering::Acquire);
+        deadline != 0 && crate::mesh::current_timestamp_secs() >= deadline
     }
 
     pub async fn init_guard_state(&self, path: std::path::PathBuf) {
@@ -81,6 +88,15 @@ impl ProxyPool {
         quorum_threshold: usize,
         current_time: u64,
     ) -> Result<usize, String> {
+        if quorum_threshold == 0 || quorum_threshold > authorities.len() {
+            return Err("Invalid consensus quorum threshold".into());
+        }
+        let unique_keys: std::collections::HashSet<_> =
+            authorities.values().map(|k| k.to_bytes()).collect();
+        if unique_keys.len() != authorities.len() {
+            return Err("Authority signing keys must be independent".into());
+        }
+        let mut deadline = u64::MAX;
         let mut relay_votes: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
         let mut relay_metadata: std::collections::HashMap<
@@ -111,6 +127,7 @@ impl ProxyPool {
                 continue;
             }
 
+            deadline = deadline.min(doc.valid_until);
             for relay in &doc.relays {
                 if !relay.verify_identity() {
                     continue; // Skip relays with invalid or missing cryptographic identity signatures
@@ -140,6 +157,17 @@ impl ProxyPool {
             return Err("No relays reached the required consensus quorum".to_string());
         }
 
+        // An endpoint must not ambiguously represent different signed identities.
+        let mut endpoints = std::collections::HashMap::new();
+        for relay in &final_relays {
+            let endpoint = (relay.host.clone(), relay.port);
+            if let Some(previous) = endpoints.insert(endpoint, relay.identity_key_ed25519) {
+                if previous != relay.identity_key_ed25519 {
+                    return Err("Conflicting relay identities at the same endpoint".into());
+                }
+            }
+        }
+
         // Full replace: clear old consensus entries and repopulate
         let mut list = self.nodes.write().await;
         let mut id_keys = self.identity_keys.write().await;
@@ -165,11 +193,15 @@ impl ProxyPool {
             }
         }
 
+        self.consensus_deadline.store(deadline, Ordering::Release);
         Ok(loaded)
     }
 
     /// Checks if a given host:port is a known mesh target from the consensus.
     pub async fn is_mesh_target(&self, host: &str, port: u16) -> bool {
+        if self.directory_expired() {
+            return false;
+        }
         let id_keys = self.identity_keys.read().await;
         id_keys.contains_key(&format!("{}:{}", host, port))
     }
@@ -178,6 +210,9 @@ impl ProxyPool {
     /// Nodes loaded from text files (not consensus) will return `[0u8; 32]` (zeroed),
     /// which `build_telescopic_circuit` will reject — enforcing consensus-sourced routing.
     pub async fn get_identity_keys(&self, chain: &[ProxyNode]) -> Vec<[u8; 32]> {
+        if self.directory_expired() {
+            return vec![[0; 32]; chain.len()];
+        }
         let id_keys = self.identity_keys.read().await;
         chain
             .iter()
@@ -265,6 +300,9 @@ impl ProxyPool {
         enforce_diversity: bool,
         require_exit_at_last: bool,
     ) -> Vec<ProxyNode> {
+        if self.directory_expired() {
+            return Vec::new();
+        }
         let list = self.nodes.read().await;
         let all_healthy: Vec<ProxyNode> = {
             let v: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();

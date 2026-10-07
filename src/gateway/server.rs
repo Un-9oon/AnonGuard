@@ -126,15 +126,19 @@ impl GatewayServer {
                     let pub_key_bytes = identity_key.verifying_key().to_bytes();
                     let node_id = hex::encode(&pub_key_bytes[0..8]); // stable node_id based on key
 
-                    let pow_nonce = match crate::mesh::sybil::solve_pow_bounded(
-                        &node_id,
-                        now,
-                        config.pow_difficulty,
-                    ) {
-                        Some(n) => n,
-                        None => {
-                            warn!("Failed to solve PoW for registration, will retry later");
-                            interval.tick().await;
+                    let mining_id = node_id.clone();
+                    let difficulty = config.pow_difficulty;
+                    let pow_nonce = match tokio::task::spawn_blocking(move || {
+                        crate::mesh::sybil::solve_pow_bounded(&mining_id, now, difficulty)
+                    })
+                    .await
+                    {
+                        Ok(Some(n)) => n,
+                        _ => {
+                            warn!(
+                                "PoW attempt exhausted; retrying a fresh challenge in 30 seconds"
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                             continue;
                         }
                     };
@@ -208,7 +212,10 @@ impl GatewayServer {
                             }
                         }
 
-                        let auth_host_port = auth_url.trim_start_matches("http://");
+                        let auth_host_port = auth_url
+                            .split_once('@')
+                            .map_or(auth_url.as_str(), |(_, addr)| addr)
+                            .trim_start_matches("http://");
                         if let Ok(stream) = tokio::net::TcpStream::connect(auth_host_port).await {
                             if let Ok(mut session) =
                                 crate::mesh::transport::SecureTransportSession::client_handshake(
@@ -466,83 +473,56 @@ impl GatewayServer {
                 }
 
                 if config.enable_onion_routing {
-                    // 3. Authenticated Telescopic Onion Routing with Multi-Path Dispersion (Phase 2)
-                    let num_paths = 2; // For phase 2 demonstration
-                    let mut upstreams = Vec::new();
-                    let mut circuits = Vec::new();
-
-                    for _ in 0..num_paths {
-                        let chain = pool
-                            .get_diverse_onion_chain(
-                                config.min_chain_length.max(3),
-                                config.max_chain_length.max(3),
-                                config.enforce_subnet_diversity,
-                            )
-                            .await;
-
-                        if chain.is_empty() {
-                            continue;
+                    // Multipath requires a shared exit session and symmetric framing.
+                    // Until that protocol exists, use one byte-preserving circuit.
+                    let result = async {
+                        let entry = chain.first().ok_or("No entry relay")?;
+                        if entry.raw_url.starts_with("reverse://") {
+                            return Err("Reverse onion transport is unsupported".into());
                         }
-
-                        let entry_node = &chain[0];
-
-                        // For Multi-Path, we skip the tracker logic for simplicity in this snippet,
-                        // assuming direct connections to Guard nodes.
-                        if entry_node.raw_url.starts_with("reverse://") {
-                            continue;
-                        }
-
-                        let addr = format!("{}:{}", entry_node.host, entry_node.port);
-                        let mut guard_stream = match TcpStream::connect(&addr).await {
-                            Ok(s) => s,
-                            Err(_) => continue,
-                        };
-
+                        let addr = format!("{}:{}", entry.host, entry.port);
+                        let mut stream = TcpStream::connect(addr).await?;
                         let mut circuit_id: u32 = rand::random();
                         if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
                             circuit_id ^= 0x10000000;
                         }
-
-                        let pinned_identity_keys = pool.get_identity_keys(&chain).await;
-
-                        if let Ok(circuit) = build_telescopic_circuit(
-                            &mut guard_stream,
+                        let keys = pool.get_identity_keys(&chain).await;
+                        let circuit = build_telescopic_circuit(
+                            &mut stream,
                             circuit_id,
                             &chain,
-                            &pinned_identity_keys,
+                            &keys,
                             &target_host,
                             target_port,
                         )
-                        .await
-                        {
-                            circuits.push(circuit);
-                            let guard_stream_guarded =
-                                GuardedSocket::new(guard_stream, kill_switch.atomic_handle())
+                        .await?;
+                        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stream, circuit))
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), result).await {
+                        Ok(Ok((stream, circuit))) => {
+                            let mut upstream =
+                                GuardedSocket::new(stream, kill_switch.atomic_handle())
                                     .begin_verification()
                                     .mark_verified();
-                            upstreams.push(guard_stream_guarded);
+                            if crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
+                                .await
+                                .is_ok()
+                            {
+                                let _ = stream_onion_circuit(
+                                    &mut client,
+                                    &mut upstream,
+                                    circuit,
+                                    jitter.clone(),
+                                )
+                                .await;
+                            }
                         }
-                    }
-
-                    if !upstreams.is_empty() {
-                        info!(
-                            paths = upstreams.len(),
-                            target = %format!("{}:{}", target_host, target_port),
-                            "Activating authentic Multi-Path layered ChaCha20-Poly1305 AEAD onion circuits to destination"
-                        );
-                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
-                        let _ = crate::gateway::multipath_router::stream_multipath_circuits(
-                            &mut client,
-                            upstreams,
-                            circuits,
-                            jitter.clone(),
-                        )
-                        .await;
-                    } else {
-                        error!("Failed to negotiate any telescopic onion circuits");
-                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
-                        if config.strict_killswitch {
-                            kill_switch.trip("Telescopic circuit negotiation failure");
+                        _ => {
+                            let _ =
+                                crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
+                            if config.strict_killswitch {
+                                kill_switch.trip("Onion circuit negotiation failure");
+                            }
                         }
                     }
                 } else {
@@ -860,15 +840,15 @@ pub async fn stream_onion_circuit(
     let fwd = async move {
         let mut buf = [0u8; PAYLOAD_SIZE];
         let stream_id = 1u16;
-        let mut client_seq = 2u32; // Seq 1 was RELAY cell
         let mut padding_engine = crate::onion::padding::AdaptivePaddingEngine::default_config();
 
         loop {
             let mut is_dummy = false;
+            let mut upload_ended = false;
             let delay = padding_engine.next_event_delay();
             let n = tokio::select! {
                 res = client_read.read(&mut buf) => match res {
-                    Ok(0) => break,
+                    Ok(0) => { upload_ended = true; 0 },
                     Ok(n) => {
                         padding_engine.record_real_packet();
                         n
@@ -887,10 +867,11 @@ pub async fn stream_onion_circuit(
 
             let mut cell = {
                 let guard = circuit_fwd.lock().await;
-                let seq = client_seq;
-                client_seq += 1;
+                let seq = 0; // wrap_forward owns the authenticated sequence counter.
 
-                let cmd = if is_dummy {
+                let cmd = if upload_ended {
+                    CellCommand::End
+                } else if is_dummy {
                     CellCommand::Dummy
                 } else {
                     CellCommand::Data
@@ -921,11 +902,20 @@ pub async fn stream_onion_circuit(
                 j.apply_delay().await;
             }
 
-            if upstream_write.write_all(&wire_buffer).await.is_err() {
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                upstream_write.write_all(&wire_buffer),
+            )
+            .await
+            .map_or(true, |r| r.is_err())
+            {
+                break;
+            }
+            if upload_ended {
                 break;
             }
         }
-        let _ = upstream_write.shutdown().await;
+        // END is authenticated; retain the transport for the response direction.
     };
 
     let circuit_bwd = circuit.clone();
@@ -1254,6 +1244,7 @@ pub async fn handle_onion_relay_connection(
     let mut client_cell_rx = spawn_onion_cell_reader(client_read);
 
     let mut is_currently_exit_hop = false;
+    let mut upload_closed = false;
     let mut ds_write: Option<tokio::io::WriteHalf<GuardedSocket<ActiveGuarded>>> = None;
     let mut ds_cell_rx: Option<tokio::sync::mpsc::Receiver<[u8; ONION_CELL_SIZE]>> = None;
     let mut ds_data_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
@@ -1270,12 +1261,19 @@ pub async fn handle_onion_relay_connection(
                         let Some(mut client_buf) = cell else { break; };
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Data, len }) => {
+                                if upload_closed { break; }
                                 let payload = &client_buf[45..45+len];
                                 if ds_w.write_all(payload).await.is_err() {
                                     break;
                                 }
                             }
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::End, .. }) => {
+                                if upload_closed { break; }
+                                upload_closed = true;
+                                if ds_w.shutdown().await.is_err() { break; }
+                            }
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Destroy, .. }) => break,
+                            Err(_) => break,
                             _ => {}
                         }
                     }

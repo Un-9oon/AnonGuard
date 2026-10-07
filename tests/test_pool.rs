@@ -128,3 +128,44 @@ async fn subnet_constraints_must_not_shorten_circuits() {
         .await
         .is_empty());
 }
+
+#[tokio::test]
+async fn expired_loaded_directory_blocks_new_onion_paths() {
+    use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    let auth = SigningKey::generate(&mut OsRng);
+    let relay_key = SigningKey::generate(&mut OsRng);
+    let mut relay = RelayDescriptor::new(
+        "relay".into(),
+        "1.1.1.1".into(),
+        9050,
+        [0; 32],
+        [0; 32],
+        true,
+        0,
+        1,
+    );
+    relay.sign_with_key(&relay_key);
+    let mut doc = ConsensusDocument::new(1, 3, vec![relay]);
+    doc.sign_with_authority("auth", &auth);
+    let keys = std::collections::HashMap::from([("auth".into(), auth.verifying_key())]);
+    let pool = ProxyPool::new();
+    assert_eq!(
+        pool.load_from_multi_consensus(&[doc.clone()], &keys, 1, 2)
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(pool.get_diverse_onion_chain(1, 1, false).await.is_empty());
+    assert!(pool
+        .load_from_multi_consensus(&[doc.clone()], &keys, 0, 2)
+        .await
+        .is_err());
+    let mut aliases = keys;
+    aliases.insert("alias".into(), auth.verifying_key());
+    assert!(pool
+        .load_from_multi_consensus(&[doc], &aliases, 2, 2)
+        .await
+        .is_err());
+}

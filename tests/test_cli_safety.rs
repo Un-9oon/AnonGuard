@@ -26,3 +26,29 @@ fn strict_firewall_requires_explicit_installation() {
         "requires --enable-firewall-killswitch",
     );
 }
+
+#[test]
+fn authority_endpoints_require_matching_independent_pins() {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let public = hex::encode(key.verifying_key().to_bytes());
+    let unrelated = format!("other:{public}");
+    refuses(
+        &[
+            "--authorities",
+            "auth@127.0.0.1:9000",
+            "--authority-keys",
+            &unrelated,
+        ],
+        "matching pinned key",
+    );
+    let aliases = format!("a:{public},b:{public}");
+    refuses(
+        &[
+            "--authorities",
+            "a@127.0.0.1:9000,b@127.0.0.1:9001",
+            "--authority-keys",
+            &aliases,
+        ],
+        "distinct signing keys",
+    );
+}
