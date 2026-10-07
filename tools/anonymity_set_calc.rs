@@ -67,14 +67,15 @@ pub fn calculate_delay_entropy(delays_ms: &[f64], num_bins: usize) -> (f64, f64)
 }
 
 fn main() {
-    println!("=== AnonGuard Anonymity-Set & Traffic Morphing Entropy Evaluation ===");
+    println!("=== Synthetic distribution entropy demonstration ===");
 
-    // Sample Relay Subnet Distribution (Uniform 10 /16 subnets vs Monolithic 1 subnet)
-    let uniform_subnets: Vec<String> = (0..10).map(|i| format!("192.168.{i}.0/16")).collect();
+    println!("Synthetic inputs only; entropy does not establish anonymity or resistance to traffic correlation.");
+    // Ten distinct /16 subnet labels.
+    let uniform_subnets: Vec<String> = (0..10).map(|i| format!("10.{i}.0.0/16")).collect();
     let (h_sub, n_sub) = calculate_relay_subnet_entropy(&uniform_subnets);
-    println!("Uniform 10-Subnet Mesh: Entropy = {h_sub:.4} bits | N_eff = {n_sub:.2} nodes");
+    println!("Synthetic 10-subnet distribution: Entropy = {h_sub:.4} bits | effective buckets = {n_sub:.2}");
 
-    // Sample Traffic Delays: Fixed 10ms vs RMT Wigner-Surmise Jittered Delays
+    // Deterministic delay samples; these are not measured RMT output.
     let fixed_delays = vec![10.0; 100];
     let (h_fixed, n_fixed) = calculate_delay_entropy(&fixed_delays, 10);
     println!("Fixed Pacing (Un-morphed): Delay Entropy = {h_fixed:.4} bits | N_eff = {n_fixed:.2}");
@@ -83,7 +84,7 @@ fn main() {
         .map(|i| 10.0 + ((i * 17) % 31) as f64 * 0.5)
         .collect();
     let (h_rmt, n_rmt) = calculate_delay_entropy(&rmt_delays, 10);
-    println!("RMT Wigner Jittered (Morphed): Delay Entropy = {h_rmt:.4} bits | N_eff = {n_rmt:.2}");
+    println!("Synthetic spread delays: Delay Entropy = {h_rmt:.4} bits | N_eff = {n_rmt:.2}");
 }
 
 #[cfg(test)]

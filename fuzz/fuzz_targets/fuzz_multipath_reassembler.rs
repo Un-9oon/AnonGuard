@@ -1,5 +1,5 @@
 #![no_main]
-use anonguard::onion::multipath::MultiPathReassembler;
+use anonguard::onion::multipath::{MultiPathReassembler, MultiPathSlicer};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -9,6 +9,8 @@ fuzz_target!(|data: &[u8]| {
     //  - payloads shorter than 8 bytes (should return None, no panic)
     //  - arbitrary sequence numbers (replay, gap, future)
     //  - sequences that push MAX_SEQ_GAP and MAX_BUFFERED_ENTRIES bounds
+    let mut output = vec![0; data.first().copied().unwrap_or(0) as usize];
+    let _ = MultiPathSlicer::default().slice(data, &mut output);
     let mut reassembler = MultiPathReassembler::new();
 
     // Split the fuzz input into variable-length chunks and feed each as a separate frame.

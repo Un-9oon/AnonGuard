@@ -92,7 +92,10 @@ pub async fn stream_multipath_circuits(
                         // pop_front().unwrap() in a loop is panic-prone. drain() is atomic
                         // with respect to the current task and never panics.
                         let chunk: Vec<u8> = client_buffer.drain(..chunk_size).collect();
-                        cell_len = slicer.slice(&chunk, &mut sliced_buf);
+                        cell_len = match slicer.slice(&chunk, &mut sliced_buf) {
+                            Ok(length) => length,
+                            Err(_) => break,
+                        };
                     }
 
                     // Smart Routing Simulation: select path with lowest transmitted load

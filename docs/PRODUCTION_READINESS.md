@@ -15,7 +15,10 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes. Expired certified directories are excluded from every pool selection API.
 - Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.
 - Bounded concurrent pinned directory retrieval, admission reconciliation against concurrent registrations, and deferred production votes until three relays including an exit are present.
-- Gateway and namespace bridge workers scoped to their listeners; aborting a listener cancels its existing connections.
+- Gateway, authority, tracker and namespace bridge workers scoped to their listeners; aborting a listener cancels its existing connections and queued reverse streams.
+- Serialized kill-switch reset/trip state and cancellation notifications; raw tracker requests containing authentication tokens are not logged.
+- Bounded research reassembly with progress at capacity, first-payload preservation and checked slicing/sequence exhaustion; this does not enable a multipath gateway.
+- Research CLI tools identify synthetic assumptions, group duplicate fingerprint descriptors, honor the modeled population and propagate buffered dataset write failures.
 - Explicitly retired unsupported multipath gateway behavior and unsupported anonymity claims.
 
 These changes require a coordinated v3 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.

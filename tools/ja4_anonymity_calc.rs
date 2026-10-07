@@ -1,15 +1,16 @@
-//! JA4 TLS Fingerprint k-Anonymity Calculator
-//!
-//! This tool computes the naive equal-distribution k-anonymity
-//! (users-per-fingerprint) for AnonGuard's shipped JA4 TLS profile set.
-//!
-//! The profile count is taken directly from `src/crypto/ja4.rs`
-//! via `TlsProfile::default_profiles()` — the REAL function in the
-//! AnonGuard library, not a reimplementation.
-//!
-//! Usage: cargo run --bin ja4-anonymity-calc [-- --users <N>]
-
+//! Synthetic JA4 profile inventory model. These descriptors do not measure
+//! transmitted ClientHello fingerprints or establish user anonymity.
+//! Usage: cargo run --bin ja4-anonymity-calc -- --users <N>
 use anonguard::crypto::ja4::TlsProfile;
+use clap::Parser;
+use std::collections::BTreeMap;
+
+#[derive(Parser)]
+#[command(about = "Model synthetic JA4 descriptor buckets; no anonymity guarantee")]
+struct Args {
+    #[arg(long, default_value_t = 10_000)]
+    users: u64,
+}
 
 fn compute_k_anonymity(profile_count: usize, total_users: u64) -> f64 {
     if profile_count == 0 {
@@ -18,65 +19,41 @@ fn compute_k_anonymity(profile_count: usize, total_users: u64) -> f64 {
     total_users as f64 / profile_count as f64
 }
 
-fn print_table(profile_count: usize) {
-    println!("\n=== JA4 TLS Fingerprint k-Anonymity Analysis ===");
-    println!(
-        "Profile count from src/crypto/ja4.rs (TlsProfile::default_profiles()): {}",
-        profile_count
-    );
-    println!(
-        "(Verified by: grep -n 'chrome_\\|firefox_\\|safari_' src/crypto/ja4.rs | grep 'pub fn')"
-    );
-    println!();
-    println!("Assumption: Uniform distribution — each user picks one profile.");
-    println!("k-anonymity metric: users_per_fingerprint = total_users / profile_count");
-    println!();
-
-    let scenarios: &[(u64, &str)] = &[
-        (1_000, "1,000 (small deployment)"),
-        (10_000, "10,000 (baseline assumption)"),
-        (100_000, "100,000 (medium deployment)"),
-        (1_000_000, "1,000,000 (large deployment)"),
-    ];
-
-    println!(
-        "{:<35} | {:<8} | {:>20}",
-        "User Count Scenario", "Profiles", "Users/Fingerprint (k)"
-    );
-    println!("{}", "-".repeat(70));
-    for (user_count, label) in scenarios {
-        let k = compute_k_anonymity(profile_count, *user_count);
-        println!("{:<35} | {:<8} | {:>20.1}", label, profile_count, k);
+fn fingerprint_buckets(profiles: &[TlsProfile], total_users: u64) -> Vec<(String, usize, f64)> {
+    let mut counts = BTreeMap::new();
+    for profile in profiles {
+        *counts
+            .entry(profile.ja4_fingerprint.clone())
+            .or_insert(0usize) += 1;
     }
-    println!();
-    println!("Interpretation:");
-    println!("  k = 10,000/5 = 2,000 means an observer cannot distinguish");
-    println!("  a given user from ~1,999 other users sharing the same JA4 fingerprint.");
-    println!();
-    println!("Sensitivity analysis:");
-    println!("  - If profile_count doubles to 10: k = total_users/10 (halved).");
-    println!("  - If profile_count halves to 2:   k = total_users/2  (doubled, better).");
-    println!("  - k scales linearly with user_count (more users = better anonymity).");
-    println!("  - k is INVERSELY proportional to profile_count.");
-    println!();
-    println!("Note: Real-world distribution is NOT uniform — Chrome is overrepresented.");
-    println!("Actual k for the most popular fingerprint (chrome_120/chrome_124) will");
-    println!("be higher than the equal-distribution k computed here.");
-    println!("For a tighter lower bound, apply real browser market-share weights.");
+    let per_profile = compute_k_anonymity(profiles.len(), total_users);
+    counts
+        .into_iter()
+        .map(|(fingerprint, count)| (fingerprint, count, count as f64 * per_profile))
+        .collect()
 }
 
 fn main() {
-    // Import the REAL TlsProfile::default_profiles() from src/crypto/ja4.rs.
-    // This is NOT a reimplementation — it calls the actual library function.
+    let args = Args::parse();
     let profiles = TlsProfile::default_profiles();
-    let profile_count = profiles.len();
-
-    println!("Profiles returned by TlsProfile::default_profiles():");
-    for p in &profiles {
-        println!("  - {} (JA4: {})", p.name, p.ja4_fingerprint);
+    let buckets = fingerprint_buckets(&profiles, args.users);
+    println!("=== Synthetic JA4 descriptor model ===");
+    println!("Users modeled: {}", args.users);
+    println!(
+        "Profiles: {}; distinct descriptor fingerprints: {}",
+        profiles.len(),
+        buckets.len()
+    );
+    println!("Assumption: uniform profile selection, not uniform fingerprint selection.");
+    println!(
+        "Expected users per profile: {:.1}",
+        compute_k_anonymity(profiles.len(), args.users)
+    );
+    for (fingerprint, count, users) in buckets {
+        println!("Fingerprint {fingerprint} | profiles={count} | expected_users={users:.1}");
     }
-
-    print_table(profile_count);
+    println!("Model only: profile labels are not measured on-wire TLS fingerprints.");
+    println!("No anonymity guarantee or protection against traffic correlation is established.");
 }
 
 #[cfg(test)]
@@ -122,39 +99,15 @@ mod tests {
         }
     }
 
-    /// Critical k-anonymity finding: JA4 fingerprint collisions between profiles.
-    ///
-    /// chrome_120 and chrome_124 share identical JA4 fingerprints.
-    /// firefox_124 and firefox_128 share identical JA4 fingerprints.
-    ///
-    /// This means the effective distinct fingerprint count is 3, not 5.
-    /// From a traffic analysis perspective, an observer classifying connections
-    /// by JA4 fingerprint only sees 3 distinct buckets. This test documents the
-    /// known collision as a machine-checkable regression guard.
     #[test]
-    fn test_distinct_fingerprint_count() {
-        use std::collections::HashSet;
-        let profiles = TlsProfile::default_profiles();
-        let fingerprints: HashSet<String> =
-            profiles.iter().map(|p| p.ja4_fingerprint.clone()).collect();
-
-        // Empirical result: only 3 distinct JA4 fingerprints despite 5 profiles.
-        // chrome_120 == chrome_124, firefox_124 == firefox_128.
-        let distinct = fingerprints.len();
-        println!(
-            "Distinct JA4 fingerprints: {} (out of {} profiles)",
-            distinct,
-            profiles.len()
-        );
-        // Document (not assert) the collision — this is a known issue, not a
-        // failure. The assertion below will alert if the fingerprints are fixed
-        // without updating this comment.
-        assert!(
-            distinct <= profiles.len(),
-            "Distinct fingerprint count cannot exceed profile count"
-        );
-        // If all fingerprints were unique, distinct == 5. Currently distinct == 3.
-        // Uncomment and adjust when fingerprints are differentiated:
-        // assert_eq!(distinct, 5, "All profiles should have unique JA4 fingerprints");
+    fn fingerprint_collisions_are_grouped_with_profile_selection_weights() {
+        let buckets = fingerprint_buckets(&TlsProfile::default_profiles(), 15);
+        let mut counts: Vec<_> = buckets.iter().map(|(_, count, _)| *count).collect();
+        counts.sort_unstable();
+        assert_eq!(counts, vec![1, 2, 2]);
+        let mut expected: Vec<_> = buckets.iter().map(|(_, _, users)| *users).collect();
+        expected.sort_by(f64::total_cmp);
+        assert_eq!(expected, vec![3.0, 6.0, 6.0]);
+        assert_eq!(fingerprint_buckets(&[], 15), vec![]);
     }
 }

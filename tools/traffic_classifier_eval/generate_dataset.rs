@@ -1,4 +1,4 @@
-//! Dataset Generator for Empirical Traffic-Morphing Classifier Evaluation.
+//! Synthetic timing dataset generator for classifier research.
 //!
 //! Generates traffic timing flow datasets for 5 distinct website classes by calling
 //! AnonGuard's ACTUAL RMT traffic morphing engine (`anonguard::morphing::RmtTimingEngine`).
@@ -65,12 +65,15 @@ pub async fn generate_traffic_dataset(
         }
     }
 
+    raw_file.flush()?;
+    morphed_file.flush()?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    println!("Generating traffic morphing evaluation datasets using anonguard::morphing...");
+    println!("Generating synthetic timing datasets using anonguard::morphing...");
+    println!("Synthetic samples only; no recorded network traffic or anonymity proof.");
     std::fs::create_dir_all("target/eval_data")?;
     generate_traffic_dataset(
         "target/eval_data/raw_unmorphed.csv",
@@ -111,5 +114,20 @@ mod tests {
 
         assert_eq!(raw_content.lines().count(), 51); // 1 header + 5*10 rows
         assert_eq!(morphed_content.lines().count(), 51);
+    }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn final_buffer_flush_failure_is_reported() {
+        let destination = std::env::temp_dir().join(format!(
+            "ag-dataset-flush-{:032x}.csv",
+            rand::random::<u128>()
+        ));
+        let result =
+            generate_traffic_dataset("/dev/full", destination.to_str().unwrap(), 0, 2).await;
+        let _ = std::fs::remove_file(destination);
+        assert!(
+            result.is_err(),
+            "Dataset generation silently discarded a buffered write error"
+        );
     }
 }

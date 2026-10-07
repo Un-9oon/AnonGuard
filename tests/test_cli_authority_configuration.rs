@@ -211,3 +211,60 @@ async fn status_distinguishes_file_presence_without_claiming_live_daemon_health(
         assert_eq!(key_path.exists(), present);
     }
 }
+
+#[tokio::test]
+async fn authority_refuses_corrupt_duplicate_or_foreign_vote_journals_without_replacement() {
+    use anonguard::mesh::ConsensusDocument;
+    let workspace = Workspace::new();
+    let key_path = workspace.0.join("identity.key");
+    let key = anonguard::core::storage::load_or_create_signing_key(&key_path).unwrap();
+    let original = std::fs::read(&key_path).unwrap();
+    let vote_path = key_path.with_extension("votes.json");
+    let epoch = (anonguard::mesh::sybil::current_timestamp_secs() / 300) * 300;
+    let mut own = ConsensusDocument::new(epoch, epoch + 600, vec![]);
+    own.sign_with_authority("a", &key);
+    let mut foreign = ConsensusDocument::new(epoch, epoch + 600, vec![]);
+    foreign.sign_with_authority("a", &SigningKey::from_bytes(&[95; 32]));
+    let args = vec![
+        "--authority".into(),
+        "--authority-id".into(),
+        "a".into(),
+        "--listen".into(),
+        "127.0.0.1:0".into(),
+        "--identity-key-path".into(),
+        key_path.display().to_string(),
+        "--authorities".into(),
+        "a@127.0.0.1:9000".into(),
+        "--authority-keys".into(),
+        format!("a:{}", hex::encode(key.verifying_key().to_bytes())),
+        "--quorum-threshold".into(),
+        "1".into(),
+    ];
+    for bytes in [
+        b"invalid-json".to_vec(),
+        serde_json::to_vec(&vec![own.clone(), own]).unwrap(),
+        serde_json::to_vec(&vec![foreign]).unwrap(),
+    ] {
+        std::fs::write(&vote_path, &bytes).unwrap();
+        let output = invoke(args.clone()).await;
+        assert!(
+            !output.status.success(),
+            "Invalid vote journal was accepted"
+        );
+        assert_eq!(
+            std::fs::read(&vote_path).unwrap(),
+            bytes,
+            "Rejected vote journal was silently replaced"
+        );
+        assert_eq!(std::fs::read(&key_path).unwrap(), original);
+    }
+    std::fs::remove_file(&vote_path).unwrap();
+    std::fs::create_dir(&vote_path).unwrap();
+    let output = invoke(args).await;
+    assert!(
+        !output.status.success(),
+        "Unreadable vote journal was ignored"
+    );
+    assert!(vote_path.is_dir());
+    assert_eq!(std::fs::read(&key_path).unwrap(), original);
+}
