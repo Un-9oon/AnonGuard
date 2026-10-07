@@ -90,3 +90,15 @@ jobs:
           path: |
             cobertura.xml
             tarpaulin-report.html
+
+  platform-build:
+    name: Platform compilation
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --locked --all-targets

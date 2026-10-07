@@ -100,3 +100,31 @@ async fn test_proxy_pool_load_from_consensus_quorum() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn insufficient_relays_never_reduce_requested_hop_count() {
+    let pool = ProxyPool::new();
+    pool.add_proxy("socks5://1.1.1.1:9050").await.unwrap();
+    pool.add_proxy("socks5://2.2.2.2:9050").await.unwrap();
+    assert!(pool.get_random_chain(3, 3).await.is_empty());
+    assert!(pool
+        .get_diverse_onion_chain_with_exit(3, 3, false, false)
+        .await
+        .is_empty());
+    assert!(pool.get_random_chain(3, 2).await.is_empty());
+    assert!(pool.get_random_chain(0, 3).await.is_empty());
+}
+
+#[tokio::test]
+async fn subnet_constraints_must_not_shorten_circuits() {
+    let pool = ProxyPool::new();
+    for ip in ["10.1.1.1", "10.1.1.2", "10.1.1.3"] {
+        pool.add_proxy(&format!("socks5://{ip}:9050"))
+            .await
+            .unwrap();
+    }
+    assert!(pool
+        .get_diverse_onion_chain_with_exit(3, 3, true, false)
+        .await
+        .is_empty());
+}

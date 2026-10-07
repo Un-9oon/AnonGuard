@@ -6,9 +6,12 @@ Documentation=https://github.com/Un-9oon/AnonGuard
 
 [Service]
 Type=simple
-User=nobody
-Group=nogroup
-ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --quantum --enforce-subnet-diversity
+DynamicUser=yes
+StateDirectory=anonguard
+StateDirectoryMode=0700
+UMask=0077
+EnvironmentFile=/etc/anonguard/runtime.env
+ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --rmt-morphing --enforce-subnet-diversity --identity-key-path /var/lib/anonguard/identity.key --guard-state-path /var/lib/anonguard/guards.json $ANONGUARD_ARGS
 Restart=on-failure
 RestartSec=5s
 

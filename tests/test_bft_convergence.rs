@@ -78,7 +78,8 @@ async fn test_gossip_convergence_multi_round() {
         let consensus_b = auth_b.generate_consensus().await;
 
         // Assert B has the relay in every round
-        let b_has_relay = consensus_b.unwrap()
+        let b_has_relay = consensus_b
+            .unwrap()
             .relays
             .iter()
             .any(|r| r.node_id == "relay-only-on-A");

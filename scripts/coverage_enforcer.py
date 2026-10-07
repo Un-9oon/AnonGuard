@@ -1,6 +1,5 @@
 import xml.etree.ElementTree as ET
 import sys
-import sys
 
 def check_coverage(xml_path):
     tree = ET.parse(xml_path)
@@ -22,7 +21,8 @@ def check_coverage(xml_path):
 
     for cls in root.iter('class'):
         filename = cls.attrib.get('filename', '')
-        lines = list(cls.find('lines').iter('line'))
+        line_group = cls.find('lines')
+        lines = list(line_group.iter('line')) if line_group is not None else []
         cls_hits = sum(1 for line in lines if int(line.attrib.get('hits', 0)) > 0)
         cls_total = len(lines)
 
@@ -35,8 +35,8 @@ def check_coverage(xml_path):
 
     def report(name, hits, total, threshold):
         if total == 0:
-            print(f"{name}: No lines found.")
-            return True
+            print(f"ERROR: {name}: No lines found; coverage cannot be established.")
+            return False
         pct = (hits / total) * 100
         print(f"{name} Coverage: {pct:.2f}% ({hits}/{total})")
         if pct < threshold:
