@@ -88,39 +88,46 @@ impl NonceRegistry {
 
     /// Checks if a nonce has been seen before for the given node_id.
     /// If not seen, records it and returns false ("not a replay").
-    /// If already seen, returns true ("replay detected").
+    /// Returns true when admission must be refused: a replay, an invalid identity,
+    /// exhausted storage, or clock rollback behind the last purge. Live records
+    /// are never evicted to admit new proofs.
     ///
     /// Uses poison-recovering lock access rather than `.unwrap()` because this is a
     /// Sybil-defense hot path. A panic while the lock is held (in any thread) must not
     /// permanently disable replay detection — a disabled registry would silently allow
     /// nonce replay attacks, which is worse than operating on state that was mid-update.
     pub fn check_and_record(&self, node_id: &str, nonce: u64, current_time: u64) -> bool {
+        // Match signed descriptor identity limits and bound retained key memory.
+        if node_id.is_empty() || node_id.len() > 128 {
+            return true;
+        }
         let mut state = self
             .seen
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        // A backwards clock must not make already-purged proofs valid again.
+        // Refuse admission until time catches up with our last expiration decision.
+        if current_time < state.last_purge {
+            return true;
+        }
+
         // Purge expired entries periodically (every 10 seconds) instead of every call (O(N) DoS defense)
         if current_time.saturating_sub(state.last_purge) >= 10 {
-            let expiry_threshold = current_time.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS * 2);
-            state.map.retain(|_, ts| *ts > expiry_threshold);
+            // Future-dated proofs may remain valid for a full two drift windows.
+            // The final second is inclusive, just like verify_pow's freshness check.
+            state.map.retain(|_, observed| {
+                current_time.saturating_sub(*observed) <= MAX_TIMESTAMP_DRIFT_SECS * 2
+            });
             state.last_purge = current_time;
         }
 
-        if state.map.len() >= 100_000 {
-            // Hard bound reached to prevent OOM. Cap by removing oldest entries (10%).
-            let mut entries: Vec<_> = state.map.iter().map(|(k, v)| (k.clone(), *v)).collect();
-            entries.sort_unstable_by_key(|(_, v)| *v);
-            let to_remove = entries.len() / 10;
-            for (k, _) in entries.into_iter().take(to_remove) {
-                state.map.remove(&k);
-            }
-        }
-
         let key = (node_id.to_string(), nonce);
-        if state.map.contains_key(&key) {
+        if state.map.contains_key(&key) || state.map.len() >= 100_000 {
+            // Refuse new admission at capacity; evicting a live record would allow
+            // an already accepted proof to be replayed under load.
             crate::observability::inc_anti_replay_trips();
-            return true; // Replay detected
+            return true;
         }
         state.map.insert(key, current_time);
         false // First time seen

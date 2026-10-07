@@ -8,6 +8,7 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - Per-link circuit identifiers, signed hybrid handshake transcripts and context-bound key derivation.
 - Unambiguous signed relay descriptors, exact-snapshot quorum verification, durable authority votes and client rollback/equivocation rejection.
 - Identity-pinned persistent guards and entry-only cooldowns.
+- PoW replay records retained through the inclusive acceptance boundary; registry exhaustion refuses new admissions instead of forgetting live proofs, with bounded identity sizes. Clock rollback behind a replay-cache purge refuses admission until time catches up.
 - Shared private signing-key storage with exclusive publication under concurrent startup, bounded reads and Unix permission checks.
 - Strict SOCKS5 method negotiation and destination parsing; bounded optional decoy operations.
 - Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
