@@ -1,4 +1,4 @@
-//! Compile-time type-state pattern enforcing zero-leak state transitions.
+//! Type-state socket gating with kill-switch checks on every I/O poll.
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,12 +103,7 @@ impl GuardedSocket<ActiveGuarded> {
             return Err(GuardError::KillSwitchTripped);
         }
 
-        if let Some(stream) = self.stream.as_mut() {
-            let written = stream.write(buf).await?;
-            Ok(written)
-        } else {
-            Err(GuardError::KillSwitchTripped)
-        }
+        Ok(self.write(buf).await?)
     }
 
     /// Reads data from the verified socket.
@@ -117,12 +112,7 @@ impl GuardedSocket<ActiveGuarded> {
             return Err(GuardError::KillSwitchTripped);
         }
 
-        if let Some(stream) = self.stream.as_mut() {
-            let read = stream.read(buf).await?;
-            Ok(read)
-        } else {
-            Err(GuardError::KillSwitchTripped)
-        }
+        Ok(self.read(buf).await?)
     }
 
     /// Trips the kill switch and converts socket into DroppedFailClosed state.
@@ -157,7 +147,7 @@ impl tokio::io::AsyncRead for GuardedSocket<ActiveGuarded> {
         if self.kill_switch.load(Ordering::SeqCst) {
             return std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
-                "Kill switch tripped: zero-leak drop enforced",
+                "Kill switch tripped: socket I/O refused",
             )));
         }
         if let Some(ref mut stream) = self.stream {
@@ -180,7 +170,7 @@ impl tokio::io::AsyncWrite for GuardedSocket<ActiveGuarded> {
         if self.kill_switch.load(Ordering::SeqCst) {
             return std::task::Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
-                "Kill switch tripped: zero-leak drop enforced",
+                "Kill switch tripped: socket I/O refused",
             )));
         }
         if let Some(ref mut stream) = self.stream {
@@ -214,6 +204,12 @@ impl tokio::io::AsyncWrite for GuardedSocket<ActiveGuarded> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        if self.kill_switch.load(Ordering::SeqCst) {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Kill switch active",
+            )));
+        }
         if let Some(ref mut stream) = self.stream {
             std::pin::Pin::new(stream).poll_shutdown(cx)
         } else {

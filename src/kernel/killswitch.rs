@@ -52,7 +52,7 @@ impl KillSwitchController {
         Arc::clone(&self.tripped)
     }
 
-    /// Immediately triggers the kill switch, broadcasting cancellation to all active workers.
+    /// Records a failure and broadcasts cancellation once the configured threshold is met.
     ///
     /// Uses poison-recovering lock access rather than `.unwrap()` because this is a
     /// fail-closed security path. An unrelated panic in another thread that happens to
@@ -129,7 +129,7 @@ pub fn check_fail_closed_guarantee(
     strict_fail_closed: bool,
 ) -> Result<FailClosedGuarantee, String> {
     if is_linux {
-        info!("Fail-closed enforcement: KERNEL-LEVEL (Linux nftables)");
+        info!("Linux namespace enforcement is supported; protection requires successful isolation startup");
         Ok(FailClosedGuarantee::KernelLevel)
     } else {
         let warn_msg = "Fail-closed enforcement: APPLICATION-LAYER ONLY — a compromised or buggy process could bypass this on this platform";

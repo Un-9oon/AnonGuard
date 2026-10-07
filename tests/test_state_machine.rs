@@ -85,3 +85,66 @@ async fn test_guarded_socket_async_read_write() {
 
     let _ = server_task.await;
 }
+
+#[tokio::test]
+async fn guarded_helpers_recheck_kill_switch_after_pending_io() {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (socket, mut peer) = tokio::io::duplex(1);
+    let kill = Arc::new(AtomicBool::new(false));
+    let mut active = GuardedSocket::new(socket, kill.clone())
+        .begin_verification()
+        .mark_verified();
+    active.send_guarded(b"A").await.unwrap();
+    {
+        let waiting = active.send_guarded(b"B");
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        kill.store(true, Ordering::SeqCst);
+        let mut first = [0; 1];
+        peer.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first, b"A");
+        assert!(
+            waiting.await.is_err(),
+            "Pending write bypassed kill-switch recheck"
+        );
+    }
+    let mut next = [0; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), peer.read(&mut next))
+            .await
+            .is_err()
+    );
+    assert!(
+        active.shutdown().await.is_err(),
+        "Shutdown flushed after kill-switch activation"
+    );
+
+    let (socket, mut peer) = tokio::io::duplex(1);
+    let kill = Arc::new(AtomicBool::new(false));
+    let mut active = GuardedSocket::new(socket, kill.clone())
+        .begin_verification()
+        .mark_verified();
+    let mut byte = [0; 1];
+    {
+        let waiting = active.recv_guarded(&mut byte);
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        kill.store(true, Ordering::SeqCst);
+        peer.write_all(b"C").await.unwrap();
+        assert!(
+            waiting.await.is_err(),
+            "Pending read bypassed kill-switch recheck"
+        );
+    }
+    assert_eq!(byte, [0]);
+}
