@@ -310,3 +310,49 @@ async fn poc_relay_burst_loss_rate() {
     println!("uploaded {TOTAL} cells in bursts of {BATCH} (re-segmented to 700B pieces) while destination replies; delivered {delivered}");
     assert_eq!(delivered, TOTAL, "all cells should be delivered");
 }
+
+#[tokio::test]
+async fn stream_rejects_authenticated_data_from_a_non_exit_hop() {
+    use anonguard::gateway::server::stream_onion_circuit;
+    let cid = 0x44332211;
+    let mut circuit = OnionCircuit::new(cid);
+    let mut entry = None;
+    for hop in 0..3 {
+        let (client_key, relay_key) = perform_client_relay_handshake().unwrap();
+        circuit.add_hop(client_key).unwrap();
+        if hop == 0 {
+            entry = Some(RelayCircuitHop::new(cid, relay_key, hop));
+        }
+    }
+    let (local, mut application) = tokio::io::duplex(4096);
+    let (transport, mut malicious_entry) = tokio::io::duplex(4096);
+    let kill = Arc::new(AtomicBool::new(false));
+    let mut local = GuardedSocket::new(local, kill.clone())
+        .begin_verification()
+        .mark_verified();
+    let mut transport = GuardedSocket::new(transport, kill)
+        .begin_verification()
+        .mark_verified();
+    let mut forged = OnionCell::new(cid, 0, CellCommand::Data, 1, b"injected")
+        .unwrap()
+        .serialize();
+    entry.unwrap().wrap_backward_originate(&mut forged).unwrap();
+    malicious_entry.write_all(&forged).await.unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        stream_onion_circuit(&mut local, &mut transport, circuit, None),
+    )
+    .await
+    .unwrap();
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("before the selected exit"));
+    let mut byte = [0; 1];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), application.read(&mut byte))
+            .await
+            .is_err(),
+        "Non-exit data reached the application"
+    );
+}
