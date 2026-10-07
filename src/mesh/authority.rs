@@ -21,6 +21,14 @@ const RELAY_TTL_SECS: u64 = 7200;
 
 pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
 
+fn relay_conflicts(relays: &HashMap<String, RelayDescriptor>, candidate: &RelayDescriptor) -> bool {
+    relays.values().any(|existing| {
+        existing.node_id != candidate.node_id
+            && (existing.identity_key_ed25519 == candidate.identity_key_ed25519
+                || (existing.host == candidate.host && existing.port == candidate.port))
+    })
+}
+
 #[derive(Clone)]
 pub struct DirectoryAuthority {
     pub authority_id: String,
@@ -304,6 +312,9 @@ impl DirectoryAuthority {
         }
 
         let mut relays = self.active_relays.write().await;
+        if relay_conflicts(&relays, &descriptor) {
+            return Err("Duplicate relay identity or endpoint".into());
+        }
         if !relays.contains_key(&descriptor.node_id)
             && relays.len() >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
         {
@@ -376,16 +387,25 @@ impl DirectoryAuthority {
 
         let mut received_keys =
             std::collections::HashSet::from([self.signing_key.verifying_key().to_bytes()]);
-        for (peer, pinned_key) in &self.peer_authorities {
-            if peer == &self.listen_addr {
-                continue;
-            }
-            match tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), &digest_hex),
-            )
-            .await
-            {
+        let cross_checks = futures::future::join_all(
+            self.peer_authorities
+                .iter()
+                .filter(|(peer, _)| peer != &self.listen_addr)
+                .map(|(peer, pinned_key)| {
+                    let digest_hex = &digest_hex;
+                    async move {
+                        let result = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(6),
+                            Self::fetch_peer_cross_check(peer, pinned_key.as_ref(), digest_hex),
+                        )
+                        .await;
+                        (peer, pinned_key, result)
+                    }
+                }),
+        )
+        .await;
+        for (peer, pinned_key, result) in cross_checks {
+            match result {
                 Ok(Ok(Some(peer_sig))) => {
                     // Verify the signature is valid for this digest before appending
                     if let Some(pubkey) = pinned_key {
@@ -450,39 +470,31 @@ impl DirectoryAuthority {
             relays.clone()
         };
 
-        for (peer, pinned_key) in &self.peer_authorities {
-            if peer == &self.listen_addr {
-                continue;
-            }
-
-            if pinned_key.is_none() {
-                if !self.allow_unauthenticated_registration {
-                    error!(
-                        "Authority [{}]: Gossip to {} refused: no pinned identity key for peer authority. \
-                         This would be unauthenticated and vulnerable to active MITM. \
-                         Populate authority keys, or set allow_unauthenticated_registration = true.",
-                        self.authority_id, peer
-                    );
-                    continue;
-                } else {
-                    warn!(
-                        "Authority [{}]: No pinned identity key for peer authority {}. \
-                         Gossip will be unauthenticated (allow_unauthenticated_registration is enabled). \
-                         MITM risk!",
-                        self.authority_id, peer
-                    );
-                }
-            }
-
-            match tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                Self::fetch_peer_relay_list(peer, pinned_key.as_ref()),
-            )
-            .await
-            {
+        let peer_lists = futures::future::join_all(
+            self.peer_authorities
+                .iter()
+                .filter(|(peer, key)| {
+                    peer != &self.listen_addr
+                        && (key.is_some() || self.allow_unauthenticated_registration)
+                })
+                .map(|(peer, pinned_key)| async move {
+                    let result = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(2),
+                        Self::fetch_peer_relay_list(peer, pinned_key.as_ref()),
+                    )
+                    .await;
+                    (peer, result)
+                }),
+        )
+        .await;
+        for (peer, result) in peer_lists {
+            match result {
                 Ok(Ok(peer_relays)) => {
                     let now = current_timestamp_secs();
                     for desc in peer_relays {
+                        if relay_conflicts(&local_map, &desc) {
+                            continue;
+                        }
                         if !local_map.contains_key(&desc.node_id)
                             && local_map.len() >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
                         {
@@ -542,6 +554,9 @@ impl DirectoryAuthority {
         // so we don't have to re-fetch them successfully on every round.
         let mut active = self.active_relays.write().await;
         for (id, desc) in &local_map {
+            if relay_conflicts(&active, desc) {
+                continue;
+            }
             if let Some(existing) = active.get(id) {
                 if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
                     warn!("Authority [{}]: Rejected impersonation attempt during local persist for node_id {}: identity key mismatch", self.authority_id, id);
@@ -627,8 +642,6 @@ impl DirectoryAuthority {
             let auth_self = self.clone();
             let active_relays = self.active_relays.clone();
             let signing_key = self.signing_key.clone();
-            let pow_difficulty = self.pow_difficulty;
-            let registry = self.nonce_registry.clone();
 
             tokio::spawn(async move {
                 let _permit = permit;
@@ -663,6 +676,7 @@ impl DirectoryAuthority {
                             } else if text.starts_with("GET_RELAY_LIST") {
                                 let relays = active_relays.read().await;
                                 let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
+                                drop(relays);
                                 if let Ok(serialized) = serde_json::to_vec(&list) {
                                     let _ = session.write_frame(&serialized).await;
                                 }
@@ -688,59 +702,15 @@ impl DirectoryAuthority {
                             } else if let Some(json_part) = text.strip_prefix("REGISTER_RELAY ") {
                                 match serde_json::from_str::<RelayDescriptor>(json_part) {
                                     Ok(desc) => {
-                                        let mut relays = active_relays.write().await;
-                                        let now = current_timestamp_secs();
-                                        if !desc.verify_identity() {
-                                            let _ = session
-                                                .write_frame(b"ERROR_SIGNATURE_INVALID")
-                                                .await;
-                                        } else if !verify_pow(
-                                            &desc.node_id,
-                                            desc.registered_at,
-                                            desc.pow_nonce,
-                                            pow_difficulty,
-                                            now,
-                                        ) {
-                                            let _ = session.write_frame(b"ERROR_POW_INVALID").await;
-                                        } else if !relays.contains_key(&desc.node_id)
-                                            && relays.len()
-                                                >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
-                                        {
-                                            let _ = session.write_frame(b"ERROR_CAPACITY").await;
-                                        } else if let Some(existing) = relays.get(&desc.node_id) {
-                                            if existing.identity_key_ed25519
-                                                != desc.identity_key_ed25519
-                                            {
-                                                let _ = session
-                                                    .write_frame(
-                                                        b"ERROR_KEY_MISMATCH_HIJACK_PREVENTED",
-                                                    )
-                                                    .await;
-                                            } else if desc.registered_at <= existing.registered_at {
-                                                let _ = session
-                                                    .write_frame(b"ERROR_REPLAY_DETECTED")
-                                                    .await;
-                                            } else if registry.check_and_record(
-                                                &desc.node_id,
-                                                desc.pow_nonce,
-                                                now,
-                                            ) {
-                                                let _ =
-                                                    session.write_frame(b"ERROR_POW_REPLAY").await;
+                                        // One admission implementation for local and network callers.
+                                        // Never hold the directory lock while writing to an untrusted peer.
+                                        let response: &[u8] =
+                                            if auth_self.register_relay(desc).await.is_ok() {
+                                                b"OK_REGISTERED"
                                             } else {
-                                                relays.insert(desc.node_id.clone(), desc);
-                                                let _ = session.write_frame(b"OK_REGISTERED").await;
-                                            }
-                                        } else if registry.check_and_record(
-                                            &desc.node_id,
-                                            desc.pow_nonce,
-                                            now,
-                                        ) {
-                                            let _ = session.write_frame(b"ERROR_POW_REPLAY").await;
-                                        } else {
-                                            relays.insert(desc.node_id.clone(), desc);
-                                            let _ = session.write_frame(b"OK_REGISTERED").await;
-                                        }
+                                                b"ERROR_REGISTRATION_REJECTED"
+                                            };
+                                        let _ = session.write_frame(response).await;
                                     }
                                     Err(_) => {
                                         let _ = session.write_frame(b"ERROR_MALFORMED_JSON").await;
@@ -768,6 +738,45 @@ impl DirectoryAuthority {
 mod tests {
     use super::*;
     use crate::mesh::sybil::solve_pow_bounded;
+
+    #[tokio::test]
+    async fn directory_admission_rejects_duplicate_keys_and_endpoints() {
+        let auth = DirectoryAuthority::with_difficulty("a".into(), "127.0.0.1:0".into(), 0);
+        let now = current_timestamp_secs();
+        let identity = SigningKey::generate(&mut OsRng);
+        let mut original = RelayDescriptor::new(
+            "first".into(),
+            "1.1.1.1".into(),
+            9001,
+            [0; 32],
+            [0; 32],
+            false,
+            1,
+            now,
+        );
+        original.sign_with_key(&identity);
+        auth.register_relay(original.clone()).await.unwrap();
+        let mut alias = original.clone();
+        alias.node_id = "alias".into();
+        alias.host = "2.2.2.2".into();
+        alias.pow_nonce = 2;
+        alias.sign_with_key(&identity);
+        assert!(auth
+            .register_relay(alias)
+            .await
+            .unwrap_err()
+            .contains("Duplicate"));
+        let mut collision = original;
+        collision.node_id = "collision".into();
+        collision.pow_nonce = 3;
+        collision.sign_with_key(&SigningKey::generate(&mut OsRng));
+        assert!(auth
+            .register_relay(collision)
+            .await
+            .unwrap_err()
+            .contains("Duplicate"));
+        assert_eq!(auth.active_relays.read().await.len(), 1);
+    }
 
     #[tokio::test]
     async fn test_authority_registration_signature_and_anti_hijack() {

@@ -56,6 +56,9 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
+      - name: Check all fuzz harness APIs before campaigns
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml --all-targets
+
       - name: Run Fuzz Targets
         run: |
           cargo +nightly fuzz run fuzz_target_1 -- -max_total_time=60
@@ -79,17 +82,20 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
 
       - name: Generate Coverage Report
         run: |
-          cargo tarpaulin --out Xml --out Html
+          cargo tarpaulin --engine llvm --timeout 120 --out Xml --out Html
           # Verify module-level coverage manually for critical modules
           python scripts/coverage_enforcer.py cobertura.xml
       
       - name: Upload coverage reports
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: code-coverage-report

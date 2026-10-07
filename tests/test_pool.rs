@@ -284,3 +284,44 @@ async fn entry_failure_cooldown_does_not_revive_an_unavailable_guard() {
         .await
         .is_empty());
 }
+
+#[tokio::test]
+async fn ipv6_directory_endpoint_retains_its_identity_pin() {
+    use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
+    use ed25519_dalek::SigningKey;
+    let authority = SigningKey::from_bytes(&[31; 32]);
+    let identity = SigningKey::from_bytes(&[32; 32]);
+    let now = anonguard::mesh::current_timestamp_secs();
+    let mut relay = RelayDescriptor::new(
+        "ipv6".into(),
+        "2001:4860:4860::8888".into(),
+        9001,
+        [0; 32],
+        [0; 32],
+        false,
+        0,
+        now,
+    );
+    relay.sign_with_key(&identity);
+    let mut doc = ConsensusDocument::new(now - 1, now + 600, vec![relay]);
+    doc.sign_with_authority("a", &authority);
+    let pool = ProxyPool::new();
+    pool.load_from_multi_consensus(
+        &[doc],
+        &std::collections::HashMap::from([("a".into(), authority.verifying_key())]),
+        1,
+        now,
+    )
+    .await
+    .unwrap();
+    let chain = pool
+        .get_diverse_onion_chain_with_exit(1, 1, false, false)
+        .await;
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].host, "2001:4860:4860::8888");
+    assert_eq!(
+        pool.get_identity_keys(&chain).await,
+        vec![identity.verifying_key().to_bytes()]
+    );
+    assert!(pool.is_mesh_target(&chain[0].host, chain[0].port).await);
+}

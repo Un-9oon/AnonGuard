@@ -70,6 +70,8 @@ impl ProxyNode {
         let host = parsed
             .host_str()
             .ok_or("Missing host in proxy URL")?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = parsed.port().unwrap_or(match protocol {
             ProxyProtocol::Http => 8080,

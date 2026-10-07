@@ -111,6 +111,7 @@ impl GatewayServer {
             );
         }
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
+        let advertised_address = listener.local_addr()?;
         info!(
             listen_addr = %self.config.listen_addr,
             "[AnonGuard Gateway] Active and guarded. Listening for client connections (DoS limits: max {} concurrent, max {}/IP)...",
@@ -150,19 +151,8 @@ impl GatewayServer {
                         }
                     };
 
-                    let port = config
-                        .listen_addr
-                        .split(':')
-                        .next_back()
-                        .unwrap_or("9050")
-                        .parse()
-                        .unwrap_or(9050);
-                    let host = config
-                        .listen_addr
-                        .split(':')
-                        .next()
-                        .unwrap_or("127.0.0.1")
-                        .to_string();
+                    let port = advertised_address.port();
+                    let host = advertised_address.ip().to_string();
 
                     let mut desc = crate::mesh::consensus::RelayDescriptor::new(
                         node_id,
@@ -496,7 +486,7 @@ impl GatewayServer {
                             if entry.raw_url.starts_with("reverse://") {
                                 return Err("Reverse onion transport is unsupported".into());
                             }
-                            let addr = format!("{}:{}", entry.host, entry.port);
+                            let addr = (entry.host.as_str(), entry.port);
                             let keys = pool.get_identity_keys(&chain).await;
                             let stream = match tokio::time::timeout(
                                 std::time::Duration::from_secs(10),
@@ -639,7 +629,11 @@ impl GatewayServer {
                                         }
                                     }
                                 } else {
-                                    let addr = format!("{}:{}", node.host, node.port);
+                                    let addr = if node.host.contains(':') {
+                                        format!("[{}]:{}", node.host, node.port)
+                                    } else {
+                                        format!("{}:{}", node.host, node.port)
+                                    };
                                     match TcpStream::connect(&addr).await {
                                         Ok(s) => current_stream = Some(s),
                                         Err(e) => {

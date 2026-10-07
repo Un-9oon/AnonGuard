@@ -76,8 +76,29 @@ impl RelayDescriptor {
 
     /// Verifies the cryptographic Ed25519 signature binding this descriptor to its identity key.
     pub fn verify_identity(&self) -> bool {
+        // Canonical numeric IPs or lowercase ASCII DNS names only: no URL credentials,
+        // path/query syntax or ambiguous host spellings may enter a signed directory.
+        let valid_host = match self.host.parse::<std::net::IpAddr>() {
+            Ok(ip) => ip.to_string() == self.host,
+            Err(_) => self.host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            }),
+        };
+        if !valid_host {
+            return false;
+        }
         if self.node_id.is_empty()
             || self.node_id.len() > 128
+            || !self
+                .node_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
             || self.host.is_empty()
             || self.host.len() > 253
             || self.port == 0

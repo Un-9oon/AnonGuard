@@ -1,6 +1,6 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use anonguard::onion::multipath::MultiPathReassembler;
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Feed arbitrary bytes as multipath payload frames.
