@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use anonguard::kernel::netns::NetnsConfig;
 
 #[test]

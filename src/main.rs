@@ -468,8 +468,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     #[cfg(target_os = "linux")]
     let firewall_enabled = args.enable_firewall_killswitch;
-    #[cfg(not(target_os = "linux"))]
-    let firewall_enabled = false;
 
     if args.authority {
         let authority = anonguard::mesh::DirectoryAuthority::with_persistent_key(
