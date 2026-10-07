@@ -172,7 +172,16 @@ impl HopCryptState {
 /// Key derivation function turning an X25519 + ML-KEM-768 hybrid secret into forward, backward, and MAC keys.
 /// Uses RFC 5869 HKDF-SHA256 with domain-separated info labels for key commitment.
 pub fn derive_hop_keys(shared_secret: &[u8]) -> Result<HopKeys, CircuitError> {
-    let hk = Hkdf::<Sha256>::new(None, shared_secret);
+    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v3")
+}
+
+fn derive_hop_keys_with_context(
+    shared_secret: &[u8],
+    transcript: &[u8],
+) -> Result<HopKeys, CircuitError> {
+    use sha2::Digest;
+    let salt = Sha256::digest(transcript);
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret);
 
     let mut keys = HopKeys {
         forward_key: [0u8; 32],
@@ -310,7 +319,7 @@ impl OnionCircuit {
             .sequence_no
             .checked_add(1)
             .ok_or(CircuitError::SequenceExhausted)?;
-        let nonce = build_nonce(1, self.circuit_id, cell.sequence_no);
+        let nonce = build_nonce(1, 0, cell.sequence_no);
 
         let mut raw = cell.serialize();
 
@@ -318,7 +327,7 @@ impl OnionCircuit {
             let (header, body) = raw.split_at_mut(8);
             let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
 
-            let tag = target_hop.seal_forward(&nonce, header, pt);
+            let tag = target_hop.seal_forward(&nonce, &header[4..], pt);
             mac_buf.copy_from_slice(&tag);
         }
 
@@ -355,7 +364,7 @@ impl OnionCircuit {
             return Err(CircuitError::HopIndexOutOfRange(hop_index));
         }
 
-        let nonce = build_nonce(2, self.circuit_id, seq);
+        let nonce = build_nonce(2, 0, seq);
 
         // Peel outer layers up to the originating hop
         for hop in self.hops.iter().take(hop_index) {
@@ -368,7 +377,7 @@ impl OnionCircuit {
 
         let mut tag = [0u8; 16];
         tag.copy_from_slice(mac_buf);
-        target_hop.open_backward(&nonce, header, ct, &tag)?;
+        target_hop.open_backward(&nonce, &header[4..], ct, &tag)?;
 
         self.bwd_replay_windows[hop_index].check_and_advance(seq)?;
 
@@ -380,6 +389,7 @@ impl OnionCircuit {
 /// Represents the relay's view of an onion circuit with anti-replay state.
 pub struct RelayCircuitHop {
     pub circuit_id: u32,
+    pub context_id: u32,
     pub crypt: HopCryptState,
     pub expected_recv_seq: u32,
     pub next_send_seq: u32,
@@ -396,6 +406,7 @@ impl RelayCircuitHop {
     pub fn new(circuit_id: u32, keys: HopKeys, hop_index: usize) -> Self {
         Self {
             circuit_id,
+            context_id: circuit_id,
             crypt: HopCryptState::new(keys),
             expected_recv_seq: 1,
             next_send_seq: 1,
@@ -421,7 +432,7 @@ impl RelayCircuitHop {
             .map_err(|_| CircuitError::ParseError("Invalid seq bytes".to_string()))?;
         let seq = u32::from_be_bytes(seq_bytes);
 
-        let nonce = build_nonce(1, self.circuit_id, seq);
+        let nonce = build_nonce(1, 0, seq);
 
         // Limit scope of immutable borrow
         let mut tag = [0u8; 16];
@@ -429,7 +440,9 @@ impl RelayCircuitHop {
             let (header, body) = raw.split_at_mut(8);
             let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
             tag.copy_from_slice(mac_buf);
-            self.crypt.open_forward(&nonce, header, pt, &tag).is_ok()
+            self.crypt
+                .open_forward(&nonce, &header[4..], pt, &tag)
+                .is_ok()
         };
 
         if tag_matches {
@@ -455,6 +468,9 @@ impl RelayCircuitHop {
                 CircuitError::ParseError(format!("Unknown cell command: {}", raw[8]))
             })?;
             let length = u16::from_be_bytes([raw[11], raw[12]]);
+            if length as usize > PAYLOAD_SIZE {
+                return Err(CircuitError::PayloadTooShort);
+            }
             return Ok(PeelOutcome::AddressedToThisRelay {
                 command,
                 len: (length as usize).min(PAYLOAD_SIZE),
@@ -481,7 +497,7 @@ impl RelayCircuitHop {
             ));
         }
 
-        let nonce = build_nonce(2, self.circuit_id, seq);
+        let nonce = build_nonce(2, 0, seq);
 
         let (_header, body) = raw.split_at_mut(8);
         self.crypt.encrypt_backward_stream(&nonce, body);
@@ -500,12 +516,12 @@ impl RelayCircuitHop {
         let seq = pack_backward_seq(self.hop_index, counter)?;
         raw[4..8].copy_from_slice(&seq.to_be_bytes());
 
-        let nonce = build_nonce(2, self.circuit_id, seq);
+        let nonce = build_nonce(2, 0, seq);
 
         let (header, body) = raw.split_at_mut(8);
         let (pt, mac_buf) = body.split_at_mut(ONION_CELL_SIZE - 24);
 
-        let tag = self.crypt.seal_backward(&nonce, header, pt);
+        let tag = self.crypt.seal_backward(&nonce, &header[4..], pt);
         mac_buf.copy_from_slice(&tag);
         Ok(())
     }
@@ -518,10 +534,12 @@ pub fn build_create_cell(
     client_mlkem_pub: &EncapsulationKey<MlKem768Params>,
     hop_index: usize,
 ) -> Result<OnionCell, CircuitError> {
-    let mut payload = [0u8; 1 + 32 + 1184];
+    let mut payload = [0u8; 1 + 32 + 1184 + 4 + 1];
     payload[0] = hop_index as u8;
     payload[1..33].copy_from_slice(client_pub.as_bytes());
     payload[33..1217].copy_from_slice(client_mlkem_pub.as_bytes().as_slice());
+    payload[1217..1221].copy_from_slice(&circuit_id.to_be_bytes());
+    payload[1221] = 3;
     OnionCell::new(circuit_id, 0, CellCommand::Create, 0, &payload).map_err(CircuitError::General)
 }
 
@@ -535,9 +553,14 @@ pub fn handle_create_cell(
             create_cell.command
         )));
     }
-    if create_cell.length < 1217 {
+    if create_cell.length != 1222 || create_cell.payload[1221] != 3 {
         return Err(CircuitError::PayloadTooShort);
     }
+    let context_id = u32::from_be_bytes(
+        create_cell.payload[1217..1221]
+            .try_into()
+            .map_err(|_| CircuitError::PayloadTooShort)?,
+    );
     let hop_index = create_cell.payload[0] as usize;
     if hop_index >= MAX_HOPS {
         return Err(CircuitError::HopIndexOutOfRange(hop_index));
@@ -570,20 +593,22 @@ pub fn handle_create_cell(
         .encapsulate(&mut OsRng)
         .map_err(|_| CircuitError::General("ML-KEM encapsulation failed".to_string()))?;
 
-    let mut hybrid_secret = [0u8; 64];
+    let mut hybrid_secret = zeroize::Zeroizing::new([0u8; 64]);
     hybrid_secret[0..32].copy_from_slice(x25519_shared.as_bytes());
     hybrid_secret[32..64].copy_from_slice(mlkem_shared.as_slice());
 
-    let keys = derive_hop_keys(&hybrid_secret)?;
-
     let identity_pub = relay_identity_key.verifying_key();
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v2");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v3");
+    preimage.extend_from_slice(&context_id.to_be_bytes());
+    preimage.push(hop_index as u8);
+    preimage.extend_from_slice(identity_pub.as_bytes());
     preimage.extend_from_slice(relay_pub.as_bytes());
     preimage.extend_from_slice(&client_pub_bytes);
     preimage.extend_from_slice(&client_mlkem_pub_bytes);
     preimage.extend_from_slice(mlkem_ct.as_slice());
     let handshake_sig: Signature = relay_identity_key.sign(&preimage);
+    let keys = derive_hop_keys_with_context(&hybrid_secret[..], &preimage)?;
 
     let mut created_payload = [0u8; 32 + 32 + 64 + 1088];
     created_payload[0..32].copy_from_slice(relay_pub.as_bytes());
@@ -600,7 +625,8 @@ pub fn handle_create_cell(
     )
     .map_err(CircuitError::General)?;
 
-    let relay_hop = RelayCircuitHop::new(create_cell.circuit_id, keys, hop_index);
+    let mut relay_hop = RelayCircuitHop::new(create_cell.circuit_id, keys, hop_index);
+    relay_hop.context_id = context_id;
     Ok((relay_hop, created_cell))
 }
 
@@ -612,8 +638,8 @@ pub fn process_created_cell(
     client_mlkem_dk: &DecapsulationKey<MlKem768Params>,
     client_mlkem_pub_bytes: &[u8; 1184],
     pinned_identity_key: &[u8; 32],
-    _cid: u32,
-    _hop_index: usize,
+    cid: u32,
+    hop_index: usize,
 ) -> Result<HopKeys, CircuitError> {
     if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended
     {
@@ -658,7 +684,10 @@ pub fn process_created_cell(
     let signature = Signature::from_bytes(&sig_bytes);
 
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v2");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v3");
+    preimage.extend_from_slice(&cid.to_be_bytes());
+    preimage.push(hop_index as u8);
+    preimage.extend_from_slice(&relay_identity_pub_bytes);
     preimage.extend_from_slice(&relay_eph_pub_bytes);
     preimage.extend_from_slice(client_pub_bytes);
     preimage.extend_from_slice(client_mlkem_pub_bytes);
@@ -684,11 +713,11 @@ pub fn process_created_cell(
         .decapsulate(&mlkem_ct)
         .map_err(|_| CircuitError::General("ML-KEM decapsulation failed".to_string()))?;
 
-    let mut hybrid_secret = [0u8; 64];
+    let mut hybrid_secret = zeroize::Zeroizing::new([0u8; 64]);
     hybrid_secret[0..32].copy_from_slice(x25519_shared.as_bytes());
     hybrid_secret[32..64].copy_from_slice(mlkem_shared.as_slice());
 
-    derive_hop_keys(&hybrid_secret)
+    derive_hop_keys_with_context(&hybrid_secret[..], &preimage)
 }
 
 pub fn encode_extend_payload(

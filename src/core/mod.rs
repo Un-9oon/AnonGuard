@@ -7,3 +7,5 @@ pub use config::GuardConfig;
 pub use state_machine::{
     ActiveGuarded, DroppedFailClosed, GuardError, GuardedSocket, State, Uninitialized, Verifying,
 };
+
+pub mod storage;

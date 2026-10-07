@@ -1,43 +1,12 @@
-# Authority Key Rotation Runbook
+# Authority key replacement in v3
 
-## Objective
-To safely rotate the identity and signing keys of a directory authority without causing consensus failures, network partition, or downtime.
+Status: coordinated administrative procedure requiring testnet rehearsal. Automatic key-rotation intents, HSM integration and overlap acceptance are not implemented. The daemon does not provide an `anonguard-cli node status` command.
 
-## Prerequisites
-- Physical or secure remote access to the HSM or encrypted keystore.
-- 2f+1 quorum of authorities must be online and healthy before beginning.
-- Coordination with at least one other independent authority operator (depending on key ceremony constraints).
+1. Inventory all clients, relays and authority peers that pin the authority, and authenticate the operator coordination channel. Confirm the remaining independent authorities meet the configured quorum; otherwise plan an outage.
+2. Generate and protect a replacement Ed25519 identity using the actual supported key-file mechanism in an isolated environment. Authenticate the new public key to every operator outside the directory itself.
+3. Agree on a maintenance epoch and distribute updated endpoint-bound pins. Do not accept both keys under aliased identities to inflate quorum. A compromised old key must not be the sole authentication channel for its replacement.
+4. Stop the affected authority. Preserve its vote journal and identity files for incident analysis in private storage. Vote records signed by the old key cannot be loaded under the new key. Replace the key and explicitly initialize a new journal under a new protected state path; never delete client rollback state to bypass stale or conflicting directories.
+5. Restart the authority and update all peers, clients and relays together. Verify pinned transport, distinct signing-key quorum and a fresh identical snapshot accepted across participants. Mixed pins may cause an outage. There is no guarantee of zero downtime.
+6. Test restarts and rollback rejection, record the ceremony and revoke/archive the old identity according to operator policy. Clients with unchanged pins must fail rather than silently trust the new identity.
 
-## Procedure
-
-1. **Pre-flight Checks**
-   - Verify network health via Grafana dashboards: `generate_consensus` success rate must be 100% over the last 15 minutes.
-   - Run `anonguard-cli node status` to ensure all peers are reachable.
-
-2. **Generate Next Epoch Keypair**
-   - Use the secure offline machine to generate the new Ed25519 keypair.
-   - Export the public key.
-
-3. **Gossip the Key Rotation Intent**
-   - Broadcast a `KeyRotationIntent` document containing the new public key, signed by the *old* private key.
-   - Ensure the intent is registered by the other authorities (check logs for `Accepted KeyRotationIntent from [NodeID]`).
-
-4. **Grace Period**
-   - Wait for the next consensus epoch boundary to ensure all nodes have agreed on the new key.
-   - During this window, both the old and new keys may be accepted depending on the specific protocol implementation rules.
-
-5. **Apply New Key and Restart**
-   - Load the new private key into the authority node's HSM/keystore.
-   - Restart the authority service gracefully (`systemctl restart anonguard-authority`).
-
-6. **Post-Rotation Verification**
-   - Verify the node rejoins the consensus pool successfully.
-   - Verify the next consensus document includes signatures from the new key.
-   - Destroy or securely archive the old private key according to retention policy.
-
-## Tabletop Exercise Log
-*Must be completed against the Phase 2 testnet.*
-- **Exercise Date:**
-- **Scenario:** (e.g., Authority A's signing key was compromised)
-- **Outcome:** (e.g., Successfully rotated without dropping consensus)
-- **Lessons Learned / Adjustments Made:**
+Do not rehearse a compromise response for the first time on a public anonymity network. A reviewed rotation/revocation protocol remains a production release gate.

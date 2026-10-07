@@ -1,66 +1,38 @@
 # Production readiness
 
-Status: experimental; public anonymity deployment is not approved by this work.
+Status: experimental v3. Completion of this engineering redesign is not approval for public anonymity deployment and does not establish superiority to Tor.
 
-## Required release evidence
+## Implemented redesign
 
-- Passing locked builds, formatting, strict Clippy, integration tests, fuzz campaigns and measured coverage. Keep failing coverage thresholds visible; do not lower them merely to pass CI.
-- Independent protocol and implementation review, including authenticated cell metadata, sequence exhaustion, relay teardown, multipath association, quorum freshness and key rotation.
-- Live multi-region testnet with independently operated relays and authorities, recorded uptime, bandwidth, circuit success, partitions, restarts and relay failure behavior.
-- Reproducible real PCAP website-fingerprinting evaluations with held-out sites, realistic adversaries, uncertainty estimates and comparable Tor configurations. Simulated results do not establish real anonymity or superiority to Tor.
-- Reviewed kernel isolation design. The current host-wide nftables table is not a per-process network namespace; established connections are allowed, and the listener endpoint is not the relay transport endpoint. Do not claim zero host traffic leaks.
-- Tested package install/upgrade/removal, non-root state persistence, Windows key ACLs, crash recovery, rollback and signed release verification.
-- Operator bootstrap keys, validated quorum policy, incident response, upgrade policy and abuse handling.
+- Pinned TLS 1.3 relay links with mandatory v3 ALPN and no plaintext fallback.
+- Per-link circuit identifiers, signed hybrid handshake transcripts and context-bound key derivation.
+- Unambiguous signed relay descriptors, exact-snapshot quorum verification, durable authority votes and client rollback/equivocation rejection.
+- Identity-pinned persistent guards and entry-only cooldowns.
+- Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
+- Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes.
+- Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.
+- Explicitly retired unsupported multipath gateway behavior and unsupported anonymity claims.
 
-## Packaged gateway
+These changes require a coordinated v3 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.
 
-The Debian service uses a dynamic user and private persistent state under /var/lib/anonguard. Configure /etc/anonguard/runtime.env with ANONGUARD_ARGS containing real authority endpoints, matching pinned keys and a validated quorum. The shipped config.toml sample was not parsed by the daemon; the package now ships the service environment file instead. It is preserved as a Debian conffile.
+## Verification and release gates
 
-An empty relay directory fails circuit construction. An insufficient or non-diverse relay pool must never downgrade the requested hop count. Kernel firewall installation errors must stop startup when the operator requested that feature.
+Locked tests and strict lint checks cover implemented contracts, including pinned identity rejection, three-hop telescoping, credit errors, directory conflicts/restart rollback and a 128 KiB half-closed request/response. CI separately exercises privileged namespace isolation and cross-platform compilation. Passing normal tests alone is insufficient for deployment approval.
 
-This document records release gates, not completed operational validation. No production anonymity assurance or Tor-superiority claim is supplied.
+Required before a production release:
 
-## Foundation remediation (implemented, awaiting release evidence)
+1. Independent cryptographic protocol and implementation review, with attention to layered cell framing, malicious relay behavior, transcript binding and secret lifetime.
+2. Passing CI on the exact release commit, sustained fuzz campaigns and enforced coverage thresholds. Do not lower thresholds to hide failures.
+3. Privileged Linux IPv4/IPv6/DNS leak and crash tests; install/upgrade/removal, state persistence, Windows key ACLs and recovery tests. Platform compilation does not prove kernel protection.
+4. A multi-region testnet with independent operators, recorded circuit success, partitions, authority convergence, clock changes, load, guard outages and churn. Frozen divergent authority views can currently stall service until another epoch.
+5. Resource-budget and scheduling evaluation. The current directory admits 512 relays and at most 16 authorities; scaling needs a reviewed paginated design. Fixed pacing has substantial bandwidth/throughput cost.
+6. Authenticated bootstrap distribution, key rotation/revocation, signed reproducible releases, incident response, abuse management and explicit operator ownership.
+7. Reproducible held-out traffic-analysis experiments with realistic passive/active adversaries and equivalent Tor configurations. Simulations and timing entropy do not establish anonymity.
 
-The gateway uses one authenticated onion circuit per destination stream. The former
-multipath gateway path is disabled because it lacks exit-side session association
-and symmetric framing. Experimental multipath utilities are not a supported transport.
-Circuit negotiation has a 30-second overall deadline; upload writes have a 30-second deadline.
+## Packaging and operation
 
-Cell command 10 (END) authenticates upload half-close. The exit shuts down only its
-destination write direction, retaining responses until destination EOF. Older relays
-do not implement END; upgrade the complete circuit together. This is a wire-protocol
-change, not a backward-compatible negotiated upgrade.
+The Debian service uses a dynamic user and private persistent state. Configure `/etc/anonguard/runtime.env` with real endpoint-bound pins and a valid quorum; the daemon does not parse the former sample config.toml. Kernel isolation needs administrative namespace privileges and is a separate operational mode, not a privilege automatically granted by the packaged service.
 
-Authority endpoints use `identity@host:port`, with `--authority-keys identity:HEX`.
-Unqualified endpoints require a matching endpoint key. Startup rejects missing pins
-and duplicate configured signing keys; authority startup receives peer endpoints.
-The relay registration transport receives the same aligned key pins.
+Empty, expired, conflicting or insufficient directories fail new circuit construction. Preserve and protect identity keys, authority vote journals, guard state and accepted-directory state. Corrupt state fails startup. Test migrations in an isolated testnet before upgrading all participants together.
 
-A loaded directory retains a conservative expiry (the earliest authenticated contributing
-document deadline). Expiry blocks new onion path selection, identity pin retrieval,
-and directory-based mesh target authorization. Existing circuits are not automatically
-terminated. Failed refreshes do not extend expiry. Zero quorum, aliased authority keys,
-and conflicting relay identities at one endpoint are rejected.
-
-PoW mining runs off the async executor. Exhausted attempts retry a fresh challenge after
-30 seconds. The current 26-bit difficulty and ten-million-attempt budget remain bounded
-probabilistic admission, not a guarantee of prompt registration.
-
-## Remaining architectural work
-
-1. Specify and implement version-negotiated authenticated link transport, per-link circuit
-   identifiers, transcript binding and key rotation. Clear header correlation remains.
-2. Replace per-descriptor authority voting with an explicitly chosen canonical snapshot
-   quorum or reviewed Byzantine consensus protocol; add durable epoch rollback protection.
-3. Implement real network namespace isolation and platform-specific leak enforcement.
-   Current host-wide nftables remains experimental and unsuitable as host leak assurance.
-4. Add authenticated stream/circuit flow control, fair scheduling, global resource limits,
-   and immediate cancellation wakeups.
-5. Design optional multipath sessions with one exit destination socket, symmetric sequencing,
-   retransmission and failure handling. Do not reconnect/replay arbitrary TCP transactions.
-6. Specify and evaluate traffic shaping against explicit adversaries; remove unsupported
-   classifier-immunity and zero-leak claims throughout published material.
-7. Onion services require a separate introduction/rendezvous/service-discovery protocol.
-
-These changes do not establish production readiness or superiority to Tor.
+Windows and macOS currently support application transport only. Public network readiness, Tor compatibility, onion services and protection against global traffic correlation are not certified or implemented by this work.

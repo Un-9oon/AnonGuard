@@ -1,290 +1,75 @@
 # AnonGuard
 
-> **Experimental research software. Not approved for production anonymity use.** Passing tests do not establish anonymity. Independent protocol review, live-network evaluation, and operational validation remain required. No superiority to Tor has been established.
+Experimental authenticated onion-routing software written in Rust. No superiority to Tor or production anonymity certification has been established.
 
-> **An Authenticated, Research-Backed Decentralized Anonymity Network built in Rust.**  
-> Engineered to counter AI-driven flow correlation, website fingerprinting, and metadata leaks through telescopic onion routing, traffic morphing, and fail-closed leak prevention.
+## Supported protocol
 
-[![Build](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/Un-9oon/AnonGuard/actions/workflows/ci.yml)
-[![Language](https://img.shields.io/badge/language-Rust-orange)](#)
-[![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue)](#)
-[![Research](https://img.shields.io/badge/research-Oxford%20PhD-purple)](#)
+- One destination TCP stream through an authenticated three-hop circuit.
+- TLS 1.3 between adjacent nodes, mandatory `anonguard/3` ALPN, and Ed25519 identity pins from a signed directory.
+- Per-link circuit identifiers, hybrid X25519/ML-KEM-768 circuit handshakes, transcript-bound keys, and layered encryption.
+- Exact-snapshot directory quorum verification with persistent rollback/equivocation rejection.
+- Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
+- A fixed 20 ms scheduler in both stream directions with bounded buffers and dummy cells. This is an experimental padding profile; traffic-analysis protection is unproven.
+- Linux application isolation in a loopback-only namespace, with a private Unix-socket bridge to the gateway outside it.
 
----
+The former multipath transport is retired. It lacked exit-side association and symmetric framing. This release provides single-path reliability; it does not transparently reconnect or replay application transactions after a failed exit. Onion services and browser fingerprint protection are outside the implemented protocol.
 
-## What is AnonGuard?
+## Build and verify
 
-AnonGuard is an open-source, defense-in-depth anonymity gateway combining statistical physics with authenticated cryptographic routing:
+Rust 1.88 or newer is required.
 
-1. **Sphinx-Wrapped Multi-Path Cryptography (3-Hop Circuit Routing)** — Constant 2048-byte cells wrapped with 61-byte Sphinx headers (featuring per-hop randomized 32-byte X25519 Ephemeral Keys). Packets are split across load-aware Multi-Path parallel circuits to maintain real-time streaming bandwidth while attempting to reduce timing correlation. ChaCha20-Poly1305 AEAD ensures strict integrity. No intermediate relay ever sees both source and destination.
-2. **Bounded Poisson Organic Traffic Morphing** — Overhauling static delays with a Bounded Poisson metronome (5ms - 35ms bounds in the multipath scheduler; optional gateway jitter uses 5ms - 45ms), mimicking organic human timing noise. Drives mutual information to $0.00$ bits while maintaining stream continuity.
-3. **Distributed Multi-Authority Consensus & Key Binding** — Eliminates single points of failure using an $M$-of-$N$ quorum consensus protocol signed by independent Directory Authorities via multiple Ed25519 authority signatures. Relay descriptors require Ed25519 signatures binding node identities to cryptographic keys, preventing relay impersonation and last-write-wins hijacking.
-4. **Sybil Resistance Engine** — Enforces cryptographic Proof-of-Work (PoW) registration challenges (tunable via `--pow-difficulty`) alongside strict BGP `/16` CIDR subnet diversity isolation across circuit hops.
-5. **Fail-Closed Runtime Protection & Anti-SSRF Exit Policy** — Actively monitored kill switch channels cancel in-flight socket read/write loops instantaneously upon trip. Strict exit policies verify all resolved destination IPs against internal, loopback, and cloud metadata ranges to prevent SSRF and DNS rebinding attacks. Remote DNS resolution and runtime IPv6 blackholing prevent dual-stack deanonymization. *(Note: Optional kernel-level `nftables` output filtering is strictly Linux-only via `--enable-firewall-killswitch`).*
-
-Build and test status must be verified for the exact release commit in CI. Release workflows include signing and SBOM generation; artifact verification and platform deployment remain release requirements. See [production readiness](docs/PRODUCTION_READINESS.md).
-
----
-
-## 📦 Quick Installation & Pre-Built Packages
-
-### 🚀 Automated 1-Line Interactive Setup Wizard (Easiest for Everyone)
-For non-technical users, run this single command in terminal. The wizard asks a few simple questions, automatically configures all files, installs dependencies, and launches the gateway:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/Un-9oon/AnonGuard/main/install.sh | sudo bash
-```
-*(Or run without sudo to install locally into `~/.local/bin`)*
-
----
-
-### 🐧 Debian / Ubuntu / Kali / Mint (`.deb`)
-Download the `.deb` package and install it with `dpkg` or `apt`:
-```bash
-# Install package
-sudo dpkg -i anonguard_0.1.0_amd64.deb
-
-# Enable and start background daemon (runs on boot)
-sudo systemctl enable --now anonguard
-
-# Check status
-systemctl status anonguard
-```
-*Binary is installed to `/usr/bin/anonguard-daemon` and config to `/etc/anonguard/config.toml`.*
-
-### 🪟 Windows (`.zip` setup)
-1. Download `anonguard-windows-amd64.zip` from [Releases](https://github.com/Un-9oon/AnonGuard/releases).
-2. Extract the archive.
-3. Open PowerShell or Command Prompt in the extracted folder:
-```powershell
-.\anonguard-daemon.exe --listen 127.0.0.1:9050 --onion --rmt-morphing
-```
-4. Point your browser's SOCKS5 proxy to `127.0.0.1:9050`.
-
-### 🍎 macOS (Apple Silicon M1/M2/M3 & Intel)
-Download the universal binary archive:
-```bash
-tar -xzf anonguard-macos-universal.tar.gz
-./anonguard-daemon --listen 127.0.0.1:9050 --onion --rmt-morphing
+```sh
+cargo build --locked --release
+cargo test --locked --lib --bins --tests
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
-### 🛠️ Build `.deb` Locally From Source
-On any Debian/Ubuntu system, build your own signed `.deb` package in seconds:
-```bash
-./scripts/build_deb.sh
-# Generated at: dist/anonguard_0.1.0_amd64.deb
+Privileged namespace checks run separately in Linux CI. Ordinary tests do not establish host leak protection or real-network anonymity.
+
+## Directory bootstrap
+
+Operators publish Ed25519 authority keys through an authenticated channel. Clients must pin each endpoint explicitly. Example shape (replace placeholders):
+
+```sh
+anonguard-daemon --onion --listen 127.0.0.1:9050 \
+  --authorities a@AUTHORITY_A:9000,b@AUTHORITY_B:9000,c@AUTHORITY_C:9000 \
+  --authority-keys a:KEY_A_HEX,b:KEY_B_HEX,c:KEY_C_HEX \
+  --quorum-threshold 3
 ```
 
----
+Authorities use `--authority --authority-id ID --listen ADDRESS --identity-key-path FILE` and the same pinned peer configuration. Relays use `--relay`, a persistent identity key, and pinned authorities; exit relays additionally use `--is-exit`. Relay listen addresses must be reachable and advertised accurately. No unauthenticated bootstrap is provided for anonymity use.
 
-## System Architecture
+The directory currently admits at most 512 relays; larger networks need a reviewed paginated directory design.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ 1. Sphinx-Wrapped Multi-Path Circuit Routing                │
-│    - Constant 2048-byte Sphinx-style Cryptographic Cells    │
-│    - Randomized 32-byte X25519 Ephemeral Keys at every hop  │
-│    - Load-Aware Parallel Circuit Splitting for Bandwidth    │
-├─────────────────────────────────────────────────────────────┤
-│ 2. Sybil Defense & Consensus Mesh                           │
-│    - Multi-Authority Consensus (Ed25519 Quorum Signatures)   │
-│    - Proof-of-Work (PoW) Registration Challenge Engine       │
-│    - BGP /16 Subnet Prefix Isolation Enforcement            │
-│    - Authenticated Cryptographic Node Framing               │
-├─────────────────────────────────────────────────────────────┤
-│ 3. Statistical RMT Traffic Morphing Engine                  │
-│    - Wigner Surmise Inverse Transform Sampling (O(1))       │
-│    - GOE / GUE Statistical Eigenvalue Level Repulsion       │
-│    - Fallback: Lorenz Chaotic Attractor Morphing            │
-├─────────────────────────────────────────────────────────────┤
-│ 4. Protocol Normalizer & Kernel Kill Switch                 │
-│    - Client-Side Chrome 120+ / Firefox 124+ JA4 Profile Spec│
-│    - Deterministic HTTP Header Scrubbing Library Utility    │
-│    - Fail-Closed Kernel Kill Switch (Zero Transitional Leak)│
-└─────────────────────────────────────────────────────────────┘
+The CLI requires a quorum greater than two thirds of configured authorities. A single-authority test network provides no authority-compromise tolerance. Authorities freeze one snapshot per five-minute epoch; a conflicting view cannot be co-signed in that epoch. This is quorum-signed directory distribution, not a claim of a complete Byzantine consensus algorithm.
+
+## Linux protected applications
+
+`--enable-firewall-killswitch --strict-fail-closed --namespace-name anonguard` creates a fresh application namespace. It requires administrative namespace/nftables privileges and a numeric loopback listener. The host's firewall is not changed. The transport process remains outside the namespace.
+
+Launch only the applications to be protected inside that namespace, as an unprivileged user:
+
+```sh
+sudo ip netns exec anonguard runuser -u YOUR_USER -- YOUR_APPLICATION
 ```
 
-> **Architectural Layering Note (L4/L5 Transport vs. L7 Application):**
-> AnonGuard operates as an authentic L4/L5 network privacy daemon (RFC 1928 SOCKS5 and in-band onion cells). To preserve zero-trust end-to-end TLS cryptography and avoid the severe security vulnerabilities of local root CA interception (MitM), the daemon does not terminate or forge TLS connections. The included `TlsProfile` (`anonguard::crypto::TlsProfile`) and `HeaderNormalizer` (`anonguard::crypto::HeaderNormalizer`) modules provide reference specifications and normalization rules for client-side user-agents, scrapers, and headless browser drivers operating through the daemon.
+Configure the application for SOCKS5 with remote DNS at `127.0.0.1:9050`. Direct TCP/UDP, including ordinary DNS, has no external route. Applications elsewhere on the host are not protected by this namespace. The bridge and rules are not a browser sandbox.
 
----
+Namespace rules survive gateway exit or crash. Restart does not silently reuse a namespace or another daemon's socket. After stopping protected applications, administrative cleanup is explicit:
 
-## Empirical ML Degradation Benchmark Results
-
-AnonGuard provides two complementary evaluation tools for Website Fingerprinting (WF) analysis:
-1. **Mathematical Simulation Harness (`eval/evaluate_classifier.py`):** Generates closed-world packet arrival streams across 10 site archetypes to evaluate the theoretical bounds of Wigner surmise level repulsion against deep neural networks.
-2. **Physical Network PCAP Collector (`eval/real_pcap_collector.py`):** Uses `tshark`/`tcpdump` to capture live physical network traces driven by browser requests through the active `anonguard-daemon` SOCKS5 gateway (`127.0.0.1:9050`).
-
-```bash
-# Run mathematical simulation benchmark
-python3 eval/evaluate_classifier.py
-
-# Collect physical network PCAPs through live gateway
-python3 eval/real_pcap_collector.py --interface lo --proxy-port 9050
+```sh
+sudo ip netns delete anonguard
 ```
 
-| Defense Strategy | Neural Top-1 | Neural Top-3 | k-NN Acc | Mutual Info $I(X; Y)$ | Security Guarantee |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Unprotected TCP / SOCKS5** | 37.0% | 62.0% | 50.0% | 0.81 bits | None (Trivial Correlation) |
-| **Standard Tor (Fixed Cells)** | 32.0% | 65.0% | 46.0% | 0.88 bits | Vulnerable to Timing Attacks |
-| **Lorenz Chaotic Attractor** | 25.0% | 61.0% | 43.0% | 0.68 bits | Moderate Nonlinear Obfuscation |
-| **AnonGuard Q-RMT (Wigner Surmise)** | **24.0%** | **39.0%** | **35.0%** | **0.00 bits** | **Empirical Resistance (Simulated)** |
+Windows and macOS support the application transport; they do not implement this kernel isolation. `--strict-fail-closed` refuses startup there.
 
-> **Theoretical Baseline:** Uniform random guessing across 10 classes is **10.0%**.  
-> AnonGuard Q-RMT drives mutual information down to **0.00 bits** in local simulations, strongly disrupting the latent space of deep neural networks.
+## Migration and limits
 
----
+Protocol v3 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
 
-## Core Security Pillars
+A directory snapshot must be current and quorum signed. New circuits fail after directory expiry. Existing circuits are bounded to one hour and are not silently migrated. Protect persistent authority votes, directory rollback state, guard state and identity keys from modification. Clock rollback, stale directories, unreachable guards and conflicting authority views may stop service rather than lower security requirements.
 
-### 1. 🧅 Sphinx-Wrapped Multi-Path Circuit Routing
-Unlike simple TCP tunneling or single-proxy setups, AnonGuard builds an authentic **cryptographic 3-hop telescopic circuit**:
-- **Sphinx Cryptographic Wrapping:** Packets use a fixed 2048-byte cell format featuring an expanded 61-byte Sphinx header. Every hop enforces a randomized 32-byte X25519 Ephemeral Key, intended to reduce header linkability; this does not establish resistance to end-to-end traffic correlation.
-- **Load-Aware Multi-Path Splitting:** `MultiPathSlicer` analyzes circuit congestion and automatically splits traffic over the most optimal parallel paths to preserve real-time streaming bandwidth.
+See [protocol specification](docs/PROTOCOL_V3.md), [threat model](THREAT_MODEL.md), and [production readiness](docs/PRODUCTION_READINESS.md). Historical research documents and simulations are not evidence about the current protocol.
 
-### 2. 🔬 Bounded Poisson Organic Metronomes
-To destroy correlation without grinding video streams to a halt, AnonGuard uses a **Bounded Poisson Process** for timing delays (bounded between 5ms and 35ms). This is an experimental timing defense requiring live-network evaluation.
-
-### 3. 🛡️ Sybil Attack Resistance
-To prevent a botnet or hostile entity from flooding the directory with rogue nodes:
-- Every relay registration must solve an asymmetric **Proof-of-Work (PoW)** challenge $\text{SHA256}(\text{NodeID} \,\|\, \text{Timestamp} \,\|\, \text{Nonce}) < \text{Target}$ (default 20 bits).
-- Circuit path selection enforces strict **BGP `/16` CIDR Subnet Diversity**, ensuring that Guard, Middle, and Exit nodes never share the same `/16` network prefix or autonomous system.
-
-### 4. 🌐 Distributed Multi-Authority Consensus & Key Binding
-AnonGuard eliminates single points of failure. The directory consensus is maintained by independent Directory Authorities using **multiple Ed25519 authority signatures**. Clients only trust consensus documents verified by an $M$-of-$N$ quorum. Relays must sign registrations with their Ed25519 identity key, eliminating unauthorized last-write-wins overwriting.
-
----
-
-## 🔒 Threat Model & Security Boundaries
-
-### What AnonGuard Protects Against:
-1. **Passive Network Observers & Eavesdroppers:** On-path observers cannot read payload data or correlate client IP addresses with exit destinations.
-2. **Intermediate Relay Collusion:** As long as at least one intermediate relay in the circuit is honest and non-colluding, full path deanonymization is prevented.
-3. **Deep Learning Website Fingerprinting:** Statistical RMT eigenvalue level repulsion prevents CNN/RF classifiers from recognizing specific traffic signatures.
-4. **Local Network DNS & IPv6 Leaks:** Remote DNS resolution over SOCKS5h and runtime IPv6 blackholing prevent common OS dual-stack exposure.
-5. **Mid-Session Policy Disruption:** An active broadcast kill switch terminates in-flight streams immediately if a tunnel or security policy trips.
-6. **OS-Level Traffic Leaks:** Linux kernel `nftables` output filter locks traffic strictly to the designated proxy port, automatically flushing on clean shutdown (`SIGINT` / `Ctrl+C`). This OS-level firewall backstop is **Linux-only**. macOS and Windows rely strictly on the fail-closed process-level kill switch.
-
-### What AnonGuard Does NOT Protect Against:
-1. **Global Active Traffic-Timing & Manipulation Adversary:** If an active state-level adversary observes both ingress to the Guard and egress from the Exit simultaneously, and can manipulate (drop/delay/watermark) flows, they explicitly break the system. AnonGuard mitigates passive statistical timing confirmation via RMT morphing, but low-latency anonymity networks cannot protect against global active adversaries.
-2. **Endpoint Compromise:** Malware, browser exploits, or keyloggers on the client system operate outside network-level encryption boundaries.
-3. **Malicious Exit Relay Content Tampering:** Unencrypted HTTP traffic passing through an untrusted exit node can be modified by the exit operator. Always use TLS (HTTPS) on end-to-end connections.
-
----
-
-## Cross-Platform Compatibility
-
-| Feature | Linux | macOS | Windows |
-|---------|:-----:|:-----:|:-------:|
-| 3-Hop Layered Onion Routing | ✅ | ✅ | ✅ |
-| Statistical RMT Engine | ✅ | ✅ | ✅ |
-| Multi-Authority Consensus | ✅ | ✅ | ✅ |
-| Sybil PoW & Subnet Diversity | ✅ | ✅ | ✅ |
-| Reverse Relay (NAT Traversing) | ✅ | ✅ | ✅ |
-| Transparent `nftables` Redirection | ✅ | ❌ | ❌ |
-
----
-
-## CLI Reference
-
-```text
-AnonGuard Standalone Anonymity Gateway
-
-Usage: anonguard-daemon [OPTIONS]
-
-Options:
-  -l, --listen <LISTEN>
-          Local address to bind the gateway listener [default: 127.0.0.1:9050]
-  -p, --pool <POOL>
-          Path to a text file containing proxy endpoints (one per line)
-      --proxy <PROXY>
-          Inline proxy to load immediately (e.g. socks5://127.0.0.1:1080)
-      --jitter
-          Enable Poisson timing jitter to defeat NetFlow traffic correlation
-      --jitter-lambda <JITTER_LAMBDA>
-          Rate parameter (lambda) for Poisson timing jitter [default: 0.05]
-      --chaos
-          Enable Chaotic Attractor Morphing
-      --chaos-sigma <CHAOS_SIGMA>
-          [default: 10]
-      --chaos-rho <CHAOS_RHO>
-          [default: 28]
-      --chaos-beta <CHAOS_BETA>
-          [default: 2.666666]
-      --rmt-morphing
-          Enable Statistical Random Matrix Theory (RMT) Traffic Morphing (Wigner Surmise)
-      --rmt-ensemble <RMT_ENSEMBLE>
-          Statistical RMT Ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary) [default: goe]
-  -r, --relay
-          Run as a SOCKS5 relay node (bypasses proxy pool and connects directly)
-      --tracker
-          Run as a Directory Authority Tracker (legacy mode)
-      --authority
-          Run as a Cryptographic Directory Authority Node (M-of-N consensus)
-      --authority-id <AUTHORITY_ID>
-          Directory Authority Identifier (e.g. auth-zurich) [default: auth-primary]
-      --authorities <AUTHORITIES>
-          Comma-separated list of Directory Authority endpoints
-      --authority-keys <AUTHORITY_KEYS>
-          Comma-separated list of Directory Authority public keys (e.g. auth-primary:hex_key,...)
-      --quorum-threshold <QUORUM_THRESHOLD>
-          Quorum threshold for Directory Authority consensus [default: 1]
-      --onion
-          Enable 3-hop Layered Onion Encryption (Sphinx / Tor-style cell peeling)
-      --enforce-subnet-diversity
-          Enforce BGP /16 Subnet Diversity across circuit hops (Sybil resistance)
-      --reverse-relay
-          Run as a Reverse Relay Node (Volunteer mode behind NAT)
-      --announce <ANNOUNCE>
-          Tracker URL to announce this relay to (e.g. http://1.2.3.4:8080)
-      --allow-open-socks5
-          Allow open, unauthenticated plain SOCKS5 proxying when running in relay mode (off by default)
-      --allow-private-exit
-          Allow exit relays to connect to private/loopback networks (off by default to prevent SSRF)
-      --is-exit
-          
-      --enable-firewall-killswitch
-          Apply OS/kernel-level nftables firewall kill switch (Linux only, requires root/CAP_NET_ADMIN)
-      --pow-difficulty <POW_DIFFICULTY>
-          Registration PoW difficulty in leading zero bits (default 26, recommended 20+ for production) [default: 26]
-      --fetch-from <FETCH_FROM>
-          Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
-      --identity-key-path <IDENTITY_KEY_PATH>
-          Path to persist the relay's long-term Ed25519 identity key
-  -h, --help
-          Print help
-  -V, --version
-          Print version
-```
-
----
-
-## Verification & Testing
-
-To run the complete cryptographic and integration test suite:
-
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
-
-All unit and integration tests verify:
-- 3-hop telescopic onion circuit negotiation (`CREATE`/`EXTEND`/`RELAY`) and streaming
-- Fixed 2048-byte OnionCell serialization, explicit nonces, ChaCha20-Poly1305 AEAD, and monotonic sequence anti-replay validation
-- SOCKS5 handshake negotiation, error status codes (`0x00`, `0x01`, `0x02`, `0x04`, `0x05`), and RFC 1928 compliance
-- Multi-authority consensus voting, Ed25519 quorum validation, and key pinning
-- Proof-of-Work mining and verification with configurable difficulty
-- BGP `/16` subnet collision detection
-- Anti-SSRF exit policy with DNS rebinding prevention on real sockets
-- State machine fail-closed transitions, active in-flight stream cancellation, and `GuardedSocket` async stream safety
-- Non-crashing sub-50 byte Poisson jitter & Lorenz chaos stream morphing
-- Client-side JA4 browser TLS emulation & HTTP header scrubbing library specifications
-
----
-
-## Academic Whitepaper
-
-The complete mathematical derivations, threat model, and security proofs are published in [`PAPER.md`](./PAPER.md).
-
-**Target Venues:** USENIX Security · ACM CCS · IEEE S&P · PoPETs
+Licensed under MIT or Apache-2.0.

@@ -31,7 +31,7 @@ struct Args {
     #[arg(long)]
     proxy: Option<String>,
 
-    /// Enable Poisson timing jitter to defeat NetFlow traffic correlation
+    /// Enable Poisson timing jitter (experimental traffic-analysis protection)
     #[arg(long, default_value_t = false)]
     jitter: bool,
 
@@ -131,6 +131,17 @@ struct Args {
     #[cfg(target_os = "linux")]
     #[arg(long, default_value_t = false)]
     enable_firewall_killswitch: bool,
+
+    /// Linux namespace used for protected applications (not the host transport).
+    #[cfg(target_os = "linux")]
+    #[arg(long, default_value = "anonguard")]
+    namespace_name: String,
+    #[cfg(target_os = "linux")]
+    #[arg(long, hide = true)]
+    namespace_proxy: bool,
+    #[cfg(target_os = "linux")]
+    #[arg(long, hide = true)]
+    namespace_socket: Option<PathBuf>,
 
     /// Registration PoW difficulty in leading zero bits (see mesh::sybil::DEFAULT_POW_DIFFICULTY)
     #[arg(long, default_value_t = DEFAULT_POW_DIFFICULTY)]
@@ -284,6 +295,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 
+    #[cfg(target_os = "linux")]
+    if args.namespace_proxy {
+        let endpoint: std::net::SocketAddr = args.listen.parse()?;
+        let socket = args
+            .namespace_socket
+            .as_ref()
+            .ok_or("Namespace proxy requires its private socket")?;
+        let config = anonguard::kernel::NetnsConfig::new(
+            args.namespace_name,
+            endpoint.ip().to_string(),
+            endpoint.port(),
+        );
+        anonguard::kernel::netns::run_namespace_proxy(&config, socket).await?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if args.enable_firewall_killswitch
+        && (args.relay || args.authority || args.tracker || args.reverse_relay)
+    {
+        return Err("Application namespace isolation is only supported in gateway mode".into());
+    }
+
     if let Err(err) = anonguard::kernel::check_fail_closed_guarantee(
         cfg!(target_os = "linux"),
         args.strict_fail_closed,
@@ -326,6 +359,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if args.onion && args.authorities.is_none() && args.pool.is_none() && args.proxy.is_none() {
         return Err("Onion mode requires configured directory authorities or a relay pool".into());
+    }
+    let listener: std::net::SocketAddr = args
+        .listen
+        .parse()
+        .map_err(|_| "Listener must be a numeric IP:port")?;
+    if !args.relay
+        && !args.authority
+        && !args.tracker
+        && !args.reverse_relay
+        && !listener.ip().is_loopback()
+        && !args.allow_open_socks5
+    {
+        return Err(
+            "A public gateway listener requires explicit --allow-open-socks5 authorization".into(),
+        );
     }
     if !args.jitter_lambda.is_finite() || args.jitter_lambda <= 0.0 {
         return Err("--jitter-lambda must be finite and positive".into());
@@ -386,15 +434,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
     }
+    if directory_authorities.len() > 16 {
+        return Err("At most 16 directory authorities are supported".into());
+    }
+    if !directory_authorities.is_empty()
+        && args.quorum_threshold < (2 * directory_authorities.len()) / 3 + 1
+    {
+        return Err("Directory quorum must exceed two thirds of configured authorities".into());
+    }
     if !directory_authorities.is_empty() && args.quorum_threshold > trusted_authorities.len() {
         return Err("Quorum threshold exceeds the number of trusted authority keys".into());
     }
 
     let mut authority_identity_keys = Vec::new();
+    let mut authority_endpoints = Vec::new();
+    let mut bound_authorities = std::collections::HashMap::new();
     let mut authority_peers = Vec::new();
     let mut seen_keys = std::collections::HashSet::new();
     for endpoint in &directory_authorities {
-        let (id, addr) = endpoint.split_once('@').unwrap_or((endpoint, endpoint));
+        let (id, addr) = endpoint
+            .split_once('@')
+            .ok_or("Authority endpoint must be identity@address")?;
+        if id.is_empty() || addr.is_empty() {
+            return Err("Empty authority identity or address".into());
+        }
         let addr = addr.trim_start_matches("http://");
         let key = trusted_authorities
             .get(id)
@@ -403,9 +466,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !seen_keys.insert(key.to_bytes()) {
             return Err("Authority endpoints must have distinct signing keys".into());
         }
+        authority_endpoints.push(anonguard::core::config::AuthorityEndpoint {
+            identity: id.to_string(),
+            address: addr.to_string(),
+            public_key: key.to_bytes(),
+        });
+        if bound_authorities.insert(id.to_string(), *key).is_some() {
+            return Err("Duplicate authority endpoint identity".into());
+        }
         authority_identity_keys.push(key.to_bytes());
         authority_peers.push((addr.to_string(), Some(*key)));
     }
+
+    trusted_authorities = bound_authorities;
 
     let config = GuardConfig {
         listen_addr: args.listen.clone(),
@@ -424,6 +497,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         authority_id: args.authority_id.clone(),
         directory_authorities,
         authority_identity_keys,
+        authority_endpoints,
         relay_mode: args.relay,
         allow_open_socks5: args.allow_open_socks5,
         allow_private_exit: args.allow_private_exit,
@@ -465,28 +539,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         warn!("=========================================================================");
     }
 
-    #[cfg(target_os = "linux")]
-    if args.enable_firewall_killswitch {
-        let (proxy_ip, proxy_port) = match args.listen.split_once(':') {
-            Some((ip, p)) => (ip, p.parse::<u16>().unwrap_or(9050)),
-            None => ("127.0.0.1", 9050),
-        };
-        let netns = anonguard::kernel::NetnsConfig::new("anonguard", proxy_ip, proxy_port);
-        match netns.apply_nftables_rules() {
-            Ok(_) => {
-                info!("Successfully applied OS/kernel-level nftables firewall killswitch");
-            }
-            Err(e) => {
-                return Err(
-                    format!("Requested kernel firewall could not be installed: {e}").into(),
-                );
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    let firewall_enabled = args.enable_firewall_killswitch;
-
     if args.authority {
         let mut authority = anonguard::mesh::DirectoryAuthority::with_persistent_key(
             args.authority_id,
@@ -502,10 +554,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(())
             }
         };
-        #[cfg(target_os = "linux")]
-        if firewall_enabled {
-            let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
-        }
         return res;
     }
 
@@ -519,14 +567,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 Ok(())
             }
         };
-        #[cfg(target_os = "linux")]
-        if firewall_enabled {
-            let _ = anonguard::kernel::NetnsConfig::flush_nftables_rules();
-        }
         return res;
     }
 
     let pool = ProxyPool::new();
+    pool.init_guard_state(config.guard_state_path.clone())
+        .await?;
 
     if let Some(file_path) = args.pool {
         match pool.load_file(&file_path).await {
@@ -539,7 +585,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if let Some(inline) = args.proxy {
         let _ = pool.add_proxy(&inline).await;
-        info!(proxy = %inline, "[AnonGuard] Added inline proxy to pool");
+        info!("[AnonGuard] Added inline proxy to pool");
     }
 
     if args.relay {
@@ -578,7 +624,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    if !args.relay && !args.reverse_relay {
+    if !args.reverse_relay {
         // Wire Multi-Authority Consensus retrieval & cryptographic quorum verification
         if !config.directory_authorities.is_empty() {
             let pool_clone = pool.clone();
@@ -761,7 +807,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     let relay_identity_key =
         std::sync::Arc::new(load_or_create_identity_key(&config.identity_key_path));
+    #[cfg(target_os = "linux")]
+    let gateway_state_path = config.guard_state_path.clone();
+    #[cfg(target_os = "linux")]
+    let gateway_kill = kill_switch.clone();
     let gateway = GatewayServer::new(config, pool, kill_switch, relay_identity_key);
+
+    #[cfg(target_os = "linux")]
+    let mut isolation = if args.enable_firewall_killswitch {
+        let endpoint: std::net::SocketAddr = args.listen.parse()?;
+        let namespace = anonguard::kernel::NetnsConfig::new(
+            args.namespace_name,
+            endpoint.ip().to_string(),
+            endpoint.port(),
+        );
+        let socket = args
+            .namespace_socket
+            .unwrap_or_else(|| gateway_state_path.with_extension("proxy.sock"));
+        Some(anonguard::kernel::netns::start_isolation(
+            &namespace,
+            &socket,
+            gateway_kill.clone(),
+            &std::env::current_exe()?,
+        )?)
+    } else {
+        None
+    };
 
     let run_res = tokio::select! {
         res = async {
@@ -778,6 +849,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 gateway.run().await
             }
         } => res,
+        failure = async {
+            #[cfg(target_os = "linux")]
+            if let Some(handle) = isolation.as_mut() { return handle.wait_failure().await; }
+            std::future::pending::<std::io::Result<()>>().await
+        } => failure.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
         _ = tokio::signal::ctrl_c() => {
             info!("Received shutdown signal (Ctrl+C), terminating gracefully...");
             Ok(())
@@ -800,18 +876,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(())
         }
     };
-
-    #[cfg(target_os = "linux")]
-    if firewall_enabled {
-        info!("Flushing OS/kernel-level nftables firewall kill switch...");
-        match anonguard::kernel::NetnsConfig::flush_nftables_rules() {
-            Ok(_) => info!("Successfully flushed nftables rules and lifted network lock"),
-            Err(e) => warn!(
-                "Failed to flush nftables rules on exit (run 'nft delete table inet anonguard_filter' manually): {}",
-                e
-            ),
-        }
-    }
 
     run_res
 }

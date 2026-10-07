@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+pub trait GuardedIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> GuardedIo for T {}
 
 /// Marker trait representing a valid state in the AnonGuard lifecycle.
 pub trait State: Send + Sync + 'static {
@@ -51,15 +52,15 @@ pub enum GuardError {
 
 /// A guarded TCP socket whose send capabilities are statically gated by its type-state parameter `S`.
 pub struct GuardedSocket<S: State> {
-    stream: Option<TcpStream>,
+    stream: Option<Box<dyn GuardedIo>>,
     kill_switch: Arc<AtomicBool>,
     _state: PhantomData<S>,
 }
 
 impl GuardedSocket<Uninitialized> {
-    pub fn new(stream: TcpStream, kill_switch: Arc<AtomicBool>) -> Self {
+    pub fn new(stream: impl GuardedIo + 'static, kill_switch: Arc<AtomicBool>) -> Self {
         Self {
-            stream: Some(stream),
+            stream: Some(Box::new(stream)),
             kill_switch,
             _state: PhantomData,
         }
@@ -137,7 +138,7 @@ impl GuardedSocket<ActiveGuarded> {
 
 impl<S: State> GuardedSocket<S> {
     /// Extracts the inner TcpStream if present.
-    pub fn into_inner(mut self) -> Option<TcpStream> {
+    pub fn into_inner(mut self) -> Option<Box<dyn GuardedIo>> {
         self.stream.take()
     }
 
@@ -196,6 +197,12 @@ impl tokio::io::AsyncWrite for GuardedSocket<ActiveGuarded> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
+        if self.kill_switch.load(Ordering::SeqCst) {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "Kill switch active",
+            )));
+        }
         if let Some(ref mut stream) = self.stream {
             std::pin::Pin::new(stream).poll_flush(cx)
         } else {
@@ -215,13 +222,4 @@ impl tokio::io::AsyncWrite for GuardedSocket<ActiveGuarded> {
     }
 }
 
-impl<S: State> Drop for GuardedSocket<S> {
-    fn drop(&mut self) {
-        // Ensure stream is cleanly shut down on drop if not already transitioned
-        if let Some(mut stream) = self.stream.take() {
-            tokio::spawn(async move {
-                let _ = stream.shutdown().await;
-            });
-        }
-    }
-}
+// Dropping the owned stream closes it directly; no detached shutdown task is needed.

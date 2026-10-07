@@ -1,10 +1,10 @@
 [package]
 name = "anonguard"
 version = "0.2.0"
-rust-version = "1.81"
+rust-version = "1.88"
 edition = "2021"
 authors = ["AnonGuard Research Group"]
-description = "Cross-Layer Anonymity and Anti-Attribution Engine with Zero-Leak Guarantees"
+description = "Experimental authenticated onion-routing gateway"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -34,6 +34,10 @@ harness = false
 [dependencies]
 # Async Runtime & Networking
 tokio = { version = "1.38", features = ["full"] }
+rustls = { version = "0.23.40", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "ring"] }
+x509-parser = "0.18"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.6"
 url = "2.5"

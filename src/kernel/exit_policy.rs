@@ -96,17 +96,20 @@ impl ExitPolicy {
             return false;
         }
 
+        let lower = host.trim().to_lowercase();
+        if lower.ends_with(".onion") {
+            return false;
+        }
         if self.allow_private_networks {
             return true;
         }
-
-        let lower = host.trim().to_lowercase();
 
         // Block localhost and internal metadata hostnames
         if lower == "localhost"
             || lower.ends_with(".localhost")
             || lower.ends_with(".local")
             || lower.ends_with(".internal")
+            || lower.ends_with(".onion")
             || lower == "metadata.google.internal"
             || lower == "instance-data"
         {
@@ -152,30 +155,34 @@ impl ExitPolicy {
             ));
         }
 
-        let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+        let deadline = tokio::time::Instant::now() + self.connect_timeout;
+        let addrs: Vec<SocketAddr> =
+            tokio::time::timeout_at(deadline, tokio::net::lookup_host((host, port)))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Exit DNS resolution timed out",
+                    )
+                })??
+                .collect();
         let ips: Vec<IpAddr> = addrs.iter().map(|a| a.ip()).collect();
         self.validate_resolved_ips(host, &ips)?;
-
-        let addr = addrs.into_iter().next().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("No IP address resolved for target {}:{}", host, port),
-            )
-        })?;
-
-        // [B1] Bound the connect call. TimedOut is mapped to a ConnectionRefused-class error
-        // so callers that match on ErrorKind get a predictable, non-blocking outcome.
-        tokio::time::timeout(self.connect_timeout, tokio::net::TcpStream::connect(addr))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!(
-                        "TCP connect to {}:{} timed out after {}s (DoS/slot-exhaustion defense; see NDSS 2014 Sniper Attack)",
-                        host, port, self.connect_timeout.as_secs()
-                    ),
-                )
-            })?
+        let mut last =
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No destination addresses");
+        for addr in addrs {
+            match tokio::time::timeout_at(deadline, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(error)) => last = error,
+                Err(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Exit connection deadline exceeded",
+                    ))
+                }
+            }
+        }
+        Err(last)
     }
 
     /// Validates a list of resolved IP addresses for a host against the SSRF and DNS-rebinding policy.

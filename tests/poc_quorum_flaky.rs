@@ -113,7 +113,6 @@ async fn poc_quorum_with_divergent_relay_registration() {
         vec![("127.0.0.1:19304".into(), None)],
     );
     a1_auth.allow_unauthenticated_registration = true;
-    let a1 = Arc::new(a1_auth);
 
     let mut a2_auth = DirectoryAuthority::with_peer_authorities(
         "auth-2".into(),
@@ -122,6 +121,9 @@ async fn poc_quorum_with_divergent_relay_registration() {
         vec![("127.0.0.1:19303".into(), None)],
     );
     a2_auth.allow_unauthenticated_registration = true;
+    a1_auth.peer_authorities = vec![("127.0.0.1:19304".into(), Some(a2_auth.verifying_key()))];
+    a2_auth.peer_authorities = vec![("127.0.0.1:19303".into(), Some(a1_auth.verifying_key()))];
+    let a1 = Arc::new(a1_auth);
     let a2 = Arc::new(a2_auth);
 
     // Register relay-a ONLY to authority 1, and relay-b ONLY to authority 2

@@ -62,13 +62,18 @@ fn poc_replay_window_gap_off_by_one() {
     assert!(late_4.is_ok(), "legit cell should be accepted");
 }
 
-async fn one_hop_exit(dest: SocketAddr) -> (TcpStream, OnionCircuit) {
+async fn one_hop_exit(
+    dest: SocketAddr,
+) -> (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit) {
     one_hop_exit_opt(dest, false).await
 }
 
 /// `chunked`: put a proxy between client and relay that re-segments the client->relay byte
 /// stream into 700-byte pieces (what a 1500-byte-MTU path does to 1024-byte cells).
-async fn one_hop_exit_opt(dest: SocketAddr, chunked: bool) -> (TcpStream, OnionCircuit) {
+async fn one_hop_exit_opt(
+    dest: SocketAddr,
+    chunked: bool,
+) -> (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit) {
     let sk = SigningKey::generate(&mut OsRng);
     let pk = sk.verifying_key().to_bytes();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -123,8 +128,9 @@ async fn one_hop_exit_opt(dest: SocketAddr, chunked: bool) -> (TcpStream, OnionC
     } else {
         addr
     };
-    let mut s = TcpStream::connect(addr).await.unwrap();
-    s.set_nodelay(true).unwrap();
+    let raw = TcpStream::connect(addr).await.unwrap();
+    raw.set_nodelay(true).unwrap();
+    let mut s = anonguard::onion::link::connect(raw, pk).await.unwrap();
     let cid = 0x2a2b_2c2d;
     let secret = EphemeralSecret::random_from_rng(OsRng);
     let public = PublicKey::from(&secret);
@@ -251,7 +257,7 @@ async fn poc_relay_burst_loss_rate() {
     });
     let (s, mut circ) = one_hop_exit_opt(dest_addr, true).await;
     let cid = circ.circuit_id;
-    let (mut rd, mut wr) = s.into_split();
+    let (mut rd, mut wr) = tokio::io::split(s);
     tokio::spawn(async move {
         let mut sink = [0u8; 8192];
         while let Ok(n) = rd.read(&mut sink).await {

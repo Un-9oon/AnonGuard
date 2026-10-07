@@ -1,3 +1,5 @@
+> Historical research material. These descriptions and simulation results do not specify or validate protocol v3. See `docs/PROTOCOL_V3.md` for implemented behavior. No zero-leak, classifier-immunity, or Tor-superiority claim is supported by this document.
+
 # AnonGuard Performance Benchmarks
 
 This document contains baseline performance metrics for AnonGuard's cryptographic and networking layers.

@@ -1,3 +1,5 @@
+> Historical pre-v3 report. Its implementation descriptions, audit-completion claims and anonymity measurements are not evidence about protocol v3. See [current protocol](../PROTOCOL_V3.md) and [release gates](../PRODUCTION_READINESS.md).
+
 # AnonGuard — Task J Mesh, Consensus, Transport, and Gateway Code Audit Findings
 
 This report documents the 8 findings (1 Medium, 7 Low) identified during the line-by-line logical code review of `src/mesh/authority.rs`, `src/mesh/consensus.rs`, `src/mesh/transport.rs`, and `src/gateway/server.rs`.

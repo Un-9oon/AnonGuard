@@ -111,7 +111,10 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     let pinned_keys = vec![guard_pk, middle_pk, exit_pk];
 
     // 7. Connect client directly to Guard node only
-    let mut guard_stream = TcpStream::connect(guard_addr).await.unwrap();
+    let raw = TcpStream::connect(guard_addr).await.unwrap();
+    let mut guard_stream = anonguard::onion::link::connect(raw, guard_pk)
+        .await
+        .unwrap();
     let circuit_id = 0x1a2b3c4d;
 
     let mut circuit = build_telescopic_circuit(
@@ -136,7 +139,14 @@ async fn test_live_inband_telescopic_circuit_e2e() {
     // 9. Client reads response cell from the circuit
     let mut wire_backward = [0u8; ONION_CELL_SIZE];
     guard_stream.read_exact(&mut wire_backward).await.unwrap();
-    let resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    let mut resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    while matches!(
+        resp_cell.1.command,
+        CellCommand::DataAck | CellCommand::Dummy
+    ) {
+        guard_stream.read_exact(&mut wire_backward).await.unwrap();
+        resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    }
 
     assert_eq!(resp_cell.1.command, CellCommand::Data);
     let len = resp_cell.1.length as usize;
@@ -393,7 +403,10 @@ async fn test_upload_half_close_preserves_exit_response() {
     let pinned_keys = vec![guard_pk, middle_pk, exit_pk];
 
     // 7. Connect client directly to Guard node only
-    let mut guard_stream = TcpStream::connect(guard_addr).await.unwrap();
+    let raw = TcpStream::connect(guard_addr).await.unwrap();
+    let mut guard_stream = anonguard::onion::link::connect(raw, guard_pk)
+        .await
+        .unwrap();
     let circuit_id = 0x1a2b3c4d;
 
     let mut circuit = build_telescopic_circuit(
@@ -430,7 +443,14 @@ async fn test_upload_half_close_preserves_exit_response() {
     .await
     .unwrap()
     .unwrap();
-    let resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    let mut resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    while matches!(
+        resp_cell.1.command,
+        CellCommand::DataAck | CellCommand::Dummy
+    ) {
+        guard_stream.read_exact(&mut wire_backward).await.unwrap();
+        resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+    }
 
     assert_eq!(resp_cell.1.command, CellCommand::Data);
     let len = resp_cell.1.length as usize;
@@ -438,4 +458,148 @@ async fn test_upload_half_close_preserves_exit_response() {
         &resp_cell.1.payload[..len],
         b"HTTP/1.1 200 OK\r\n\r\nONION_E2E_VERIFIED"
     );
+}
+
+#[tokio::test]
+async fn test_gateway_stream_flow_control_large_half_closed_response() {
+    // 1. Destination Echo Server
+    let dest_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dest_addr = dest_listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let (mut s, _) = dest_listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, vec![0x53; 128 * 1024]);
+        s.write_all(&vec![0x72; 128 * 1024]).await.unwrap();
+    });
+
+    // 2. Generate identity keys for each relay hop
+    let (exit_sk, exit_pk) = gen_relay_key();
+    let (middle_sk, middle_pk) = gen_relay_key();
+    let (guard_sk, guard_pk) = gen_relay_key();
+
+    // 3. Spawn Hop 2 (Exit) - allow private network for local test harness
+    let exit_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let exit_addr = exit_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = exit_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &exit_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 4. Spawn Hop 1 (Middle)
+    let middle_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let middle_addr = middle_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = middle_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &middle_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 5. Spawn Hop 0 (Guard)
+    let guard_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let guard_addr = guard_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (s, _) = guard_listener.accept().await.unwrap();
+        let dummy_ks = Arc::new(AtomicBool::new(false));
+        let guarded_s = GuardedSocket::new(s, dummy_ks.clone())
+            .begin_verification()
+            .mark_verified();
+        let _ = handle_onion_relay_connection(
+            guarded_s,
+            dummy_ks,
+            None,
+            Some(anonguard::kernel::ExitPolicy::new(true)),
+            &guard_sk,
+            true,
+            anonguard::mesh::pool::ProxyPool::new(),
+        )
+        .await;
+    });
+
+    // 6. Build ProxyNode chain for client
+    let chain = vec![
+        ProxyNode::parse(&format!("socks5://{}", guard_addr)).unwrap(),
+        ProxyNode::parse(&format!("socks5://{}", middle_addr)).unwrap(),
+        ProxyNode::parse(&format!("socks5://{}", exit_addr)).unwrap(),
+    ];
+
+    // Pinned identity keys from the consensus (in order: guard, middle, exit)
+    let pinned_keys = vec![guard_pk, middle_pk, exit_pk];
+
+    // 7. Connect client directly to Guard node only
+    let raw = TcpStream::connect(guard_addr).await.unwrap();
+    let mut guard_stream = anonguard::onion::link::connect(raw, guard_pk)
+        .await
+        .unwrap();
+    let circuit_id = 0x1a2b3c4d;
+
+    let circuit = build_telescopic_circuit(
+        &mut guard_stream,
+        circuit_id,
+        &chain,
+        &pinned_keys,
+        &dest_addr.ip().to_string(),
+        dest_addr.port(),
+    )
+    .await
+    .expect("Telescopic circuit build and exit relay connection failed");
+
+    assert_eq!(circuit.hop_count(), 3);
+
+    let local = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut application = TcpStream::connect(local.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (gateway_stream, _) = local.accept().await.unwrap();
+    let app = tokio::spawn(async move {
+        application
+            .write_all(&vec![0x53; 128 * 1024])
+            .await
+            .unwrap();
+        application.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        application.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, vec![0x72; 128 * 1024]);
+    });
+    let kill = Arc::new(AtomicBool::new(false));
+    let mut client = GuardedSocket::new(gateway_stream, kill.clone())
+        .begin_verification()
+        .mark_verified();
+    let mut upstream = GuardedSocket::new(guard_stream, kill)
+        .begin_verification()
+        .mark_verified();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        anonguard::gateway::server::stream_onion_circuit(&mut client, &mut upstream, circuit, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    app.await.unwrap();
 }

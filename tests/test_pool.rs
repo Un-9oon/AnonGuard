@@ -169,3 +169,118 @@ async fn expired_loaded_directory_blocks_new_onion_paths() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn canonical_snapshot_rejects_mixed_views_and_survives_restart() {
+    use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    let auth1 = SigningKey::generate(&mut OsRng);
+    let auth2 = SigningKey::generate(&mut OsRng);
+    let relay_key = SigningKey::generate(&mut OsRng);
+    let now = anonguard::mesh::current_timestamp_secs();
+    let mut relay = RelayDescriptor::new(
+        "relay".into(),
+        "1.1.1.1".into(),
+        9050,
+        [0; 32],
+        [0; 32],
+        true,
+        0,
+        now,
+    );
+    relay.sign_with_key(&relay_key);
+    let mut one = ConsensusDocument::new(now - 10, now + 600, vec![relay.clone()]);
+    let mut other = ConsensusDocument::new(now - 9, now + 600, vec![relay.clone()]);
+    one.sign_with_authority("a", &auth1);
+    other.sign_with_authority("b", &auth2);
+    let keys = std::collections::HashMap::from([
+        ("a".into(), auth1.verifying_key()),
+        ("b".into(), auth2.verifying_key()),
+    ]);
+    let pool = ProxyPool::new();
+    assert!(pool
+        .load_from_multi_consensus(&[one.clone(), other], &keys, 2, now)
+        .await
+        .is_err());
+    one.sign_with_authority("b", &auth2);
+    let dir = std::env::temp_dir().join(format!(
+        "anonguard-snapshot-{:032x}",
+        rand::random::<u128>()
+    ));
+    pool.init_guard_state(dir.join("guards.json"))
+        .await
+        .unwrap();
+    pool.load_from_multi_consensus(&[one.clone()], &keys, 2, now)
+        .await
+        .unwrap();
+    let restarted = ProxyPool::new();
+    restarted
+        .init_guard_state(dir.join("guards.json"))
+        .await
+        .unwrap();
+    let mut old = ConsensusDocument::new(now - 20, now + 600, vec![relay.clone()]);
+    old.sign_with_authority("a", &auth1);
+    old.sign_with_authority("b", &auth2);
+    assert!(restarted
+        .load_from_multi_consensus(&[old], &keys, 2, now)
+        .await
+        .is_err());
+    relay.is_exit = false;
+    relay.sign_with_key(&relay_key);
+    let mut conflicting = ConsensusDocument::new(now - 10, now + 600, vec![relay]);
+    conflicting.sign_with_authority("a", &auth1);
+    conflicting.sign_with_authority("b", &auth2);
+    assert!(restarted
+        .load_from_multi_consensus(&[one.clone(), conflicting.clone()], &keys, 2, now)
+        .await
+        .is_err());
+    assert!(restarted
+        .load_from_multi_consensus(&[conflicting], &keys, 2, now)
+        .await
+        .is_err());
+    restarted
+        .load_from_multi_consensus(&[one], &keys, 2, now)
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn entry_failure_cooldown_does_not_revive_an_unavailable_guard() {
+    use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
+    use ed25519_dalek::SigningKey;
+    let authority = SigningKey::from_bytes(&[21; 32]);
+    let identity = SigningKey::from_bytes(&[22; 32]);
+    let now = anonguard::mesh::current_timestamp_secs();
+    let mut relay = RelayDescriptor::new(
+        "guard".into(),
+        "1.1.1.1".into(),
+        9001,
+        [0; 32],
+        [0; 32],
+        false,
+        0,
+        now,
+    );
+    relay.sign_with_key(&identity);
+    let mut doc = ConsensusDocument::new(now - 1, now + 600, vec![relay]);
+    doc.sign_with_authority("a", &authority);
+    let keys = std::collections::HashMap::from([("a".into(), authority.verifying_key())]);
+    let pool = ProxyPool::new();
+    pool.load_from_multi_consensus(&[doc], &keys, 1, now)
+        .await
+        .unwrap();
+    assert_eq!(
+        pool.get_diverse_onion_chain_with_exit(1, 1, false, false)
+            .await
+            .len(),
+        1
+    );
+    pool.note_guard_link_failure(identity.verifying_key().to_bytes())
+        .await;
+    assert!(pool
+        .get_diverse_onion_chain_with_exit(1, 1, false, false)
+        .await
+        .is_empty());
+}

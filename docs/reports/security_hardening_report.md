@@ -1,3 +1,5 @@
+> Historical pre-v3 report. Its implementation descriptions, audit-completion claims and anonymity measurements are not evidence about protocol v3. See [current protocol](../PROTOCOL_V3.md) and [release gates](../PRODUCTION_READINESS.md).
+
 # Comprehensive Report: Security Hardening & Defensive Architecture
 
 ## Executive Summary

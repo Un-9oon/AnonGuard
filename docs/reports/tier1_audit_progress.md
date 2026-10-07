@@ -1,3 +1,5 @@
+> Historical pre-v3 report. Its implementation descriptions, audit-completion claims and anonymity measurements are not evidence about protocol v3. See [current protocol](../PROTOCOL_V3.md) and [release gates](../PRODUCTION_READINESS.md).
+
 # Tier 1 Audit Progress Report
 
 > Per Part A Rule 1: every claim below was derived from current code read directly off

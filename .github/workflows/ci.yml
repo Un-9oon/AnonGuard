@@ -26,10 +26,16 @@ jobs:
         run: cargo check --locked --all-targets
 
       - name: Run Test Suite
-        run: cargo test --all-targets --verbose
+        run: cargo test --locked --all-targets --verbose
+
+      - name: Install namespace test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3
+
+      - name: Verify protected namespace and crash isolation
+        run: sudo env RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" "$(command -v cargo)" test --locked --test namespace_isolation_live -- --ignored
 
       - name: Run Clippy Linter (Strict Zero-Warning Enforcement - Debug)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run Clippy Linter & Build (Strict Zero-Warning Enforcement - Release)
         run: cargo clippy --release --all-targets -- -D warnings && cargo build --release

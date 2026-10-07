@@ -21,8 +21,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-/// Maximum allowed plaintext frame size (10 MB).
-const MAX_FRAME_LEN: usize = 10 * 1024 * 1024;
+/// Maximum allowed plaintext frame size (1 MiB).
+const MAX_FRAME_LEN: usize = 1024 * 1024;
+const VERSION: &[u8; 8] = b"AGDIR003";
+
+fn transcript(client: &[u8; 32], server: &[u8; 32], identity: &[u8; 32], flag: u8) -> Vec<u8> {
+    let mut bytes = b"AnonGuard-directory-transport-v3/initiator/responder".to_vec();
+    bytes.extend_from_slice(VERSION);
+    bytes.extend_from_slice(client);
+    bytes.extend_from_slice(server);
+    bytes.push(flag);
+    bytes.extend_from_slice(identity);
+    bytes
+}
 
 fn make_nonce(counter: u64) -> Nonce {
     let mut n = [0u8; 12];
@@ -53,6 +64,7 @@ impl SecureTransportSession {
         let client_secret = EphemeralSecret::random_from_rng(OsRng);
         let client_public = PublicKey::from(&client_secret);
 
+        stream.write_all(VERSION).await?;
         // Send client ephemeral public key (32 bytes)
         stream.write_all(client_public.as_bytes()).await?;
 
@@ -84,9 +96,12 @@ impl SecureTransportSession {
             let signature = Signature::from_bytes(&sig_bytes);
 
             // Verify signature over client_ephemeral_pub || server_ephemeral_pub
-            let mut signed_data = Vec::with_capacity(64);
-            signed_data.extend_from_slice(client_public.as_bytes());
-            signed_data.extend_from_slice(server_public.as_bytes());
+            let signed_data = transcript(
+                client_public.as_bytes(),
+                server_public.as_bytes(),
+                &server_id_bytes,
+                1,
+            );
 
             server_verifying_key
                 .verify_strict(&signed_data, &signature)
@@ -107,6 +122,11 @@ impl SecureTransportSession {
             }
 
             peer_verifying_key = Some(server_verifying_key);
+        } else if auth_flag[0] != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid transport authentication flag",
+            ));
         } else if pinned_key.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -115,9 +135,22 @@ impl SecureTransportSession {
         }
 
         let shared_secret = client_secret.diffie_hellman(&server_public);
+        if !shared_secret.was_contributory() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Non-contributory transport key",
+            ));
+        }
+        let identity = peer_verifying_key.map(|k| k.to_bytes()).unwrap_or([0; 32]);
+        let context = transcript(
+            client_public.as_bytes(),
+            server_public.as_bytes(),
+            &identity,
+            auth_flag[0],
+        );
 
         // Derive client_send and client_recv AEAD keys
-        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), true);
+        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), true, &context);
 
         let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
             .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
@@ -142,6 +175,14 @@ impl SecureTransportSession {
     ) -> io::Result<Self> {
         use ed25519_dalek::Signer;
 
+        let mut version = [0u8; 8];
+        stream.read_exact(&mut version).await?;
+        if &version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Directory protocol version mismatch",
+            ));
+        }
         // Read client ephemeral public key (32 bytes)
         let mut client_pub_bytes = [0u8; 32];
         stream.read_exact(&mut client_pub_bytes).await?;
@@ -159,9 +200,12 @@ impl SecureTransportSession {
             let vk = key.verifying_key();
             stream.write_all(vk.as_bytes()).await?;
 
-            let mut signed_data = Vec::with_capacity(64);
-            signed_data.extend_from_slice(client_public.as_bytes());
-            signed_data.extend_from_slice(server_public.as_bytes());
+            let signed_data = transcript(
+                client_public.as_bytes(),
+                server_public.as_bytes(),
+                vk.as_bytes(),
+                1,
+            );
             let sig = key.sign(&signed_data);
             stream.write_all(&sig.to_bytes()).await?;
         } else {
@@ -170,9 +214,24 @@ impl SecureTransportSession {
         }
 
         let shared_secret = server_secret.diffie_hellman(&client_public);
+        if !shared_secret.was_contributory() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Non-contributory transport key",
+            ));
+        }
+        let identity = signing_key
+            .map(|k| k.verifying_key().to_bytes())
+            .unwrap_or([0; 32]);
+        let context = transcript(
+            client_public.as_bytes(),
+            server_public.as_bytes(),
+            &identity,
+            u8::from(signing_key.is_some()),
+        );
 
         // Derive server_send and server_recv AEAD keys (inverted roles)
-        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), false);
+        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), false, &context);
 
         let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
             .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
@@ -198,6 +257,12 @@ impl SecureTransportSession {
     ///
     /// Wire format: 4-byte BE length of (ciphertext || 16-byte tag) || ciphertext || tag.
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
+        if payload.len() > MAX_FRAME_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Frame payload exceeds limit",
+            ));
+        }
         let counter = self.send_counter;
         self.send_counter = self
             .send_counter
@@ -212,9 +277,13 @@ impl SecureTransportSession {
 
         // ciphertext already includes the 16-byte Poly1305 tag appended by the AEAD
         let ct_len = ciphertext.len() as u32;
-        self.stream.write_all(&ct_len.to_be_bytes()).await?;
-        self.stream.write_all(&ciphertext).await?;
-        self.stream.flush().await?;
+        tokio::time::timeout(tokio::time::Duration::from_secs(15), async {
+            self.stream.write_all(&ct_len.to_be_bytes()).await?;
+            self.stream.write_all(&ciphertext).await?;
+            self.stream.flush().await
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Directory write timed out"))??;
         Ok(())
     }
 
@@ -281,19 +350,25 @@ impl SecureTransportSession {
     }
 }
 
-fn derive_transport_keys(shared_secret: &[u8; 32], is_client: bool) -> ([u8; 32], [u8; 32]) {
+fn derive_transport_keys(
+    shared_secret: &[u8; 32],
+    is_client: bool,
+    context: &[u8],
+) -> ([u8; 32], [u8; 32]) {
     use hkdf::Hkdf;
 
-    let hk = Hkdf::<sha2::Sha256>::new(None, shared_secret);
+    use sha2::Digest;
+    let salt = sha2::Sha256::digest(context);
+    let hk = Hkdf::<sha2::Sha256>::new(Some(&salt), shared_secret);
 
     let mut k_c2s = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
-    hk.expand(b"AnonGuard-Client-To-Server-v2-HKDF", &mut k_c2s)
+    hk.expand(b"AnonGuard-Client-To-Server-v3-HKDF", &mut k_c2s)
         .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     let mut k_s2c = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
-    hk.expand(b"AnonGuard-Server-To-Client-v2-HKDF", &mut k_s2c)
+    hk.expand(b"AnonGuard-Server-To-Client-v3-HKDF", &mut k_s2c)
         .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     if is_client {

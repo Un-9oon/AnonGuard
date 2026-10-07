@@ -76,7 +76,7 @@ impl AdversarialPerturbEngine {
         let count = self.packet_counter.fetch_add(1, Ordering::Relaxed);
 
         // Re-sample σ from RMT every 64 packets (prevents perturbation fingerprinting).
-        if count % RMT_RESAMPLE_PERIOD == 0 && count > 0 {
+        if count.is_multiple_of(RMT_RESAMPLE_PERIOD) && count > 0 {
             self.sigma_us = self.resample_sigma();
             debug!(
                 "[AnonGuard Adversarial] σ re-sampled to {:.0} µs at packet {}",

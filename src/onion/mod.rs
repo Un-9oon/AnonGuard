@@ -4,6 +4,8 @@
 
 pub mod cell;
 pub mod circuit;
+pub mod flow;
+pub mod link;
 pub mod multipath;
 pub mod padding;
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};

@@ -48,6 +48,8 @@ fn authority_endpoints_require_matching_independent_pins() {
             "a@127.0.0.1:9000,b@127.0.0.1:9001",
             "--authority-keys",
             &aliases,
+            "--quorum-threshold",
+            "2",
         ],
         "distinct signing keys",
     );

@@ -12,12 +12,21 @@ use tokio::sync::RwLock;
 
 use crate::mesh::node::ProxyNode;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct AcceptedSnapshot {
+    epoch: u64,
+    digest: [u8; 32],
+}
+
 #[derive(Clone)]
 pub struct ProxyPool {
     /// Keyed by "host:port" — inserting the same key overwrites, preventing duplicates (#6).
     nodes: Arc<RwLock<IndexMap<String, ProxyNode>>>,
     cursor: Arc<AtomicUsize>,
+    guard_cooldowns: Arc<RwLock<std::collections::HashMap<[u8; 32], tokio::time::Instant>>>,
     consensus_deadline: Arc<AtomicU64>,
+    accepted_snapshot: Arc<RwLock<Option<AcceptedSnapshot>>>,
+    snapshot_path: Arc<RwLock<Option<std::path::PathBuf>>>,
     /// Maps "host:port" -> Ed25519 identity key from the directory consensus.
     /// Only populated when nodes are loaded via `load_from_consensus`.
     identity_keys: Arc<RwLock<IndexMap<String, [u8; 32]>>>,
@@ -32,7 +41,10 @@ impl ProxyPool {
         Self {
             nodes: Arc::new(RwLock::new(IndexMap::new())),
             cursor: Arc::new(AtomicUsize::new(0)),
+            guard_cooldowns: Arc::new(RwLock::new(std::collections::HashMap::new())),
             consensus_deadline: Arc::new(AtomicU64::new(0)),
+            accepted_snapshot: Arc::new(RwLock::new(None)),
+            snapshot_path: Arc::new(RwLock::new(None)),
             identity_keys: Arc::new(RwLock::new(IndexMap::new())),
             guard_state: Arc::new(RwLock::new(crate::mesh::guards::GuardState::new())),
             guard_state_path: Arc::new(RwLock::new(None)),
@@ -44,10 +56,29 @@ impl ProxyPool {
         deadline != 0 && crate::mesh::current_timestamp_secs() >= deadline
     }
 
-    pub async fn init_guard_state(&self, path: std::path::PathBuf) {
-        let state = crate::mesh::guards::GuardState::load(&path);
+    pub async fn init_guard_state(&self, path: std::path::PathBuf) -> Result<(), String> {
+        if let Some(existing) = self.guard_state_path.read().await.as_ref() {
+            return if existing == &path {
+                Ok(())
+            } else {
+                Err("Pool state path cannot change after initialization".into())
+            };
+        }
+        let snapshot_path = path.with_extension("consensus.json");
+        match std::fs::read(&snapshot_path) {
+            Ok(bytes) => {
+                let state = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("Invalid directory rollback state: {e}"))?;
+                *self.accepted_snapshot.write().await = Some(state);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Cannot read directory rollback state: {e}")),
+        }
+        *self.snapshot_path.write().await = Some(snapshot_path);
+        let state = crate::mesh::guards::GuardState::load_checked(&path)?;
         *self.guard_state.write().await = state;
         *self.guard_state_path.write().await = Some(path);
+        Ok(())
     }
 
     /// Adds a proxy from string representation, deduplicating by host:port.
@@ -79,8 +110,7 @@ impl ProxyPool {
     }
 
     /// Loads authenticated relays from a set of Directory Authority Consensus Documents,
-    /// computing a majority intersection of individual relay descriptors to achieve
-    /// M-of-N consensus even if authorities have slightly differing overall views.
+    /// accepting only a quorum-signed canonical snapshot, never mixed descriptor votes.
     pub async fn load_from_multi_consensus(
         &self,
         docs: &[crate::mesh::consensus::ConsensusDocument],
@@ -96,67 +126,55 @@ impl ProxyPool {
         if unique_keys.len() != authorities.len() {
             return Err("Authority signing keys must be independent".into());
         }
-        let mut deadline = u64::MAX;
-        let mut relay_votes: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
-        let mut relay_metadata: std::collections::HashMap<
-            String,
-            crate::mesh::consensus::RelayDescriptor,
+        // Only signatures over exactly the same canonical snapshot may combine.
+        let mut snapshots: std::collections::HashMap<
+            [u8; 32],
+            crate::mesh::consensus::ConsensusDocument,
         > = std::collections::HashMap::new();
-
         for doc in docs {
-            // A document is valid if it is signed by AT LEAST 1 trusted authority. We only count votes from authorities that actually signed this document.
-            if current_time < doc.valid_after || current_time > doc.valid_until {
+            if doc.relays.len() > crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+                || doc.signatures.len() > 16
+                || doc.valid_after >= doc.valid_until
+                || current_time < doc.valid_after
+                || current_time >= doc.valid_until
+            {
                 continue;
             }
-
             let digest = doc.compute_digest();
-            let mut doc_valid_auths = Vec::new();
-            for sig in &doc.signatures {
-                if let Some(pubkey) = authorities.get(&sig.authority_id) {
-                    if let Ok(sig_bytes) = sig.signature_bytes.as_slice().try_into() {
-                        let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
-                        if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
-                            doc_valid_auths.push(sig.authority_id.clone());
-                        }
-                    }
-                }
-            }
-
-            if doc_valid_auths.is_empty() && quorum_threshold > 0 {
-                continue;
-            }
-
-            deadline = deadline.min(doc.valid_until);
-            for relay in &doc.relays {
-                if !relay.verify_identity() {
-                    continue; // Skip relays with invalid or missing cryptographic identity signatures
-                }
-
-                // Use the relay's node_id and signature as a unique key for its exact content
-                let key = format!("{}:{}", relay.node_id, hex::encode(&relay.signature));
-                let entry = relay_votes.entry(key.clone()).or_default();
-                for auth in &doc_valid_auths {
-                    entry.insert(auth.clone());
-                }
-                relay_metadata.insert(key, relay.clone());
+            snapshots
+                .entry(digest)
+                .and_modify(|d| {
+                    d.merge_signatures_from(doc);
+                })
+                .or_insert_with(|| doc.clone());
+        }
+        let mut candidates: Vec<_> = snapshots
+            .into_values()
+            .filter(|d| d.verify_quorum(authorities, quorum_threshold, current_time))
+            .collect();
+        candidates.sort_by_key(|d| std::cmp::Reverse(d.valid_after));
+        let selected = candidates
+            .first()
+            .ok_or("No canonical directory snapshot reached quorum")?;
+        if candidates.iter().any(|d| {
+            d.valid_after == selected.valid_after && d.compute_digest() != selected.compute_digest()
+        }) {
+            return Err("Conflicting quorum-signed directory snapshots for one epoch".into());
+        }
+        let digest = selected.compute_digest();
+        let mut accepted = self.accepted_snapshot.write().await;
+        if let Some(previous) = accepted.as_ref() {
+            if selected.valid_after < previous.epoch
+                || (selected.valid_after == previous.epoch && digest != previous.digest)
+            {
+                return Err("Directory rollback or same-epoch equivocation rejected".into());
             }
         }
-
-        // Filter relays that reached the quorum threshold
-        let mut final_relays = Vec::new();
-        for (key, auths) in relay_votes {
-            if auths.len() >= quorum_threshold {
-                if let Some(r) = relay_metadata.remove(&key) {
-                    final_relays.push(r);
-                }
-            }
+        let final_relays = selected.relays.clone();
+        if final_relays.is_empty() || final_relays.iter().any(|r| !r.verify_identity()) {
+            return Err("Directory must contain valid signed relay descriptors".into());
         }
-
-        if final_relays.is_empty() && quorum_threshold > 0 {
-            return Err("No relays reached the required consensus quorum".to_string());
-        }
-
+        let deadline = selected.valid_until;
         // An endpoint must not ambiguously represent different signed identities.
         let mut endpoints = std::collections::HashMap::new();
         for relay in &final_relays {
@@ -168,31 +186,47 @@ impl ProxyPool {
             }
         }
 
-        // Full replace: clear old consensus entries and repopulate
-        let mut list = self.nodes.write().await;
-        let mut id_keys = self.identity_keys.write().await;
-        list.retain(|_, n| {
-            !n.raw_url.starts_with("socks5://") && !n.raw_url.starts_with("reverse://")
-        });
-        id_keys.clear();
-
-        let mut loaded = 0;
+        // Parse everything before publishing; invalid descriptors cannot partially replace state.
+        let mut replacement = IndexMap::new();
+        let mut replacement_keys = IndexMap::new();
+        let mut identities = std::collections::HashSet::new();
+        let mut signing_keys = std::collections::HashSet::new();
         for relay in final_relays {
-            let scheme = if relay.host.starts_with("reverse://") {
+            if !identities.insert(relay.node_id.clone())
+                || !signing_keys.insert(relay.identity_key_ed25519)
+            {
+                return Err("Duplicate relay identifier in directory snapshot".into());
+            }
+            let endpoint = if relay.host.starts_with("reverse://") {
                 relay.host.clone()
             } else {
                 format!("socks5://{}:{}", relay.host, relay.port)
             };
-            if let Ok(mut node) = ProxyNode::parse(&scheme) {
-                node.enforce_remote_dns();
-                node.is_exit = relay.is_exit;
-                let key = format!("{}:{}", node.host, node.port);
-                id_keys.insert(key.clone(), relay.identity_key_ed25519);
-                list.insert(key, node);
-                loaded += 1;
+            let mut node = ProxyNode::parse(&endpoint)?;
+            node.enforce_remote_dns();
+            node.is_exit = relay.is_exit;
+            let key = format!("{}:{}", node.host, node.port);
+            if replacement.contains_key(&key) {
+                return Err("Duplicate endpoint in directory snapshot".into());
             }
+            replacement_keys.insert(key.clone(), relay.identity_key_ed25519);
+            replacement.insert(key, node);
         }
-
+        let next = AcceptedSnapshot {
+            epoch: selected.valid_after,
+            digest,
+        };
+        if let Some(path) = self.snapshot_path.read().await.as_ref() {
+            let bytes = serde_json::to_vec(&next).map_err(|e| e.to_string())?;
+            crate::core::storage::atomic_write(path, &bytes)
+                .map_err(|e| format!("Cannot persist directory rollback state: {e}"))?;
+        }
+        let mut list = self.nodes.write().await;
+        let mut id_keys = self.identity_keys.write().await;
+        let loaded = replacement.len();
+        *list = replacement;
+        *id_keys = replacement_keys;
+        *accepted = Some(next);
         self.consensus_deadline.store(deadline, Ordering::Release);
         Ok(loaded)
     }
@@ -221,6 +255,14 @@ impl ProxyPool {
                 id_keys.get(&key_id).copied().unwrap_or([0u8; 32])
             })
             .collect()
+    }
+
+    /// Only entry-link failures cause a cooldown; downstream failures never rotate guards.
+    pub async fn note_guard_link_failure(&self, identity: [u8; 32]) {
+        let now = tokio::time::Instant::now();
+        let mut cooldowns = self.guard_cooldowns.write().await;
+        cooldowns.retain(|_, until| *until > now);
+        cooldowns.insert(identity, now + std::time::Duration::from_secs(60));
     }
 
     /// Retrieves the next alive proxy using round-robin rotation.
@@ -304,14 +346,24 @@ impl ProxyPool {
             return Vec::new();
         }
         let list = self.nodes.read().await;
+        let identities = self.identity_keys.read().await;
+        let cooldowns = self.guard_cooldowns.read().await;
         let all_healthy: Vec<ProxyNode> = {
-            let v: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
-            if v.is_empty() {
-                list.values().cloned().collect()
-            } else {
-                v
-            }
+            let v: Vec<ProxyNode> = list
+                .values()
+                .filter(|n| {
+                    n.is_alive
+                        && identities
+                            .get(&format!("{}:{}", n.host, n.port))
+                            .and_then(|key| cooldowns.get(key))
+                            .is_none_or(|until| *until <= tokio::time::Instant::now())
+                })
+                .cloned()
+                .collect();
+            v
         };
+        drop(cooldowns);
+        drop(identities);
 
         if min_hops == 0 || max_hops < min_hops || all_healthy.len() < min_hops {
             return Vec::new();
@@ -349,17 +401,7 @@ impl ProxyPool {
         } else {
             path_len
         };
-        let mut pool_for_middles = if require_exit_at_last {
-            middle_nodes
-        } else {
-            // When not requiring exit at last, all nodes are eligible everywhere
-            let list_vals: Vec<ProxyNode> = list.values().filter(|n| n.is_alive).cloned().collect();
-            if list_vals.is_empty() {
-                list.values().cloned().collect()
-            } else {
-                list_vals
-            }
-        };
+        let mut pool_for_middles = middle_nodes;
 
         {
             let mut rng = rand::thread_rng();
@@ -368,42 +410,43 @@ impl ProxyPool {
 
         let mut selected: Vec<ProxyNode> = Vec::new();
 
-        // 1. Pick or assign Persistent Entry Guard (Hop 0)
+        // A fixed small guard set prevents repeated failures from forcing unlimited rotation.
         if middle_count > 0 {
-            let mut guard_state = self.guard_state.write().await;
-            let mut guard_node = None;
-
-            // Look for an existing healthy guard in our pinned state
-            for g_id in &guard_state.guards {
-                if let Some(n) = pool_for_middles
+            let keys = self.identity_keys.read().await;
+            let mut state = self.guard_state.write().await;
+            let previous = state.clone();
+            if state.guards.is_empty() {
+                for node in pool_for_middles.iter().take(3) {
+                    let endpoint = format!("{}:{}", node.host, node.port);
+                    if let Some(key) = keys.get(&endpoint) {
+                        state.identities.insert(endpoint.clone(), *key);
+                    }
+                    state.guards.push(endpoint);
+                }
+                if let Some(path) = self.guard_state_path.read().await.as_ref() {
+                    if state.save_checked(path).is_err() {
+                        *state = previous;
+                        return Vec::new();
+                    }
+                }
+            }
+            let guard = state.guards.iter().find_map(|endpoint| {
+                pool_for_middles
                     .iter()
-                    .find(|n| format!("{}:{}", n.host, n.port) == *g_id)
-                {
-                    guard_node = Some(n.clone());
-                    break;
-                }
-            }
-
-            if let Some(guard) = guard_node {
-                selected.push(guard.clone());
-                pool_for_middles.retain(|n| {
-                    format!("{}:{}", n.host, n.port) != format!("{}:{}", guard.host, guard.port)
-                });
-            } else {
-                // Assign a new pinned guard and save to disk
-                if let Some(new_guard) = pool_for_middles.first().cloned() {
-                    let g_id = format!("{}:{}", new_guard.host, new_guard.port);
-                    guard_state.guards.push(g_id);
-                    if guard_state.guards.len() > 3 {
-                        guard_state.guards.remove(0); // Keep max 3 persistent guards to prevent bloating
-                    }
-                    if let Some(path) = self.guard_state_path.read().await.as_ref() {
-                        guard_state.save(path);
-                    }
-                    selected.push(new_guard.clone());
-                    pool_for_middles.remove(0);
-                }
-            }
+                    .find(|node| {
+                        let candidate = format!("{}:{}", node.host, node.port);
+                        match state.identities.get(endpoint) {
+                            Some(pin) => keys.get(&candidate) == Some(pin),
+                            None => keys.is_empty() && &candidate == endpoint,
+                        }
+                    })
+                    .cloned()
+            });
+            let Some(guard) = guard else {
+                return Vec::new();
+            };
+            pool_for_middles.retain(|node| node.host != guard.host || node.port != guard.port);
+            selected.push(guard);
         }
 
         // 2. Select remaining middle hops

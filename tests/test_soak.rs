@@ -127,7 +127,10 @@ async fn test_soak_local_relays() {
     let pinned_keys = vec![guard_pk, middle_pk, exit_pk];
 
     // 7. Connect client directly to Guard node only
-    let mut guard_stream = TcpStream::connect(guard_addr).await.unwrap();
+    let raw = TcpStream::connect(guard_addr).await.unwrap();
+    let mut guard_stream = anonguard::onion::link::connect(raw, guard_pk)
+        .await
+        .unwrap();
     let circuit_id = 0xDEADBEEF;
 
     let mut circuit = build_telescopic_circuit(
@@ -158,10 +161,17 @@ async fn test_soak_local_relays() {
             .read_exact(&mut wire_backward)
             .await
             .unwrap_or_else(|_| panic!("Failed to read response for message {}", i));
-        let resp_cell = circuit
+        let mut resp_cell = circuit
             .unwrap_backward(&mut wire_backward)
             .unwrap_or_else(|_| panic!("Failed to unwrap response for message {}", i));
 
+        while matches!(
+            resp_cell.1.command,
+            CellCommand::DataAck | CellCommand::Dummy
+        ) {
+            guard_stream.read_exact(&mut wire_backward).await.unwrap();
+            resp_cell = circuit.unwrap_backward(&mut wire_backward).unwrap();
+        }
         assert_eq!(resp_cell.1.command, CellCommand::Data);
 
         let len = resp_cell.1.length as usize;
@@ -175,6 +185,18 @@ async fn test_soak_local_relays() {
             String::from_utf8_lossy(&resp_cell.1.payload[..len])
         );
 
+        let mut ack = OnionCell::new(
+            circuit_id,
+            0,
+            CellCommand::DataAck,
+            1,
+            &((i + 1) as u32).to_be_bytes(),
+        )
+        .unwrap();
+        guard_stream
+            .write_all(&circuit.wrap_forward(&mut ack).unwrap())
+            .await
+            .unwrap();
         successful_roundtrips += 1;
     }
 

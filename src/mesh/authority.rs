@@ -32,6 +32,8 @@ pub struct DirectoryAuthority {
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
     pub peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
     pub allow_unauthenticated_registration: bool,
+    signed_epochs: Arc<RwLock<HashMap<u64, ConsensusDocument>>>,
+    vote_path: Option<std::path::PathBuf>,
 }
 
 impl DirectoryAuthority {
@@ -61,6 +63,8 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
             allow_unauthenticated_registration: false,
+            signed_epochs: Arc::new(RwLock::new(HashMap::new())),
+            vote_path: None,
         }
     }
 
@@ -197,11 +201,34 @@ impl DirectoryAuthority {
         pow_difficulty: u32,
         key_path: impl AsRef<Path>,
     ) -> Self {
-        let signing_key = Self::load_or_create_signing_key(key_path);
+        let signing_key = Self::load_or_create_signing_key(key_path.as_ref());
         info!(
             "Authority public key (hex): {}",
             hex::encode(signing_key.verifying_key().to_bytes())
         );
+        let vote_path = key_path.as_ref().with_extension("votes.json");
+        let votes: Vec<ConsensusDocument> = match std::fs::read(&vote_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                error!("Invalid persisted authority vote state");
+                std::process::exit(1);
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => {
+                error!("Cannot read persisted authority vote state");
+                std::process::exit(1);
+            }
+        };
+        let own =
+            std::collections::HashMap::from([(authority_id.clone(), signing_key.verifying_key())]);
+        let mut signed_epochs = HashMap::new();
+        for doc in votes {
+            if !doc.verify_quorum(&own, 1, doc.valid_after)
+                || signed_epochs.insert(doc.valid_after, doc).is_some()
+            {
+                error!("Persisted authority vote state failed authentication");
+                std::process::exit(1);
+            }
+        }
         Self {
             authority_id,
             signing_key,
@@ -214,7 +241,43 @@ impl DirectoryAuthority {
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
             peer_authorities: Vec::new(),
             allow_unauthenticated_registration: false,
+            signed_epochs: Arc::new(RwLock::new(signed_epochs)),
+            vote_path: Some(vote_path),
         }
+    }
+
+    async fn frozen_view(
+        &self,
+        mut relays: Vec<RelayDescriptor>,
+    ) -> Result<ConsensusDocument, String> {
+        let now = current_timestamp_secs();
+        let epoch = (now / 300) * 300;
+        let mut votes = self.signed_epochs.write().await;
+        if votes.keys().any(|previous| *previous > epoch) {
+            return Err("Authority clock rollback rejected".into());
+        }
+        if let Some(doc) = votes.get(&epoch) {
+            return Ok(doc.clone());
+        }
+        if relays.len() > crate::mesh::consensus::MAX_DIRECTORY_RELAYS {
+            return Err("Directory capacity exceeded".into());
+        }
+        relays.retain(|r| {
+            r.verify_identity() && r.registered_at <= now && now - r.registered_at <= RELAY_TTL_SECS
+        });
+        let mut doc = ConsensusDocument::new(epoch, epoch + 600, relays);
+        doc.sign_with_authority(&self.authority_id, &self.signing_key);
+        let mut next = votes.clone();
+        next.retain(|previous, _| previous.saturating_add(3600) >= epoch);
+        next.insert(epoch, doc.clone());
+        if let Some(path) = &self.vote_path {
+            let bytes = serde_json::to_vec(&next.values().collect::<Vec<_>>())
+                .map_err(|e| e.to_string())?;
+            crate::core::storage::atomic_write(path, &bytes)
+                .map_err(|e| format!("Cannot persist authority vote: {e}"))?;
+        }
+        *votes = next;
+        Ok(doc)
     }
 
     pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
@@ -241,6 +304,11 @@ impl DirectoryAuthority {
         }
 
         let mut relays = self.active_relays.write().await;
+        if !relays.contains_key(&descriptor.node_id)
+            && relays.len() >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+        {
+            return Err("Directory capacity exceeded".into());
+        }
         if let Some(existing) = relays.get(&descriptor.node_id) {
             if existing.identity_key_ed25519 != descriptor.identity_key_ed25519 {
                 return Err(format!(
@@ -291,24 +359,23 @@ impl DirectoryAuthority {
 
         let relay_list = self.reconcile_relays().await;
 
-        let bucketed_now = (now / 300) * 300;
-        let mut consensus = ConsensusDocument::new(
-            bucketed_now,
-            bucketed_now + 3600, // Valid for 1 hour
-            relay_list,
-        );
-
-        // Sign our own view
-        consensus.sign_with_authority(&self.authority_id, &self.signing_key);
+        let mut consensus = self.frozen_view(relay_list).await?;
         let digest = consensus.compute_digest();
         let digest_hex = hex::encode(digest);
 
         // BFT Pre-Signing Cross-Check Round
         // Query peer authorities to co-sign our exact proposed digest.
         // This ensures the document handed to clients is already multi-signed and verified.
-        let f = self.peer_authorities.len() / 3;
-        let required_signatures = 2 * f + 1; // 2f+1 quorum (including ourselves)
+        let mut independent =
+            std::collections::HashSet::from([self.signing_key.verifying_key().to_bytes()]);
+        for (_, key) in &self.peer_authorities {
+            let key = key.as_ref().ok_or("Authority peer lacks an identity pin")?;
+            independent.insert(key.to_bytes());
+        }
+        let required_signatures = (2 * independent.len()) / 3 + 1; // 2f+1 quorum (including ourselves)
 
+        let mut received_keys =
+            std::collections::HashSet::from([self.signing_key.verifying_key().to_bytes()]);
         for (peer, pinned_key) in &self.peer_authorities {
             if peer == &self.listen_addr {
                 continue;
@@ -324,7 +391,9 @@ impl DirectoryAuthority {
                     if let Some(pubkey) = pinned_key {
                         if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
                             let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
-                            if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
+                            if pubkey.verify_strict(&digest, &ed_sig).is_ok()
+                                && received_keys.insert(pubkey.to_bytes())
+                            {
                                 consensus.signatures.push(peer_sig);
                             }
                         }
@@ -414,6 +483,11 @@ impl DirectoryAuthority {
                 Ok(Ok(peer_relays)) => {
                     let now = current_timestamp_secs();
                     for desc in peer_relays {
+                        if !local_map.contains_key(&desc.node_id)
+                            && local_map.len() >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+                        {
+                            continue;
+                        }
                         if desc.verify_identity() {
                             // Validate PoW and freshness to reject malicious peers pushing fake views
                             let is_valid_pow = verify_pow(
@@ -474,6 +548,11 @@ impl DirectoryAuthority {
                     continue;
                 }
             }
+            if !active.contains_key(id)
+                && active.len() >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+            {
+                continue;
+            }
             active.insert(id.clone(), desc.clone());
         }
 
@@ -528,8 +607,8 @@ impl DirectoryAuthority {
                 interval.tick().await;
                 let now = current_timestamp_secs();
                 let mut relays = active_relays_eviction.write().await;
-                // Evict relays that haven't registered in the last 15 minutes (900 seconds)
-                relays.retain(|_, desc| now.saturating_sub(desc.registered_at) < 900);
+                // Use the same TTL for periodic eviction and snapshot generation.
+                relays.retain(|_, desc| now.saturating_sub(desc.registered_at) < RELAY_TTL_SECS);
             }
         });
 
@@ -588,22 +667,16 @@ impl DirectoryAuthority {
                                     let _ = session.write_frame(&serialized).await;
                                 }
                             } else if let Some(digest_hex) = text.strip_prefix("BFT_CROSS_CHECK ") {
-                                // Recompute our own local consensus digest
-                                // We don't trigger a full generate_consensus() here to avoid infinite loops,
-                                // we just do local reconciliation.
-                                let relays = active_relays.read().await;
-                                let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
-                                let now = current_timestamp_secs();
-                                let bucketed_now = (now / 300) * 300;
-                                let mut local_consensus =
-                                    ConsensusDocument::new(bucketed_now, bucketed_now + 3600, list);
-
+                                let list = auth_self.reconcile_relays().await;
+                                let Ok(mut local_consensus) = auth_self.frozen_view(list).await
+                                else {
+                                    let _ = session.write_frame(b"ERROR_EPOCH_STATE").await;
+                                    continue;
+                                };
                                 let our_digest = local_consensus.compute_digest();
                                 let our_digest_hex = hex::encode(our_digest);
 
                                 if our_digest_hex == digest_hex {
-                                    local_consensus
-                                        .sign_with_authority(&auth_self.authority_id, &signing_key);
                                     let our_sig = local_consensus.signatures.pop().unwrap();
                                     if let Ok(serialized) = serde_json::to_string(&our_sig) {
                                         let resp = format!("OK_SIGNED {}", serialized);
@@ -629,6 +702,11 @@ impl DirectoryAuthority {
                                             now,
                                         ) {
                                             let _ = session.write_frame(b"ERROR_POW_INVALID").await;
+                                        } else if !relays.contains_key(&desc.node_id)
+                                            && relays.len()
+                                                >= crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+                                        {
+                                            let _ = session.write_frame(b"ERROR_CAPACITY").await;
                                         } else if let Some(existing) = relays.get(&desc.node_id) {
                                             if existing.identity_key_ed25519
                                                 != desc.identity_key_ed25519

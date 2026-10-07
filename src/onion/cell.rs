@@ -1,9 +1,9 @@
-//! Fixed-size 1024-byte OnionCell protocol with HMAC-SHA256 Authenticated MAC.
+//! Fixed-size 2048-byte protocol cells carried inside authenticated TLS links.
 
 use rand::Rng;
 
 pub const ONION_CELL_SIZE: usize = 2048;
-pub const HEADER_SIZE: usize = 61; // Increased for Sphinx 32-byte Ephemeral Key
+pub const HEADER_SIZE: usize = 61; // Includes 32 random padding bytes; not a Sphinx header.
 pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 1987 bytes
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,7 @@ impl CellCommand {
     }
 }
 
-/// A constant-size 2048-byte cell with a 16-byte HMAC-SHA256 MAC tag and sequence number preventing replay and bit-flipping attacks.
+/// A fixed-size cell with a 16-byte AEAD tag and a sequence number.
 #[derive(Clone)]
 pub struct OnionCell {
     pub circuit_id: u32,
@@ -48,7 +48,7 @@ pub struct OnionCell {
     pub command: CellCommand,
     pub stream_id: u16,
     pub length: u16,
-    pub ephemeral_key: [u8; 32], // Sphinx-style randomized header identity
+    pub ephemeral_key: [u8; 32], // Random padding, not an X25519 public key.
     pub mac: [u8; 16],
     pub payload: [u8; PAYLOAD_SIZE],
 }
@@ -73,7 +73,7 @@ impl OnionCell {
         let len = data.len();
         payload[..len].copy_from_slice(data);
 
-        // Sphinx unlikability: Re-randomize ephemeral header identity at creation
+        // Randomize padding at creation; this does not establish unlinkability.
         let mut rng = rand::thread_rng();
         let mut ephemeral_key = [0u8; 32];
         rng.fill(&mut ephemeral_key);

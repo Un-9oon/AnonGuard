@@ -1,3 +1,5 @@
+> Historical pre-v3 report. Its implementation descriptions, audit-completion claims and anonymity measurements are not evidence about protocol v3. See [current protocol](../PROTOCOL_V3.md) and [release gates](../PRODUCTION_READINESS.md).
+
 # Unwrap Inventory Triage
 
 The `unwrap_audit.txt` file was reviewed. All 228 instances of `.unwrap()` and `.expect()` were spot-checked and parsed.

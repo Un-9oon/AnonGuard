@@ -90,9 +90,20 @@ async fn test_gossip_impersonation_rejection() {
     let consensus_a = auth_a.generate_consensus().await;
 
     // Check that A still has K1, not K2!
-    let consensus_doc = consensus_a.unwrap();
-    let final_desc = consensus_doc
-        .relays
+    assert!(
+        consensus_a.is_err(),
+        "Conflicting identities must not obtain a two-authority quorum"
+    );
+    let raw = tokio::net::TcpStream::connect("127.0.0.1:19210")
+        .await
+        .unwrap();
+    let mut session = anonguard::mesh::SecureTransportSession::client_handshake(raw, Some(&key_a))
+        .await
+        .unwrap();
+    session.write_frame(b"GET_RELAY_LIST").await.unwrap();
+    let relays: Vec<RelayDescriptor> =
+        serde_json::from_slice(&session.read_frame().await.unwrap()).unwrap();
+    let final_desc = relays
         .iter()
         .find(|r| r.node_id == "relay-target")
         .expect("A should still have the relay");

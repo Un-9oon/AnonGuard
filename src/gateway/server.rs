@@ -100,8 +100,16 @@ impl GatewayServer {
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.pool
             .init_guard_state(self.config.guard_state_path.clone())
-            .await;
+            .await?;
 
+        if self.config.relay_mode
+            && !self.config.directory_authorities.is_empty()
+            && self.config.authority_endpoints.len() != self.config.directory_authorities.len()
+        {
+            return Err(
+                "Relay registration requires bound authority identity/address/pin records".into(),
+            );
+        }
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         info!(
             listen_addr = %self.config.listen_addr,
@@ -116,11 +124,10 @@ impl GatewayServer {
         }
 
         if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
-            let auths = self.config.directory_authorities.clone();
+            let auths = self.config.authority_endpoints.clone();
             let identity_key = self.relay_identity_key.clone();
             let config = self.config.clone();
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 mins
                 loop {
                     let now = crate::mesh::sybil::current_timestamp_secs();
                     let pub_key_bytes = identity_key.verifying_key().to_bytes();
@@ -174,7 +181,8 @@ impl GatewayServer {
                     };
                     let request = format!("REGISTER_RELAY {}", json_payload);
 
-                    for (auth_idx, auth_url) in auths.iter().enumerate() {
+                    for (auth_idx, authority) in auths.iter().enumerate() {
+                        let auth_url = &authority.address;
                         // [B3] Wire authority identity key pinning (STS, Diffie-van Oorschot-Wiener 1992).
                         //
                         // The correct mechanism (sign ephemeral DH keys with long-term identity key,
@@ -185,12 +193,8 @@ impl GatewayServer {
                         // Bootstrap: authority_identity_keys is empty by default. Operators MUST
                         // pre-populate it from their authority's published Ed25519 key. An empty list
                         // produces a startup warning — see docs/reports/hardening_findings.md.
-                        let pinned_vk: Option<ed25519_dalek::VerifyingKey> = config
-                            .authority_identity_keys
-                            .get(auth_idx)
-                            .and_then(|key_bytes| {
-                                ed25519_dalek::VerifyingKey::from_bytes(key_bytes).ok()
-                            });
+                        let pinned_vk =
+                            ed25519_dalek::VerifyingKey::from_bytes(&authority.public_key).ok();
 
                         if pinned_vk.is_none() {
                             if !config.allow_unauthenticated_registration {
@@ -216,13 +220,20 @@ impl GatewayServer {
                             .split_once('@')
                             .map_or(auth_url.as_str(), |(_, addr)| addr)
                             .trim_start_matches("http://");
-                        if let Ok(stream) = tokio::net::TcpStream::connect(auth_host_port).await {
-                            if let Ok(mut session) =
+                        if let Ok(Ok(stream)) = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            tokio::net::TcpStream::connect(auth_host_port),
+                        )
+                        .await
+                        {
+                            if let Ok(Ok(mut session)) = tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
                                 crate::mesh::transport::SecureTransportSession::client_handshake(
                                     stream,
-                                    pinned_vk.as_ref(), // [B3] pass pinned key; None = warn only, not fail
-                                )
-                                .await
+                                    pinned_vk.as_ref(),
+                                ),
+                            )
+                            .await
                             {
                                 let _ = session.write_frame(request.as_bytes()).await;
                                 if let Ok(Ok(msg)) = tokio::time::timeout(
@@ -247,7 +258,7 @@ impl GatewayServer {
                         }
                     }
 
-                    interval.tick().await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
                 }
             });
         }
@@ -301,276 +312,323 @@ impl GatewayServer {
             let relay_identity_key = self.relay_identity_key.clone();
 
             tokio::spawn(async move {
-                let _permit = permit;
+                let mut cancellation = kill_switch.subscribe();
+                let work = async move {
+                    let _permit = permit;
 
-                // RAII guard to decrement per-IP active connection count on disconnect
-                struct IpGuard {
-                    ip: IpAddr,
-                    tracker: Arc<RwLock<HashMap<IpAddr, u32>>>,
-                }
-                impl Drop for IpGuard {
-                    fn drop(&mut self) {
-                        let ip = self.ip;
-                        let tracker = self.tracker.clone();
-                        tokio::spawn(async move {
-                            let mut map = tracker.write().await;
-                            if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                                map.entry(ip)
-                            {
-                                if *entry.get() <= 1 {
-                                    entry.remove();
-                                } else {
-                                    *entry.get_mut() -= 1;
-                                }
-                            }
-                        });
+                    // RAII guard to decrement per-IP active connection count on disconnect
+                    struct IpGuard {
+                        ip: IpAddr,
+                        tracker: Arc<RwLock<HashMap<IpAddr, u32>>>,
                     }
-                }
-                let _ip_guard = IpGuard {
-                    ip: client_ip_key,
-                    tracker: ip_tracker,
-                };
+                    impl Drop for IpGuard {
+                        fn drop(&mut self) {
+                            let ip = self.ip;
+                            let tracker = self.tracker.clone();
+                            tokio::spawn(async move {
+                                let mut map = tracker.write().await;
+                                if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                                    map.entry(ip)
+                                {
+                                    if *entry.get() <= 1 {
+                                        entry.remove();
+                                    } else {
+                                        *entry.get_mut() -= 1;
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    let _ip_guard = IpGuard {
+                        ip: client_ip_key,
+                        tracker: ip_tracker,
+                    };
 
-                if kill_switch.is_tripped() {
-                    return;
-                }
-
-                let mut peek_buf = [0u8; 1];
-                // Bug #5: add timeout around peek() — without it, a client that never sends
-                // a byte keeps the connection open indefinitely (Slowloris against the gateway)
-                let is_socks5 = match tokio::time::timeout(
-                    tokio::time::Duration::from_secs(5),
-                    client_stream.peek(&mut peek_buf),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => peek_buf[0] == 0x05,
-                    Ok(Err(_)) | Err(_) => {
-                        warn!("Client closed or timed out before sending first byte");
-                        crate::observability::inc_timeouts();
+                    if kill_switch.is_tripped() {
                         return;
                     }
-                };
 
-                let mut client = GuardedSocket::new(client_stream, kill_switch.atomic_handle())
-                    .begin_verification()
-                    .mark_verified();
+                    let mut peek_buf = [0u8; 1];
+                    // Bug #5: add timeout around peek() — without it, a client that never sends
+                    // a byte keeps the connection open indefinitely (Slowloris against the gateway)
+                    let is_socks5 = match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(5),
+                        client_stream.peek(&mut peek_buf),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => peek_buf[0] == 0x05,
+                        Ok(Err(_)) | Err(_) => {
+                            warn!("Client closed or timed out before sending first byte");
+                            crate::observability::inc_timeouts();
+                            return;
+                        }
+                    };
 
-                if config.relay_mode {
-                    if is_socks5 {
-                        if !config.allow_open_socks5 {
-                            warn!(
+                    let mut client = GuardedSocket::new(client_stream, kill_switch.atomic_handle())
+                        .begin_verification()
+                        .mark_verified();
+
+                    if config.relay_mode {
+                        if is_socks5 {
+                            if !config.allow_open_socks5 {
+                                warn!(
                                 "Relay Mode: Rejected unauthenticated plain SOCKS5 proxy request on onion relay port (anti-abuse policy)"
+                            );
+                                return;
+                            }
+
+                            let (target_host, target_port) = match tokio::time::timeout(
+                                tokio::time::Duration::from_secs(10),
+                                crate::gateway::chain::read_socks5_request(&mut client),
+                            )
+                            .await
+                            {
+                                Ok(Ok(target)) => target,
+                                Ok(Err(e)) => {
+                                    warn!("Relay Mode: SOCKS5 handshake failed: {}", e);
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!("Relay Mode: SOCKS5 handshake timed out (Slowloris defense)");
+                                    return;
+                                }
+                            };
+
+                            let exit_policy =
+                                crate::kernel::ExitPolicy::new(config.allow_private_exit);
+                            match exit_policy
+                                .resolve_and_connect(&target_host, target_port)
+                                .await
+                            {
+                                Ok(mut target_stream) => {
+                                    // Bug #13: don't log target_host:target_port — destination is sensitive
+                                    info!(
+                                        "Relay Mode: Forwarding traffic to connected destination"
+                                    );
+
+                                    let _ =
+                                        crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
+                                            .await;
+                                    let _ = morph_bidirectional_guarded(
+                                        &mut client,
+                                        &mut target_stream,
+                                        jitter.clone(),
+                                        Some(kill_switch.clone()),
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    error!(kind=?e.kind(), "Relay destination blocked or unreachable");
+                                    let rep = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                                        0x02 // Connection not allowed by ruleset (SSRF/private IP blocked)
+                                    } else {
+                                        0x04 // Host unreachable
+                                    };
+                                    let _ =
+                                        crate::gateway::chain::send_socks5_reply(&mut client, rep)
+                                            .await;
+                                }
+                            }
+                        } else {
+                            info!("Relay Mode: Processing incoming in-band Onion Cell connection");
+                            let exit_policy =
+                                crate::kernel::ExitPolicy::new(config.allow_private_exit);
+                            let _ = handle_onion_relay_connection(
+                                client,
+                                kill_switch.atomic_handle(),
+                                jitter.clone(),
+                                Some(exit_policy),
+                                &relay_identity_key,
+                                config.is_exit,
+                                pool.clone(),
+                            )
+                            .await;
+                        }
+                        return;
+                    }
+
+                    // 1. Intercept SOCKS5 from local client to find target
+                    let timeout_duration = tokio::time::Duration::from_secs(10);
+                    let (target_host, target_port) = match tokio::time::timeout(
+                        timeout_duration,
+                        crate::gateway::chain::read_socks5_request(&mut client),
+                    )
+                    .await
+                    {
+                        Ok(Ok(res)) => res,
+                        Ok(Err(e)) => {
+                            error!("Failed to intercept client SOCKS5 handshake: {}", e);
+                            return;
+                        }
+                        Err(_) => {
+                            warn!(
+                                "SOCKS5 handshake timed out after {}s (Slowloris defense)",
+                                timeout_duration.as_secs()
                             );
                             return;
                         }
+                    };
 
-                        let (target_host, target_port) = match tokio::time::timeout(
-                            tokio::time::Duration::from_secs(10),
-                            crate::gateway::chain::read_socks5_request(&mut client),
+                    // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
+                    let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
+                        pool.get_diverse_onion_chain(
+                            config.min_chain_length.max(3),
+                            config.max_chain_length.max(3),
+                            config.enforce_subnet_diversity,
                         )
                         .await
-                        {
-                            Ok(Ok(target)) => target,
-                            Ok(Err(e)) => {
-                                warn!("Relay Mode: SOCKS5 handshake failed: {}", e);
-                                return;
-                            }
-                            Err(_) => {
-                                warn!("Relay Mode: SOCKS5 handshake timed out (Slowloris defense)");
-                                return;
-                            }
-                        };
-
-                        let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
-                        match exit_policy
-                            .resolve_and_connect(&target_host, target_port)
+                    } else {
+                        pool.get_random_chain(config.min_chain_length, config.max_chain_length)
                             .await
-                        {
-                            Ok(mut target_stream) => {
-                                // Bug #13: don't log target_host:target_port — destination is sensitive
-                                info!("Relay Mode: Forwarding traffic to connected destination");
+                    };
+                    if chain.is_empty() {
+                        warn!("[AnonGuard Gateway] No upstream proxies available for chain");
+                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01).await;
+                        return;
+                    }
 
-                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
-                                    .await;
-                                let _ = morph_bidirectional_guarded(
-                                    &mut client,
-                                    &mut target_stream,
-                                    jitter.clone(),
-                                    Some(kill_switch.clone()),
-                                )
-                                .await;
+                    if config.enable_onion_routing {
+                        // Multipath requires a shared exit session and symmetric framing.
+                        // Until that protocol exists, use one byte-preserving circuit.
+                        let result = async {
+                            let entry = chain.first().ok_or("No entry relay")?;
+                            if entry.raw_url.starts_with("reverse://") {
+                                return Err("Reverse onion transport is unsupported".into());
                             }
-                            Err(e) => {
-                                error!(
-                                    "Relay Mode: Target {}:{} blocked or unreachable: {}",
-                                    target_host, target_port, e
-                                );
-                                let rep = if e.kind() == std::io::ErrorKind::PermissionDenied {
-                                    0x02 // Connection not allowed by ruleset (SSRF/private IP blocked)
-                                } else {
-                                    0x04 // Host unreachable
+                            let addr = format!("{}:{}", entry.host, entry.port);
+                            let keys = pool.get_identity_keys(&chain).await;
+                            let stream = match tokio::time::timeout(
+                                std::time::Duration::from_secs(10),
+                                TcpStream::connect(addr),
+                            )
+                            .await
+                            {
+                                Ok(Ok(stream)) => stream,
+                                _ => {
+                                    pool.note_guard_link_failure(keys[0]).await;
+                                    return Err("Entry relay connection failed".into());
+                                }
+                            };
+                            let mut stream =
+                                match crate::onion::link::connect(stream, keys[0]).await {
+                                    Ok(stream) => stream,
+                                    Err(error) => {
+                                        pool.note_guard_link_failure(keys[0]).await;
+                                        return Err(error.into());
+                                    }
                                 };
-                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, rep)
+                            let mut circuit_id: u32 = rand::random();
+                            if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
+                                circuit_id ^= 0x10000000;
+                            }
+                            let keys = pool.get_identity_keys(&chain).await;
+                            let circuit = build_telescopic_circuit(
+                                &mut stream,
+                                circuit_id,
+                                &chain,
+                                &keys,
+                                &target_host,
+                                target_port,
+                            )
+                            .await?;
+                            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stream, circuit))
+                        };
+                        match tokio::time::timeout(std::time::Duration::from_secs(30), result).await
+                        {
+                            Ok(Ok((stream, circuit))) => {
+                                let mut upstream =
+                                    GuardedSocket::new(stream, kill_switch.atomic_handle())
+                                        .begin_verification()
+                                        .mark_verified();
+                                if crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
+                                    .await
+                                    .is_ok()
+                                {
+                                    let _ = stream_onion_circuit(
+                                        &mut client,
+                                        &mut upstream,
+                                        circuit,
+                                        jitter.clone(),
+                                    )
                                     .await;
+                                }
+                            }
+                            _ => {
+                                let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05)
+                                    .await;
+                                if config.strict_killswitch {
+                                    kill_switch.trip("Onion circuit negotiation failure");
+                                }
                             }
                         }
                     } else {
-                        info!("Relay Mode: Processing incoming in-band Onion Cell connection");
-                        let exit_policy = crate::kernel::ExitPolicy::new(config.allow_private_exit);
-                        let _ = handle_onion_relay_connection(
-                            client,
-                            kill_switch.atomic_handle(),
-                            jitter.clone(),
-                            Some(exit_policy),
-                            &relay_identity_key,
-                            config.is_exit,
-                            pool.clone(),
-                        )
-                        .await;
-                    }
-                    return;
-                }
+                        // Plain SOCKS5 multi-proxy chaining (when onion routing is disabled)
+                        let mut current_stream = None;
+                        for (i, node) in chain.iter().enumerate() {
+                            let is_first = i == 0;
+                            let is_last = i == chain.len() - 1;
 
-                // 1. Intercept SOCKS5 from local client to find target
-                let timeout_duration = tokio::time::Duration::from_secs(10);
-                let (target_host, target_port) = match tokio::time::timeout(
-                    timeout_duration,
-                    crate::gateway::chain::read_socks5_request(&mut client),
-                )
-                .await
-                {
-                    Ok(Ok(res)) => res,
-                    Ok(Err(e)) => {
-                        error!("Failed to intercept client SOCKS5 handshake: {}", e);
-                        return;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "SOCKS5 handshake timed out after {}s (Slowloris defense)",
-                            timeout_duration.as_secs()
-                        );
-                        return;
-                    }
-                };
-
-                // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
-                let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
-                    pool.get_diverse_onion_chain(
-                        config.min_chain_length.max(3),
-                        config.max_chain_length.max(3),
-                        config.enforce_subnet_diversity,
-                    )
-                    .await
-                } else {
-                    pool.get_random_chain(config.min_chain_length, config.max_chain_length)
-                        .await
-                };
-                if chain.is_empty() {
-                    warn!("[AnonGuard Gateway] No upstream proxies available for chain");
-                    let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x01).await;
-                    return;
-                }
-
-                if config.enable_onion_routing {
-                    // Multipath requires a shared exit session and symmetric framing.
-                    // Until that protocol exists, use one byte-preserving circuit.
-                    let result = async {
-                        let entry = chain.first().ok_or("No entry relay")?;
-                        if entry.raw_url.starts_with("reverse://") {
-                            return Err("Reverse onion transport is unsupported".into());
-                        }
-                        let addr = format!("{}:{}", entry.host, entry.port);
-                        let mut stream = TcpStream::connect(addr).await?;
-                        let mut circuit_id: u32 = rand::random();
-                        if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
-                            circuit_id ^= 0x10000000;
-                        }
-                        let keys = pool.get_identity_keys(&chain).await;
-                        let circuit = build_telescopic_circuit(
-                            &mut stream,
-                            circuit_id,
-                            &chain,
-                            &keys,
-                            &target_host,
-                            target_port,
-                        )
-                        .await?;
-                        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((stream, circuit))
-                    };
-                    match tokio::time::timeout(std::time::Duration::from_secs(30), result).await {
-                        Ok(Ok((stream, circuit))) => {
-                            let mut upstream =
-                                GuardedSocket::new(stream, kill_switch.atomic_handle())
-                                    .begin_verification()
-                                    .mark_verified();
-                            if crate::gateway::chain::send_socks5_reply(&mut client, 0x00)
-                                .await
-                                .is_ok()
-                            {
-                                let _ = stream_onion_circuit(
-                                    &mut client,
-                                    &mut upstream,
-                                    circuit,
-                                    jitter.clone(),
-                                )
-                                .await;
-                            }
-                        }
-                        _ => {
-                            let _ =
-                                crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
-                            if config.strict_killswitch {
-                                kill_switch.trip("Onion circuit negotiation failure");
-                            }
-                        }
-                    }
-                } else {
-                    // Plain SOCKS5 multi-proxy chaining (when onion routing is disabled)
-                    let mut current_stream = None;
-                    for (i, node) in chain.iter().enumerate() {
-                        let is_first = i == 0;
-                        let is_last = i == chain.len() - 1;
-
-                        if is_first {
-                            if node.raw_url.starts_with("reverse://") {
-                                let node_id = node.host.clone();
-                                let auth_token = node.username.as_deref().unwrap_or("");
-                                let tracker_url = match config.tracker_url.as_ref() {
-                                    Some(u) => u.trim_start_matches("http://").to_string(),
-                                    None => {
-                                        error!("Plain SOCKS5 chain error: tracker_url required for reverse node connection");
-                                        let _ = crate::gateway::chain::send_socks5_reply(
-                                            &mut client,
-                                            0x01,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                };
-                                match TcpStream::connect(&tracker_url).await {
-                                    Ok(mut s) => {
-                                        use tokio::io::{
-                                            AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
-                                        };
-                                        let payload = if !auth_token.is_empty() {
-                                            format!("CONNECT_REVERSE {} {}\n", node_id, auth_token)
-                                        } else {
-                                            format!("CONNECT_REVERSE {}\n", node_id)
-                                        };
-                                        let _ = s.write_all(payload.as_bytes()).await;
-                                        let mut reader = BufReader::new(s);
-                                        let mut resp = String::new();
-                                        if (&mut reader)
-                                            .take(1024)
-                                            .read_line(&mut resp)
-                                            .await
-                                            .is_ok()
-                                            && resp.trim() == "OK"
-                                        {
-                                            current_stream = Some(reader.into_inner());
-                                        } else {
-                                            error!("Tracker rejected CONNECT_REVERSE: {}", resp);
+                            if is_first {
+                                if node.raw_url.starts_with("reverse://") {
+                                    let node_id = node.host.clone();
+                                    let auth_token = node.username.as_deref().unwrap_or("");
+                                    let tracker_url = match config.tracker_url.as_ref() {
+                                        Some(u) => u.trim_start_matches("http://").to_string(),
+                                        None => {
+                                            error!("Plain SOCKS5 chain error: tracker_url required for reverse node connection");
+                                            let _ = crate::gateway::chain::send_socks5_reply(
+                                                &mut client,
+                                                0x01,
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                    };
+                                    match TcpStream::connect(&tracker_url).await {
+                                        Ok(mut s) => {
+                                            use tokio::io::{
+                                                AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
+                                                BufReader,
+                                            };
+                                            let payload = if !auth_token.is_empty() {
+                                                format!(
+                                                    "CONNECT_REVERSE {} {}\n",
+                                                    node_id, auth_token
+                                                )
+                                            } else {
+                                                format!("CONNECT_REVERSE {}\n", node_id)
+                                            };
+                                            let _ = s.write_all(payload.as_bytes()).await;
+                                            let mut reader = BufReader::new(s);
+                                            let mut resp = String::new();
+                                            if (&mut reader)
+                                                .take(1024)
+                                                .read_line(&mut resp)
+                                                .await
+                                                .is_ok()
+                                                && resp.trim() == "OK"
+                                            {
+                                                current_stream = Some(reader.into_inner());
+                                            } else {
+                                                error!(
+                                                    "Tracker rejected CONNECT_REVERSE: {}",
+                                                    resp
+                                                );
+                                                pool.rotate_on_block(&node.raw_url).await;
+                                                let _ = crate::gateway::chain::send_socks5_reply(
+                                                    &mut client,
+                                                    0x04,
+                                                )
+                                                .await;
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to connect to tracker {}: {}",
+                                                tracker_url, e
+                                            );
                                             pool.rotate_on_block(&node.raw_url).await;
                                             let _ = crate::gateway::chain::send_socks5_reply(
                                                 &mut client,
@@ -580,34 +638,66 @@ impl GatewayServer {
                                             return;
                                         }
                                     }
+                                } else {
+                                    let addr = format!("{}:{}", node.host, node.port);
+                                    match TcpStream::connect(&addr).await {
+                                        Ok(s) => current_stream = Some(s),
+                                        Err(e) => {
+                                            error!(
+                                                "Failed to connect to entry node {}: {}",
+                                                addr, e
+                                            );
+                                            pool.rotate_on_block(&node.raw_url).await;
+                                            let _ = crate::gateway::chain::send_socks5_reply(
+                                                &mut client,
+                                                0x04,
+                                            )
+                                            .await;
+                                            if config.strict_killswitch {
+                                                kill_switch.trip("Entry node connection failure");
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let next_host = if is_last {
+                                target_host.clone()
+                            } else {
+                                chain[i + 1].host.clone()
+                            };
+                            let next_port = if is_last {
+                                target_port
+                            } else {
+                                chain[i + 1].port
+                            };
+
+                            if let Some(s) = current_stream.take() {
+                                match crate::gateway::chain::socks5_connect_through(
+                                    s,
+                                    &next_host,
+                                    next_port,
+                                    config.disable_ipv6,
+                                )
+                                .await
+                                {
+                                    Ok(s_new) => {
+                                        current_stream = Some(s_new);
+                                    }
                                     Err(e) => {
                                         error!(
-                                            "Failed to connect to tracker {}: {}",
-                                            tracker_url, e
+                                            "Failed to negotiate tunnel at node {}: {}",
+                                            node.host, e
                                         );
                                         pool.rotate_on_block(&node.raw_url).await;
                                         let _ = crate::gateway::chain::send_socks5_reply(
                                             &mut client,
-                                            0x04,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                }
-                            } else {
-                                let addr = format!("{}:{}", node.host, node.port);
-                                match TcpStream::connect(&addr).await {
-                                    Ok(s) => current_stream = Some(s),
-                                    Err(e) => {
-                                        error!("Failed to connect to entry node {}: {}", addr, e);
-                                        pool.rotate_on_block(&node.raw_url).await;
-                                        let _ = crate::gateway::chain::send_socks5_reply(
-                                            &mut client,
-                                            0x04,
+                                            0x05,
                                         )
                                         .await;
                                         if config.strict_killswitch {
-                                            kill_switch.trip("Entry node connection failure");
+                                            kill_switch.trip("Tunnel negotiation failure");
                                         }
                                         return;
                                     }
@@ -615,65 +705,31 @@ impl GatewayServer {
                             }
                         }
 
-                        let next_host = if is_last {
-                            target_host.clone()
-                        } else {
-                            chain[i + 1].host.clone()
-                        };
-                        let next_port = if is_last {
-                            target_port
-                        } else {
-                            chain[i + 1].port
-                        };
-
-                        if let Some(s) = current_stream.take() {
-                            match crate::gateway::chain::socks5_connect_through(
-                                s,
-                                &next_host,
-                                next_port,
-                                config.disable_ipv6,
+                        if let Some(mut upstream_stream) = current_stream {
+                            info!(hops = chain.len(), "Established proxy tunnel");
+                            let _ =
+                                crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
+                            let _ = crate::morphing::morph_bidirectional_guarded(
+                                &mut client,
+                                &mut upstream_stream,
+                                jitter.clone(),
+                                Some(kill_switch.clone()),
                             )
-                            .await
-                            {
-                                Ok(s_new) => {
-                                    current_stream = Some(s_new);
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to negotiate tunnel at node {}: {}",
-                                        node.host, e
-                                    );
-                                    pool.rotate_on_block(&node.raw_url).await;
-                                    let _ =
-                                        crate::gateway::chain::send_socks5_reply(&mut client, 0x05)
-                                            .await;
-                                    if config.strict_killswitch {
-                                        kill_switch.trip("Tunnel negotiation failure");
-                                    }
-                                    return;
-                                }
-                            }
+                            .await;
+                        } else {
+                            let _ =
+                                crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
                         }
                     }
-
-                    if let Some(mut upstream_stream) = current_stream {
-                        info!(
-                            "Established {}-hop proxy tunnel to {}:{}",
-                            chain.len(),
-                            target_host,
-                            target_port
-                        );
-                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x00).await;
-                        let _ = crate::morphing::morph_bidirectional_guarded(
-                            &mut client,
-                            &mut upstream_stream,
-                            jitter.clone(),
-                            Some(kill_switch.clone()),
-                        )
-                        .await;
-                    } else {
-                        let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x05).await;
-                    }
+                };
+                tokio::select! {
+                    _ = work => {}
+                    _ = async {
+                        loop {
+                            if *cancellation.borrow() { break; }
+                            if cancellation.changed().await.is_err() { break; }
+                        }
+                    } => {}
                 }
             });
         }
@@ -758,10 +814,7 @@ impl GatewayServer {
                                             .await
                                         {
                                             Ok(mut target_stream) => {
-                                                info!(
-                                                    "Reverse Relay: Forwarding traffic to {}:{}",
-                                                    target_host, target_port
-                                                );
+                                                info!("Reverse relay forwarding traffic");
                                                 let _ = morph_bidirectional_guarded(
                                                     &mut stream,
                                                     &mut target_stream,
@@ -771,10 +824,7 @@ impl GatewayServer {
                                                 .await;
                                             }
                                             Err(e) => {
-                                                error!(
-                                                    "Reverse Relay: Target {}:{} blocked or unreachable: {}",
-                                                    target_host, target_port, e
-                                                );
+                                                error!(kind=?e.kind(), "Reverse relay destination blocked or unreachable");
                                             }
                                         }
                                     } else {
@@ -815,161 +865,138 @@ impl GatewayServer {
     }
 }
 
-/// Streams bidirectional client TCP traffic over an authenticated 3-hop OnionCircuit.
-/// Outbound traffic is chunked into <= 999 byte slices, encapsulated into 1024-byte OnionCells,
-/// wrapped in 3 layers of ChaCha20 encryption with a 16-byte HMAC-SHA256 MAC, and sent upstream.
-/// Inbound traffic is read in 1024-byte cells, unwrapped across all 3 layers, verified with HMAC-SHA256,
-/// and forwarded to the local client. Tripping the kill switch immediately aborts active streams.
+/// Writes an authenticated fixed-size cell through the shared circuit sequence state.
+/// The write deadline bounds backpressure from an unresponsive relay.
+async fn write_client_cell(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    circuit: &Arc<tokio::sync::Mutex<OnionCircuit>>,
+    command: CellCommand,
+    payload: &[u8],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::AsyncWriteExt;
+    let wire = {
+        let mut circuit = circuit.lock().await;
+        let mut cell = OnionCell::new(circuit.circuit_id, 0, command, 1, payload)?;
+        circuit.wrap_forward(&mut cell)?
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), writer.write_all(&wire)).await??;
+    Ok(())
+}
+
 pub async fn stream_onion_circuit(
     client: &mut GuardedSocket<ActiveGuarded>,
     upstream: &mut GuardedSocket<ActiveGuarded>,
     circuit: OnionCircuit,
     jitter: Option<JitterEngine>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::Mutex;
-
+    let exit_index = circuit
+        .hop_count()
+        .checked_sub(1)
+        .ok_or("Empty onion circuit")?;
     let circuit = Arc::new(Mutex::new(circuit));
+    let window = Arc::new(Mutex::new(crate::onion::flow::SendWindow::default()));
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<u32>(4);
     let (mut client_read, mut client_write) = tokio::io::split(client);
     let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream);
-
     let circuit_fwd = circuit.clone();
-    let jitter_fwd = jitter.clone();
-
+    let window_fwd = window.clone();
     let fwd = async move {
-        let mut buf = [0u8; PAYLOAD_SIZE];
-        let stream_id = 1u16;
-        let mut padding_engine = crate::onion::padding::AdaptivePaddingEngine::default_config();
-
+        let mut buffer = std::collections::VecDeque::new();
+        let mut input = [0u8; 8192];
+        let mut upload_open = true;
+        let mut end_sent = false;
+        let mut pending_ack = None;
+        let mut prefer_data = false;
+        // A persistent, shared profile. Application reads cannot restart its timer.
+        let mut clock = tokio::time::interval(std::time::Duration::from_millis(20));
+        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let mut is_dummy = false;
-            let mut upload_ended = false;
-            let delay = padding_engine.next_event_delay();
-            let n = tokio::select! {
-                res = client_read.read(&mut buf) => match res {
-                    Ok(0) => { upload_ended = true; 0 },
-                    Ok(n) => {
-                        padding_engine.record_real_packet();
-                        n
-                    },
-                    Err(_) => break,
-                },
-                _ = tokio::time::sleep(delay) => {
-                    if padding_engine.should_send_padding() {
-                        is_dummy = true;
-                        0
-                    } else {
+            tokio::select! {
+                biased;
+                ack = ack_rx.recv() => {
+                    let Some(ack) = ack else { return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(()); };
+                    pending_ack = Some(ack);
+                }
+                _ = clock.tick() => {
+                    prefer_data = !prefer_data;
+                    let data_ready = !buffer.is_empty() && window_fwd.lock().await.available();
+                    if pending_ack.is_some() && (!data_ready || !prefer_data) {
+                        let ack = pending_ack.take().ok_or("Missing pending acknowledgement")?;
+                        write_client_cell(&mut upstream_write, &circuit_fwd, CellCommand::DataAck, &ack.to_be_bytes()).await?;
                         continue;
                     }
-                }
-            };
-
-            let mut cell = {
-                let guard = circuit_fwd.lock().await;
-                let seq = 0; // wrap_forward owns the authenticated sequence counter.
-
-                let cmd = if upload_ended {
-                    CellCommand::End
-                } else if is_dummy {
-                    CellCommand::Dummy
-                } else {
-                    CellCommand::Data
-                };
-                match OnionCell::new(guard.circuit_id, seq, cmd, stream_id, &buf[..n]) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        error!("OnionCell construction failed: {}", e);
-                        break;
+                    if !upload_open && buffer.is_empty() && !end_sent {
+                        write_client_cell(&mut upstream_write, &circuit_fwd, CellCommand::End, &[]).await?;
+                        end_sent = true;
+                    } else if !buffer.is_empty() && window_fwd.lock().await.available() {
+                        let length = buffer.len().min(PAYLOAD_SIZE);
+                        let bytes: Vec<u8> = buffer.drain(..length).collect();
+                        window_fwd.lock().await.sent()?;
+                        write_client_cell(&mut upstream_write, &circuit_fwd, CellCommand::Data, &bytes).await?;
+                    } else {
+                        write_client_cell(&mut upstream_write, &circuit_fwd, CellCommand::Dummy, &[]).await?;
                     }
                 }
-            };
-
-            let wire_buffer_res = {
-                let mut guard = circuit_fwd.lock().await;
-                guard.wrap_forward(&mut cell)
-            };
-
-            let wire_buffer = match wire_buffer_res {
-                Ok(buf) => buf,
-                Err(e) => {
-                    tracing::warn!("Failed to wrap forward cell: {:?}", e);
-                    break;
+                read = client_read.read(&mut input), if upload_open && buffer.len() <= 65536 - input.len() => {
+                    let n = read?;
+                    if n == 0 { upload_open = false; } else { buffer.extend(&input[..n]); }
                 }
-            };
-
-            if let Some(ref j) = jitter_fwd {
-                j.apply_delay().await;
-            }
-
-            if tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                upstream_write.write_all(&wire_buffer),
-            )
-            .await
-            .map_or(true, |r| r.is_err())
-            {
-                break;
-            }
-            if upload_ended {
-                break;
             }
         }
-        // END is authenticated; retain the transport for the response direction.
     };
-
-    let circuit_bwd = circuit.clone();
     let bwd = async move {
-        let mut wire_buffer = [0u8; ONION_CELL_SIZE];
+        let mut raw = [0u8; ONION_CELL_SIZE];
+        let mut received = 0u32;
         loop {
-            if upstream_read.read_exact(&mut wire_buffer).await.is_err() {
-                break;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                upstream_read.read_exact(&mut raw),
+            )
+            .await??;
+            let (hop, cell) = circuit.lock().await.unwrap_backward(&mut raw)?;
+            if hop != exit_index {
+                return Err("Stream response originated before the selected exit".into());
             }
-
-            let cell_res = {
-                let mut guard = circuit_bwd.lock().await;
-                guard.unwrap_backward(&mut wire_buffer)
-            };
-
-            match cell_res {
-                Ok((_hop, cell)) => match cell.command {
-                    CellCommand::Data => {
-                        let len = (cell.length as usize).min(cell.payload.len());
-                        if client_write.write_all(&cell.payload[..len]).await.is_err() {
-                            break;
-                        }
-                    }
-                    CellCommand::Destroy => break,
-                    _ => {}
-                },
-                Err(e) => {
-                    warn!("Failed to unwrap backward onion cell: {}", e);
-                    break;
+            if cell.stream_id != 1 && cell.command != CellCommand::Destroy {
+                return Err("Wrong onion stream identifier".into());
+            }
+            match cell.command {
+                CellCommand::Data => {
+                    let length = cell.length as usize;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        client_write.write_all(&cell.payload[..length]),
+                    )
+                    .await??;
+                    received = received
+                        .checked_add(1)
+                        .ok_or("Receive data counter exhausted")?;
+                    ack_tx
+                        .send(received)
+                        .await
+                        .map_err(|_| "Forward control channel closed")?;
                 }
+                CellCommand::DataAck => window
+                    .lock()
+                    .await
+                    .acknowledge(&cell.payload[..cell.length as usize])?,
+                CellCommand::Destroy => {
+                    client_write.shutdown().await?;
+                    return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+                }
+                CellCommand::Dummy => {}
+                _ => return Err("Unexpected backward onion command".into()),
             }
         }
-        let _ = client_write.shutdown().await;
     };
-
-    tokio::pin!(fwd);
-    tokio::pin!(bwd);
-
-    let mut fwd_done = false;
-
-    loop {
-        tokio::select! {
-            _ = &mut bwd => {
-                // Upstream connection ended or remote sent Destroy cell
-                break;
-            }
-            _ = &mut fwd, if !fwd_done => {
-                // Client upload finished; keep bwd running until upstream closes
-                fwd_done = true;
-            }
-        }
+    // The interval profile replaces per-read jitter in this stream path.
+    let _ = jitter;
+    tokio::select! {
+        result = fwd => result, result = bwd => result,
+        _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => Err("Circuit lifetime expired; reconnect without replaying application data".into()),
     }
-
-    Ok(())
 }
 
 /// Negotiates an authentic multi-hop telescopic onion circuit over the wire.
@@ -981,7 +1008,7 @@ pub async fn stream_onion_circuit(
 /// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
 /// the corresponding private key via Ed25519 signature (MITM protection).
 pub async fn build_telescopic_circuit(
-    stream: &mut TcpStream,
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
     circuit_id: u32,
     chain: &[crate::mesh::node::ProxyNode],
     pinned_identity_keys: &[[u8; 32]],
@@ -1040,7 +1067,7 @@ pub async fn build_telescopic_circuit(
         let client_pub_bytes = *client_pub.as_bytes();
         let (client_mlkem_dk, client_mlkem_ek) = MlKem768::generate(&mut OsRng);
 
-        let extend_payload = encode_extend_payload(
+        let mut extend_payload = encode_extend_payload(
             &chain[hop_idx].host,
             chain[hop_idx].port,
             &client_pub,
@@ -1048,6 +1075,10 @@ pub async fn build_telescopic_circuit(
             hop_idx,
         )
         .map_err(|e| format!("Failed to encode EXTEND payload: {:?}", e))?;
+        let next_pin = pinned_identity_keys
+            .get(hop_idx)
+            .ok_or("Missing next-hop identity pin")?;
+        extend_payload.extend_from_slice(next_pin);
         let mut extend_cell = OnionCell::new(
             circuit_id,
             hop_idx as u32,
@@ -1106,11 +1137,14 @@ pub async fn build_telescopic_circuit(
 
     let mut return_wire = [0u8; ONION_CELL_SIZE];
     stream.read_exact(&mut return_wire).await?;
-    let (_hop, resp_cell) = circuit
+    let (response_hop, resp_cell) = circuit
         .unwrap_backward(&mut return_wire)
         .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {:?}", e))?;
 
-    if resp_cell.command != CellCommand::Relay {
+    if response_hop != chain.len() - 1
+        || resp_cell.command != CellCommand::Relay
+        || &resp_cell.payload[..resp_cell.length as usize] != b"CONNECTED"
+    {
         return Err(format!(
             "Expected RELAY response from exit hop, got {:?}",
             resp_cell.command
@@ -1197,7 +1231,32 @@ fn spawn_raw_downstream_reader(
 }
 
 pub async fn handle_onion_relay_connection(
-    mut client: GuardedSocket<ActiveGuarded>,
+    client: GuardedSocket<ActiveGuarded>,
+    kill_switch_arc: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    jitter: Option<JitterEngine>,
+    exit_policy: Option<crate::kernel::ExitPolicy>,
+    relay_identity_key: &Ed25519SigningKey,
+    is_exit_allowed: bool,
+    pool: crate::mesh::pool::ProxyPool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3600),
+        handle_relay_inner(
+            client,
+            kill_switch_arc,
+            jitter,
+            exit_policy,
+            relay_identity_key,
+            is_exit_allowed,
+            pool,
+        ),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Circuit lifetime expired"))?
+}
+
+async fn handle_relay_inner(
+    client: GuardedSocket<ActiveGuarded>,
     kill_switch_arc: std::sync::Arc<std::sync::atomic::AtomicBool>,
     jitter: Option<JitterEngine>,
     exit_policy: Option<crate::kernel::ExitPolicy>,
@@ -1207,6 +1266,11 @@ pub async fn handle_onion_relay_connection(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let acceptor = crate::onion::link::acceptor(relay_identity_key)?;
+    let tls = crate::onion::link::accept(&acceptor, client).await?;
+    let mut client = GuardedSocket::new(tls, kill_switch_arc.clone())
+        .begin_verification()
+        .mark_verified();
     let policy = exit_policy.unwrap_or_default();
 
     // 1. Read initial CREATE cell from client
@@ -1245,6 +1309,16 @@ pub async fn handle_onion_relay_connection(
 
     let mut is_currently_exit_hop = false;
     let mut upload_closed = false;
+    let mut downstream_id = 0u32;
+    let mut exit_window = crate::onion::flow::SendWindow::default();
+    let mut received_data = 0u32;
+    let mut destination_eof = false;
+    let mut pending_exit_data: Option<Vec<u8>> = None;
+    let mut pending_exit_ack = None;
+    let mut prefer_exit_data = false;
+    let mut last_progress = tokio::time::Instant::now();
+    let mut exit_clock = tokio::time::interval(std::time::Duration::from_millis(20));
+    exit_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut ds_write: Option<tokio::io::WriteHalf<GuardedSocket<ActiveGuarded>>> = None;
     let mut ds_cell_rx: Option<tokio::sync::mpsc::Receiver<[u8; ONION_CELL_SIZE]>> = None;
     let mut ds_data_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
@@ -1252,6 +1326,22 @@ pub async fn handle_onion_relay_connection(
     loop {
         if let Some(ref mut ds_w) = ds_write {
             if is_currently_exit_hop {
+                if destination_eof
+                    && exit_window.drained()
+                    && pending_exit_data.is_none()
+                    && pending_exit_ack.is_none()
+                {
+                    let destroy =
+                        OnionCell::new(relay_hop.circuit_id, 0, CellCommand::Destroy, 1, &[])?;
+                    let mut wire = destroy.serialize();
+                    relay_hop.wrap_backward_originate(&mut wire)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client_write.write_all(&wire),
+                    )
+                    .await??;
+                    break;
+                }
                 // Exit relay: downstream is the destination target server (raw TCP).
                 let Some(ds_rx) = ds_data_rx.as_mut() else {
                     break;
@@ -1262,10 +1352,15 @@ pub async fn handle_onion_relay_connection(
                         match relay_hop.peel_forward(&mut client_buf) {
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Data, len }) => {
                                 if upload_closed { break; }
+                                last_progress = tokio::time::Instant::now();
                                 let payload = &client_buf[45..45+len];
-                                if ds_w.write_all(payload).await.is_err() {
-                                    break;
-                                }
+                                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(30), ds_w.write_all(payload)).await, Ok(Ok(()))) { break; }
+                                received_data = received_data.checked_add(1).ok_or("Receive data counter exhausted")?;
+                                pending_exit_ack = Some(received_data);
+                            }
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::DataAck, len }) => {
+                                exit_window.acknowledge(&client_buf[45..45+len])?;
+                                last_progress = tokio::time::Instant::now();
                             }
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::End, .. }) => {
                                 if upload_closed { break; }
@@ -1273,53 +1368,31 @@ pub async fn handle_onion_relay_connection(
                                 if ds_w.shutdown().await.is_err() { break; }
                             }
                             Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Destroy, .. }) => break,
-                            Err(_) => break,
-                            _ => {}
+                            Ok(PeelOutcome::AddressedToThisRelay { command: CellCommand::Dummy, .. }) => {}
+                            _ => break,
                         }
                     }
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
                         error!("Idle circuit timeout (exit mode)");
                         break;
                     }
-                    data = ds_rx.recv() => {
-                        // `None` covers both a clean EOF (`Ok(0)`) and a read error on the
-                        // downstream socket — the reader task collapses both into "stop
-                        // forwarding", matching the original behaviour, which reacted to
-                        // Ok(0)/Err(_) identically by tearing the circuit down.
-                        let Some(n_bytes) = data else {
-                            if let Ok(destroy_cell) = OnionCell::new(
-                                relay_hop.circuit_id,
-                                0,
-                                CellCommand::Destroy,
-                                1,
-                                &[],
-                            ) {
-                                let mut wire = destroy_cell.serialize();
-                                // Bug #10: break on crypto error rather than silently succeeding
-                                if relay_hop.wrap_backward_originate(&mut wire).is_ok() {
-                                    let _ = client_write.write_all(&wire).await;
-                                }
-                            }
-                            break;
-                        };
-                        let Ok(return_cell) = OnionCell::new(
-                            relay_hop.circuit_id,
-                            0,
-                            CellCommand::Data,
-                            1,
-                            &n_bytes,
-                        ) else {
-                            break;
-                        };
-                        let mut wire = return_cell.serialize();
-                        // Bug #10: break on crypto error rather than silently discarding
-                        if relay_hop.wrap_backward_originate(&mut wire).is_err() { break; }
-                        if let Some(ref j) = jitter {
-                            j.apply_delay().await;
-                        }
-                        if client_write.write_all(&wire).await.is_err() {
-                            break;
-                        }
+                    data = ds_rx.recv(), if pending_exit_data.is_none() && !destination_eof => {
+                        match data { Some(bytes) => { last_progress = tokio::time::Instant::now(); pending_exit_data = Some(bytes); }, None => destination_eof = true }
+                    }
+                    _ = exit_clock.tick() => {
+                        if last_progress.elapsed() >= std::time::Duration::from_secs(60) { return Err("Exit stream idle deadline exceeded".into()); }
+                        prefer_exit_data = !prefer_exit_data;
+                        let data_ready = pending_exit_data.is_some() && exit_window.available();
+                        let (command, bytes) = if pending_exit_ack.is_some() && (!data_ready || !prefer_exit_data) {
+                            (CellCommand::DataAck, pending_exit_ack.take().ok_or("Missing exit acknowledgement")?.to_be_bytes().to_vec())
+                        } else if data_ready {
+                            exit_window.sent()?;
+                            (CellCommand::Data, pending_exit_data.take().ok_or("Missing exit data")?)
+                        } else { (CellCommand::Dummy, Vec::new()) };
+                        let cell = OnionCell::new(relay_hop.circuit_id, 0, command, 1, &bytes)?;
+                        let mut wire = cell.serialize();
+                        relay_hop.wrap_backward_originate(&mut wire)?;
+                        tokio::time::timeout(std::time::Duration::from_secs(30), client_write.write_all(&wire)).await??;
                     }
                 }
             } else {
@@ -1339,11 +1412,12 @@ pub async fn handle_onion_relay_connection(
                                 if let Some(ref j) = jitter {
                                     j.apply_delay().await;
                                 }
-                                if ds_w.write_all(&client_buf).await.is_err() {
+                                client_buf[..4].copy_from_slice(&downstream_id.to_be_bytes());
+                                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(30), ds_w.write_all(&client_buf)).await, Ok(Ok(()))) {
                                     break;
                                 }
                             }
-                            _ => {}
+                            _ => break,
                         }
                     }
                     _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
@@ -1352,12 +1426,14 @@ pub async fn handle_onion_relay_connection(
                     }
                     cell = ds_rx.recv() => {
                         let Some(mut ds_buf) = cell else { break; };
-                        // Bug #10: break on crypto error rather than silently forwarding
+                        if u32::from_be_bytes(ds_buf[..4].try_into().map_err(|_| "Bad circuit id")?) != downstream_id { break; }
+                        ds_buf[..4].copy_from_slice(&relay_hop.circuit_id.to_be_bytes());
+                        // Reject malformed backward cells instead of forwarding them.
                         if relay_hop.wrap_backward_relay(&mut ds_buf).is_err() { break; }
                         if let Some(ref j) = jitter {
                             j.apply_delay().await;
                         }
-                        if client_write.write_all(&ds_buf).await.is_err() {
+                        if !matches!(tokio::time::timeout(std::time::Duration::from_secs(30), client_write.write_all(&ds_buf)).await, Ok(Ok(()))) {
                             break;
                         }
                     }
@@ -1378,7 +1454,7 @@ pub async fn handle_onion_relay_connection(
                     len,
                 }) => {
                     let payload = &client_buf[45..45 + len];
-                    let extend_ok = async {
+                    let extend_ok = tokio::time::timeout(std::time::Duration::from_secs(20), async {
                             let (next_h, next_p, next_pub, next_mlkem_pub, hop_index) = decode_extend_payload(payload)
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
 
@@ -1394,21 +1470,41 @@ pub async fn handle_onion_relay_connection(
                                 return Err("EXTEND rejected: target is not a known mesh node and relay is not an exit node".to_string());
                             }
 
-                            let mut next_s = policy.resolve_and_connect(&next_h, next_p).await
-                                .map_err(|e| format!("next hop {next_h}:{next_p} unreachable: {e}"))?;
-                        let c_cell = build_create_cell(relay_hop.circuit_id, &next_pub, &next_mlkem_pub, hop_index)
-                            .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
+                            let pin_offset = 1 + 1 + next_h.len() + 2 + 32 + 1184;
+                            if payload.len() != pin_offset + 32 {
+                                return Err("EXTEND requires a next-hop identity pin".into());
+                            }
+                            let next_pin: [u8; 32] = payload[pin_offset..].try_into().map_err(|_| "Bad relay pin")?;
+                            let next_s = policy.resolve_and_connect(&next_h, next_p).await
+                                .map_err(|_| "Next-hop connection failed".to_string())?;
+                            let mut next_s = crate::onion::link::connect(next_s, next_pin).await
+                                .map_err(|_| "Next-hop TLS authentication failed".to_string())?;
+                            let mut next_id: u32 = rand::random();
+                            while next_id == 0 || next_id == relay_hop.circuit_id { next_id = rand::random(); }
+                            downstream_id = next_id;
+                            let mut c_cell = build_create_cell(relay_hop.context_id, &next_pub, &next_mlkem_pub, hop_index)
+                                .map_err(|e| format!("failed to build CREATE cell: {e}"))?;
+                            c_cell.circuit_id = next_id;
                         next_s.write_all(&c_cell.serialize()).await
                             .map_err(|e| format!("failed to write CREATE to next hop: {e}"))?;
                         let mut resp = [0u8; ONION_CELL_SIZE];
                         next_s.read_exact(&mut resp).await
                             .map_err(|e| format!("no CREATED response from next hop: {e}"))?;
                         Ok::<_, String>((next_s, resp))
-                    }.await;
+                    }).await.unwrap_or_else(|_| Err("Next-hop setup deadline exceeded".into()));
 
                     match extend_ok {
                         Ok((next_s, mut resp)) => {
-                            let _ = relay_hop.wrap_backward_originate(&mut resp);
+                            if u32::from_be_bytes(
+                                resp[..4].try_into().map_err(|_| "Bad circuit id")?,
+                            ) != downstream_id
+                            {
+                                break;
+                            }
+                            resp[..4].copy_from_slice(&relay_hop.circuit_id.to_be_bytes());
+                            if relay_hop.wrap_backward_originate(&mut resp).is_err() {
+                                break;
+                            }
                             if client_write.write_all(&resp).await.is_err() {
                                 break;
                             }
@@ -1494,6 +1590,7 @@ pub async fn handle_onion_relay_connection(
         }
     }
 
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client_write.shutdown()).await;
     Ok(())
 }
 

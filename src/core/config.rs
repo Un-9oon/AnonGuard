@@ -3,6 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorityEndpoint {
+    pub identity: String,
+    pub address: String,
+    pub public_key: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GuardConfig {
     /// Strict kill-switch: if true, immediately drop all traffic if proxy fails
     pub strict_killswitch: bool,
@@ -10,7 +17,7 @@ pub struct GuardConfig {
     pub enforce_remote_dns: bool,
     /// Disable IPv6 socket allocation
     pub disable_ipv6: bool,
-    /// Enable Poisson timing jitter to defeat flow correlation
+    /// Enable Poisson timing jitter (experimental traffic-analysis protection)
     pub enable_jitter: bool,
     /// Jitter rate parameter (lambda for exponential distribution)
     pub jitter_lambda: f64,
@@ -45,7 +52,7 @@ pub struct GuardConfig {
     pub is_exit: bool,
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
-    /// Enable 3-hop layered onion encryption (Sphinx/Tor-style cell peeling)
+    /// Enable 3-hop layered onion encryption (authenticated cell peeling)
     pub enable_onion_routing: bool,
     /// Enforce BGP /16 subnet diversity across circuit hops (Sybil resistance)
     pub enforce_subnet_diversity: bool,
@@ -54,6 +61,9 @@ pub struct GuardConfig {
     pub authority_id: String,
     /// List of trusted Directory Authority endpoints for consensus verification
     pub directory_authorities: Vec<String>,
+    /// Bound identity/address/pin records used by relay registration.
+    #[serde(default)]
+    pub authority_endpoints: Vec<AuthorityEndpoint>,
     /// [B3] Pinned Ed25519 identity keys (raw 32-byte arrays, hex-encoded) for each
     /// Directory Authority listed in `directory_authorities`. When non-empty, the relay
     /// registration handshake enforces STS-style key pinning against the first key in
@@ -114,6 +124,7 @@ impl Default for GuardConfig {
             authority_mode: false,
             authority_id: "authority-default".to_string(),
             directory_authorities: Vec::new(),
+            authority_endpoints: Vec::new(),
             // [B3] Empty by default — operators MUST populate this from their authority's
             // published Ed25519 identity key. An empty list triggers a warning at startup.
             // See docs/reports/hardening_findings.md for bootstrap threat model.

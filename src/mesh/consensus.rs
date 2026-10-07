@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+pub const MAX_DIRECTORY_RELAYS: usize = 512;
+
 /// An individual relay descriptor submitted by volunteer nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayDescriptor {
@@ -50,8 +52,10 @@ impl RelayDescriptor {
     /// Computes canonical bytes to sign for this descriptor.
     pub fn compute_signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"AnonGuard-RelayDescriptor-v1");
+        bytes.extend_from_slice(b"AnonGuard-RelayDescriptor-v3");
+        bytes.extend_from_slice(&(self.node_id.len() as u32).to_be_bytes());
         bytes.extend_from_slice(self.node_id.as_bytes());
+        bytes.extend_from_slice(&(self.host.len() as u32).to_be_bytes());
         bytes.extend_from_slice(self.host.as_bytes());
         bytes.extend_from_slice(&self.port.to_be_bytes());
         bytes.extend_from_slice(&self.onion_key_x25519);
@@ -72,7 +76,13 @@ impl RelayDescriptor {
 
     /// Verifies the cryptographic Ed25519 signature binding this descriptor to its identity key.
     pub fn verify_identity(&self) -> bool {
-        if self.signature.is_empty() {
+        if self.node_id.is_empty()
+            || self.node_id.len() > 128
+            || self.host.is_empty()
+            || self.host.len() > 253
+            || self.port == 0
+            || self.signature.len() != 64
+        {
             return false;
         }
         let Ok(verifying_key) = VerifyingKey::from_bytes(&self.identity_key_ed25519) else {
@@ -178,18 +188,19 @@ impl ConsensusDocument {
         current_time: u64,
     ) -> bool {
         // Reject threshold 0: an unsigned/empty-signature consensus must never pass
-        if quorum_threshold == 0 {
+        if quorum_threshold == 0 || self.valid_after >= self.valid_until {
             return false;
         }
 
         // 1. Check validity window
-        if current_time < self.valid_after || current_time > self.valid_until {
+        if current_time < self.valid_after || current_time >= self.valid_until {
             return false;
         }
 
         let digest = self.compute_digest();
         let mut valid_auth_count = 0;
         let mut verified_authorities = Vec::new();
+        let mut verified_keys = std::collections::HashSet::new();
 
         for sig in &self.signatures {
             if verified_authorities.contains(&sig.authority_id) {
@@ -199,7 +210,9 @@ impl ConsensusDocument {
             if let Some(pubkey) = trusted_authorities.get(&sig.authority_id) {
                 if let Ok(sig_bytes) = sig.signature_bytes.as_slice().try_into() {
                     let ed_sig = Signature::from_bytes(sig_bytes);
-                    if pubkey.verify_strict(&digest, &ed_sig).is_ok() {
+                    if pubkey.verify_strict(&digest, &ed_sig).is_ok()
+                        && verified_keys.insert(pubkey.to_bytes())
+                    {
                         valid_auth_count += 1;
                         verified_authorities.push(sig.authority_id.clone());
                     }
@@ -258,6 +271,29 @@ impl ConsensusDocument {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn relay_descriptor_field_boundaries_are_signed() {
+        let key = SigningKey::generate(&mut OsRng);
+        let mut relay = RelayDescriptor::new(
+            "relay-a".into(),
+            "bc.example".into(),
+            9001,
+            [0; 32],
+            [0; 32],
+            false,
+            0,
+            1000,
+        );
+        relay.sign_with_key(&key);
+        assert!(relay.verify_identity());
+        relay.node_id.push('b');
+        relay.host.remove(0);
+        assert!(!relay.verify_identity());
+        relay.host = "x".repeat(254);
+        relay.sign_with_key(&key);
+        assert!(!relay.verify_identity());
+    }
 
     #[test]
     fn test_multi_authority_consensus_and_quorum() {
