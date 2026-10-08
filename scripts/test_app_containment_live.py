@@ -73,6 +73,14 @@ while True:
                             important = [line for line in lines if any(word in line for word in
                                          ("uid_map", "gid_map", "EPERM", "EACCES", "DUMPABLE", "NO_NEW_PRIVS"))]
                             print("\n".join(important[:12] + important[-30:]), flush=True)
+                    kernel = subprocess.run(["dmesg", "--color=never"], capture_output=True, text=True)
+                    print("\n".join(line for line in kernel.stdout.splitlines()
+                                    if "apparmor" in line.lower())[-12000:], flush=True)
+                    for setting in ("apparmor_restrict_unprivileged_userns",
+                                    "apparmor_restrict_unprivileged_unconfined"):
+                        path = Path("/proc/sys/kernel") / setting
+                        if path.exists():
+                            print(setting, path.read_text().strip(), flush=True)
                 assert result == 0, f"Sandbox probe failed, exit={result}"
             server.terminate()
             server.wait(timeout=5)
