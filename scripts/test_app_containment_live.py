@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import select
 import subprocess
 import tempfile
+from unittest.mock import patch
 
 if os.geteuid() != 0 or os.environ.get("ANONGUARD_DISPOSABLE_APP_TEST") != "1":
     raise SystemExit("Requires root and ANONGUARD_DISPOSABLE_APP_TEST=1 on disposable CI")
@@ -42,11 +44,24 @@ while True:
 """
             server = subprocess.Popen([ip, "netns", "exec", namespace, "/usr/bin/python3", "-c", code],
                                       stdout=subprocess.PIPE, text=True)
+            assert select.select([server.stdout], [], [], 10)[0], "Proxy fixture readiness timed out"
             assert server.stdout.readline().strip() == "ready"
             command = ["/app/probe", str(sentinel), "open"]
             for _ in range(2):
                 # Second launch verifies atomic rule replacement/repeated use.
                 result = launcher.run(namespace, root, 9050, command, 65534, 65534)
+                if result != 0:
+                    # Diagnose a failed trusted fixture only; retain the original
+                    # failure and never enable diagnostic output for real apps.
+                    original_popen = subprocess.Popen
+                    with tempfile.TemporaryFile() as diagnostics:
+                        def diagnostic_popen(*args, **kwargs):
+                            kwargs["stderr"] = diagnostics
+                            return original_popen(*args, **kwargs)
+                        with patch.object(launcher.subprocess, "Popen", side_effect=diagnostic_popen):
+                            launcher.run(namespace, root, 9050, command, 65534, 65534)
+                        diagnostics.seek(0)
+                        print(diagnostics.read(8192).decode(errors="replace"), flush=True)
                 assert result == 0, f"Sandbox probe failed, exit={result}"
             server.terminate()
             server.wait(timeout=5)

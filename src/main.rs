@@ -19,6 +19,12 @@ use anonguard::mesh::{ProxyPool, DEFAULT_POW_DIFFICULTY};
     about = "AnonGuard Standalone Anonymity Gateway"
 )]
 struct Args {
+    /// Create or validate a private identity key, print its public pin, and exit without networking
+    #[arg(long, requires = "identity_key_path", conflicts_with_all = [
+        "status", "relay", "authority", "tracker", "reverse_relay", "onion",
+        "pool", "proxy", "authorities", "authority_keys", "metrics_addr", "strict_fail_closed"
+    ])]
+    initialize_identity: bool,
     /// Local address to bind the gateway listener
     #[arg(short, long, default_value = "127.0.0.1:9050")]
     listen: String,
@@ -206,6 +212,23 @@ fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::Signing
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
+
+    if args.initialize_identity {
+        #[cfg(target_os = "linux")]
+        if args.namespace_proxy || args.enable_firewall_killswitch {
+            return Err("Identity initialization cannot be combined with namespace startup".into());
+        }
+        let path = args
+            .identity_key_path
+            .as_ref()
+            .ok_or("Identity path required")?;
+        let key = anonguard::core::storage::load_or_create_signing_key(path)?;
+        println!(
+            "{}",
+            serde_json::json!({ "public_key_ed25519": hex::encode(key.verifying_key().to_bytes()) })
+        );
+        return Ok(());
+    }
 
     #[cfg(target_os = "linux")]
     if args.namespace_proxy {
@@ -565,17 +588,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             )?;
             let pool_clone = pool.clone();
             tokio::spawn(async move {
+                let mut retry_seconds = 1;
                 loop {
-                    match client.refresh(&pool_clone).await {
-                        Ok(loaded) => tracing::info!(
-                            loaded,
-                            "[AnonGuard Consensus] Loaded certified directory snapshot"
-                        ),
-                        Err(error) => {
-                            tracing::warn!(%error, "[AnonGuard Consensus] Directory refresh rejected; retained state remains subject to expiry")
+                    let delay = match client.refresh(&pool_clone).await {
+                        Ok(loaded) => {
+                            retry_seconds = 1;
+                            tracing::info!(
+                                loaded,
+                                "[AnonGuard Consensus] Loaded certified directory snapshot"
+                            );
+                            std::time::Duration::from_secs(60)
                         }
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        Err(error) => {
+                            tracing::warn!(%error, "[AnonGuard Consensus] Directory refresh rejected; retained state remains subject to expiry");
+                            let delay = std::time::Duration::from_secs(retry_seconds)
+                                + std::time::Duration::from_millis(rand::random::<u64>() % 251);
+                            retry_seconds = (retry_seconds * 2).min(30);
+                            delay
+                        }
+                    };
+                    tokio::time::sleep(delay).await;
                 }
             });
         }

@@ -245,16 +245,21 @@ async fn exercise() {
     drop(reserved[7].take());
     testnet.start("gateway", addresses[7], &authority_args, &["--onion"]);
     ready(addresses[7]).await;
-    let gateway_state = testnet.directory.join("gateway/guards.consensus.json");
-    let loaded = tokio::time::timeout(Duration::from_secs(10), async {
-        while !gateway_state.exists() {
+    // Every circuit participant must admit a directory, not just the gateway.
+    // Relays can reject an early refresh while registrations are still arriving.
+    let states: Vec<_> = ["gateway", "relay-0", "relay-1", "relay-2"]
+        .iter()
+        .map(|role| testnet.directory.join(role).join("guards.consensus.json"))
+        .collect();
+    let loaded = tokio::time::timeout(Duration::from_secs(30), async {
+        while states.iter().any(|state| !state.exists()) {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await;
     assert!(
         loaded.is_ok(),
-        "Gateway did not admit the directory:\n{}",
+        "Circuit participants did not admit the directory:\n{}",
         testnet.diagnostics()
     );
 

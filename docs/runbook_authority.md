@@ -1,32 +1,43 @@
-# Authority Bootstrapping Runbook
+# Authenticated v3 authority bootstrap
 
-The AnonGuard network consensus relies on directory authorities. To stand up a new production network or bootstrap 3 independent directory authorities, follow this runbook.
+This is an experimental deployment procedure. The daemon does not implement `--init-authority`, `--key-path`, `--role tracker`, `--bind`, HTTP tracker APIs, or a `network_config.json` loader. Use the actual pinned v3 CLI below.
 
-## 1. Provision Infrastructure
-- Provision three geographically diverse hosts (e.g., US, EU, AS).
-- Ensure ports `9001` (Relay) and `8080` (Tracker HTTP) are open.
+## Provisioning and trust
 
-## 2. Generate Authority Keys
-On each node, initialize the long-term Ed25519 identity key:
-```bash
-anonguard-daemon --init-authority --key-path /etc/anonguard/auth.key
-```
-This generates a private key file. **Back this up securely offline**. Extract the public key.
+Provision independent operators and reachable authority endpoints. Four authorities with threshold three tolerate one unavailable authority under the configured greater-than-two-thirds rule; three authorities require all three signatures. Independence and endpoint reachability must be demonstrated by operators, not assumed from a host count. Authorities use authenticated TLS over TCP, not HTTP. Open only the explicitly configured authority/relay ports; keep client SOCKS and metrics listeners private.
 
-## 3. Configure the Quorum
-- Gather the 3 public keys.
-- Create a network configuration file (`network_config.json`) listing all 3 authorities' IPs and Ed25519 public keys.
-- Distribute this file to all relays and clients that wish to join this network.
+## Prepare identity without opening a listener
 
-## 4. Start the Authority Nodes
-On each node, start the authority tracker:
-```bash
-anonguard-daemon --role tracker --bind 0.0.0.0:8080 --key-path /etc/anonguard/auth.key
+Under the dedicated operator account, create private state storage and initialize each distinct authority identity:
+
+```sh
+install -d -m 700 /var/lib/anonguard-authority
+anonguard-daemon --initialize-identity \
+  --identity-key-path /var/lib/anonguard-authority/identity.key
 ```
 
-## 5. Key Rotation (Compromise Scenario)
-If an authority key is compromised:
-1. Generate a new keypair offline.
-2. Publish an out-of-band update to the `network_config.json` signaling the key transition to all clients and relays.
-3. Restart the compromised authority with the new key.
-4. Clients will refuse consensus documents signed by the old key immediately upon receiving the configuration update.
+The command prints JSON containing `public_key_ed25519` and exits without network startup. Repeating it validates and preserves the existing key. Corrupt or insecure key files are refused. Authenticate the public key and endpoint out of band to every operator/client. Never distribute the private 32-byte seed. Protect backups and retain the associated vote journal after voting begins.
+
+## Configure and start
+
+Define `AUTH_ENDPOINTS` as comma-separated `AUTH_ID@NUMERIC_IP:PORT` entries and `AUTH_KEYS` as matching `AUTH_ID:64_HEX_PUBLIC_KEY` entries, with four distinct identities/keys. Every participant must use the same authenticated bootstrap configuration. These are shell variables used to build actual CLI arguments, not a separate file format.
+
+On each authority, replace `AUTH_ID` and `AUTH_LISTEN_IP:PORT` with its identity and reachable numeric bind endpoint:
+
+```sh
+anonguard-daemon --authority --authority-id AUTH_ID \
+  --listen AUTH_LISTEN_IP:PORT \
+  --identity-key-path /var/lib/anonguard-authority/identity.key \
+  --authorities "$AUTH_ENDPOINTS" --authority-keys "$AUTH_KEYS" \
+  --quorum-threshold 3
+```
+
+Each authority's own bootstrap pin must match its key. Real relay registration requires authenticated pinned links and normal proof of work. Admit at least three signed relays, including an exit, before expecting usable snapshots. Persistent authorities defer unusable snapshots. Use relays from distinct real subnet/operator failure domains for the enforced circuit-diversity policy.
+
+Start a local gateway with the same endpoints/pins/threshold, `--onion`, `--enforce-subnet-diversity`, and private persistent identity/guard state. Do not use zero-difficulty proof of work, private exits or unauthenticated registration outside a disposable testnet.
+
+## Acceptance and recovery
+
+Verify pinned connections, matching fresh quorum snapshots, real three-hop traffic, response half-close, restarts preserving identity/votes, rollback rejection, clock changes, partitions and stale directories. Divergent already-frozen authority views can stall until another epoch; this is not a complete asynchronous BFT liveness protocol. Record actual observed results before deployment approval.
+
+For replacement/compromise, follow [the authority key runbook](key_rotation_runbook.md). There is no automatic overlap, HSM integration, in-band revocation, or guaranteed zero-downtime rotation. Never erase client rollback state or authority journals merely to force convergence.

@@ -1,36 +1,21 @@
-# AnonGuard Relay Operator Guide
+# AnonGuard relay operations
 
-Thank you for volunteering to run an AnonGuard relay! This document outlines the technical, operational, and legal responsibilities of running a node.
+AnonGuard is an experimental authenticated three-hop transport. Public anonymity, resistance to global traffic correlation and production reliability have not been independently established. The repository records no deployed independent operator network or core-team exit fleet.
 
-## Node Types
+## Roles and deployment
 
-### 1. Guard / Middle Relays
-These relays route encrypted traffic from clients to other AnonGuard relays. They never see the original IP of the destination server, nor the unencrypted traffic. 
-- **Risk Level:** Low.
-- **Legal Posture:** Since you only transmit encrypted bytes to other nodes within the network, you are generally protected under common carrier and safe harbor provisions in most jurisdictions.
+Guards and middle relays forward layered cells; exits connect to destination TCP services under the exit-address policy. Exits can observe destination metadata and application plaintext unless the application uses end-to-end encryption such as TLS. Relay roles alone do not eliminate traffic-correlation risk.
 
-### 2. Exit Relays
-Exit relays form the final hop. They decrypt the outer layer of the packet and send the traffic to its final destination on the open internet (e.g., a website). The destination server sees the IP address of the Exit Relay, not the original client.
-- **Risk Level:** High.
-- **Legal Posture:** Exit relays are subject to DMCA notices, abuse complaints, and potential law enforcement inquiries. 
+Provision a dedicated account/host, durable private identity storage and authenticated authority bootstrap. Initialize the identity without networking using `--initialize-identity --identity-key-path PRIVATE_PATH`. Start relays with `--relay`, a reachable numeric `--listen IP:PORT`, the private identity path and the shared authority endpoints, keys and quorum. Add `--is-exit` only for an explicitly operated exit. Use a reachable bound address, not an unspecified advertised endpoint. See [authority bootstrap](runbook_authority.md) and the actual CLI `--help`.
 
-## Exit Relay Policy (Current Status)
-**DECISION:** For the initial Beta Release, we are **restricting the public network to Guard/Middle relays only**. Exit relays will be exclusively operated by the core team and trusted partners until Phase 4 (External Audit) is complete and a standardized Abuse Response Template is finalized.
+Keep normal proof of work and exit-address restrictions. Development switches permitting private exits or open SOCKS require explicit insecure-mode acknowledgment and are not production settings. Do not advertise unsupported onion services, multipath sessions or transparent transaction reconnects.
 
-## Minimum Requirements
-- **Bandwidth:** At least 100 Mbps unmetered.
-- **Uptime:** 99% expected.
-- **Hardware:** 2 CPU cores, 4GB RAM minimum (RMT morphing requires moderate memory overhead).
-- **Network:** A dedicated public IPv4 address.
+## Operational responsibilities
 
-## Security Best Practices
-1. Run AnonGuard on a dedicated VPS or server. Do not co-locate with your personal services.
-2. Keep the host OS updated (enable unattended upgrades).
-3. Disable password authentication for SSH (use Ed25519 keys).
-4. Do not log traffic. AnonGuard does not log connections by default; do not modify it to do so.
+No validated universal hardware, bandwidth or uptime guarantee exists. Establish load-tested budgets and circuit-success targets for the intended deployment. Use real operator/subnet diversity, synchronized clocks and retained authenticated v3 state. Monitor CPU/memory/descriptors, relay availability, expired/divergent directories and dependency updates. Restrict metrics and diagnostic logs; never add payload, credential or browsing-history logging.
 
-## Abuse Response (For Future Exit Operators)
-When public Exit operation opens, you MUST:
-1. Register a dedicated abuse contact email in your relay configuration.
-2. Use our provided standard response templates for DMCA and abuse inquiries.
-3. Understand your local jurisdiction's safe harbor laws (e.g., Section 230 in the US).
+Retain operational diagnostics needed to investigate failures, protect their access, and define retention. The project does not promise that all current runtime metadata is absent from logs. Keep client gateway ports private and set service/cgroup limits. Rehearse restart, upgrade, rollback rejection and compromised-key response before public service.
+
+Exit operation requires named ownership, abuse handling and jurisdiction-specific assessment. No universal safe-harbor status or project-operated abuse contact/template system is established here. Establish those arrangements directly before accepting public exit traffic.
+
+Use [identity replacement](key_rotation.md), [Linux deployment](../deploy/README.md), and [production readiness](PRODUCTION_READINESS.md). Platform compilation and passing CI do not establish a public-network safety claim.

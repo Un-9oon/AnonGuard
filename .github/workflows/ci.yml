@@ -30,13 +30,7 @@ jobs:
         run: cargo test --locked --all-targets --verbose
 
       - name: Install namespace test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps bubblewrap libseccomp2 gcc libc6-dev
-
-      - name: Verify application launcher contracts
-        run: python3 scripts/test_app_launcher.py
-
-      - name: Verify headless application containment on disposable runner
-        run: sudo env ANONGUARD_DISPOSABLE_APP_TEST=1 python3 scripts/test_app_containment_live.py
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps
 
       - name: Verify protected namespace and crash isolation
         run: sudo env RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" "$(command -v cargo)" test --locked --test namespace_isolation_live -- --ignored
@@ -55,6 +49,19 @@ jobs:
 
       - name: Verify Debian install and configuration recovery on disposable runner
         run: sudo env ANONGUARD_DISPOSABLE_PACKAGE_TEST=1 bash scripts/test_deb_lifecycle.sh dist/anonguard_*.deb
+
+  app-containment:
+    name: Linux Headless Application Containment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install containment test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 bubblewrap libseccomp2 gcc libc6-dev util-linux
+      - name: Verify launcher and loaded syscall policy
+        run: python3 scripts/test_app_launcher.py
+      - name: Verify privileged headless boundaries and helper death
+        run: sudo env ANONGUARD_DISPOSABLE_APP_TEST=1 python3 scripts/test_app_containment_live.py
 
   fuzz:
     name: Run Fuzz Targets (Short Campaign)

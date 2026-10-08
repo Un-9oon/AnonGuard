@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python3 -I
 """Experimental root-administered Linux headless application containment.
 
 No caller descriptors, host mounts, output forwarding or GUI brokers are exposed.

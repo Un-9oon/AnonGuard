@@ -1,17 +1,12 @@
-# Relay Key Rotation and Decommissioning
+# Relay identity replacement and decommissioning
 
-Relay operators must safeguard their long-term Ed25519 identity key, which anchors their reputation and PoW registration. 
+Identity replacement is a coordinated operational migration, not an automatic reputation warm-up. No uptime/bandwidth reputation ramp or in-band cryptographic revocation protocol is implemented.
 
-## Key Rotation Procedure
-If a relay operator needs to gracefully rotate their key (e.g., proactive security rotation):
-1. **Generate New Key**: Stop the relay and generate a new keypair `new_identity.key`.
-2. **Re-register**: Start the relay with the new key. It will automatically generate a new registration descriptor, solve the PoW challenge, and submit it to the tracker authorities.
-3. **Warm-up**: The new key starts with zero historical reputation in the consensus. Traffic will gradually ramp up over hours as the authorities observe its uptime and bandwidth.
+1. Inventory the relay's signed identity, advertised endpoint, pinned guards and operator dependencies. Plan an outage and replacement circuit capacity.
+2. Stop the affected relay, preserve restricted identity/state evidence where appropriate, and repair or replace a compromised host before provisioning a new identity.
+3. Initialize a distinct protected replacement key with `anonguard-daemon --initialize-identity --identity-key-path NEW_PRIVATE_PATH`. Authenticate its public pin out of band. Do not overwrite an active identity file.
+4. Coordinate descriptor/endpoint and guard changes with network operators. Authorities reject conflicting identities for an existing relay identifier or endpoint, and frozen snapshots do not change in place. A new key at the same endpoint cannot be assumed to replace old directory entries immediately; existing registration retention and voting epochs apply.
+5. Demonstrate new pinned transport, valid proof of work, fresh quorum directories, guard behavior and usable circuits in an isolated testnet before restoring service.
+6. Rehearse old-key rejection, state recovery and operator incident response. Preserve client rollback protections and document any explicit guard migration.
 
-## Key Compromise and Decommissioning
-If a relay's identity key is stolen or the host is compromised:
-1. **Revocation**: The operator must notify the network administrators out-of-band to manually blacklist the compromised public key at the directory authorities.
-2. **Scrub Host**: Destroy the host and delete the compromised key from backups.
-3. **Fresh Start**: Follow the rotation procedure to generate a new key on a fresh host.
-
-*Note: AnonGuard does not yet support in-band cryptographic revocation certificates.*
+A runtime authority blacklist command is not implemented. A compromise therefore needs coordinated bootstrap/directory policy changes; merely restarting with a new key does not revoke distributed old descriptors or existing pins. Reviewed revocation and rotation remain production gates. See [authority replacement](key_rotation_runbook.md) and [production readiness](PRODUCTION_READINESS.md).
