@@ -25,6 +25,15 @@ impl std::fmt::Debug for BridgeTransport {
 }
 
 pub fn load_bridges(path: &std::path::Path) -> io::Result<Vec<BridgeTransport>> {
+    load_bindings(path, 3)
+}
+
+/// Same wire contract for individually pinned authority bootstrap transports.
+pub fn load_authorities(path: &std::path::Path) -> io::Result<Vec<BridgeTransport>> {
+    load_bindings(path, 16)
+}
+
+fn load_bindings(path: &std::path::Path, maximum: usize) -> io::Result<Vec<BridgeTransport>> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
@@ -35,13 +44,16 @@ pub fn load_bridges(path: &std::path::Path) -> io::Result<Vec<BridgeTransport>> 
     }
     let bridges: Vec<BridgeTransport> =
         serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid bridge configuration JSON"))?;
-    if bridges.is_empty() || bridges.len() > 3 {
-        return Err(invalid("Configure between one and three bridge transports"));
+    if bridges.is_empty() || bridges.len() > maximum {
+        return Err(invalid("Invalid number of transport bindings"));
     }
     let mut identities = std::collections::HashSet::new();
+    let mut endpoints = std::collections::HashSet::new();
     for entry in &bridges {
-        if entry.identity == [0; 32]
+        if ed25519_dalek::VerifyingKey::from_bytes(&entry.identity)
+            .map_or(true, |key| key.is_weak())
             || !identities.insert(entry.identity)
+            || !endpoints.insert(entry.bridge)
             || !entry.proxy.ip().is_loopback()
             || entry.proxy.port() == 0
             || entry.bridge.port() == 0
@@ -183,6 +195,57 @@ mod tests {
         assert!(encode_arguments(&BTreeMap::new()).is_err());
         assert!(encode_arguments(&BTreeMap::from([("a".into(), "x".repeat(253))])).is_err());
         assert!(encode_arguments(&BTreeMap::from([("a".into(), "x\n".into())])).is_err());
+    }
+
+    #[test]
+    fn transport_file_rejects_weak_pins_endpoint_aliases_and_oversized_input() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "anonguard-pt-config-{:032x}",
+            rand::random::<u128>()
+        )));
+        let binding = BridgeTransport {
+            identity: ed25519_dalek::SigningKey::from_bytes(&[51; 32])
+                .verifying_key()
+                .to_bytes(),
+            proxy: "127.0.0.1:1080".parse().unwrap(),
+            bridge: "192.0.2.1:443".parse().unwrap(),
+            arguments: args(),
+        };
+        std::fs::write(
+            &fixture.0,
+            serde_json::to_vec(&vec![binding.clone()]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_bridges(&fixture.0).unwrap().len(), 1);
+        let mut alias = binding.clone();
+        alias.identity = ed25519_dalek::SigningKey::from_bytes(&[52; 32])
+            .verifying_key()
+            .to_bytes();
+        std::fs::write(
+            &fixture.0,
+            serde_json::to_vec(&vec![binding.clone(), alias]).unwrap(),
+        )
+        .unwrap();
+        assert!(load_bridges(&fixture.0).is_err());
+        let mut weak = binding.clone();
+        weak.identity = [0; 32];
+        std::fs::write(&fixture.0, serde_json::to_vec(&vec![weak]).unwrap()).unwrap();
+        assert!(load_bridges(&fixture.0).is_err());
+        let mut value = serde_json::to_value(&binding).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("fallback".into(), serde_json::json!("direct"));
+        std::fs::write(&fixture.0, serde_json::to_vec(&vec![value]).unwrap()).unwrap();
+        assert!(load_bridges(&fixture.0).is_err());
+        std::fs::write(&fixture.0, vec![b' '; 65537]).unwrap();
+        assert!(load_bridges(&fixture.0).is_err());
     }
 
     #[tokio::test]

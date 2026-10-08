@@ -129,7 +129,18 @@ impl GatewayServer {
             });
         }
 
-        if self.config.relay_mode && !self.config.directory_authorities.is_empty() {
+        if self.config.unlisted_bridge
+            && (!self.config.relay_mode
+                || self.config.is_exit
+                || self.config.allow_open_socks5
+                || !advertised_address.ip().is_loopback())
+        {
+            return Err("Unlisted bridges require a non-exit, onion-only loopback relay".into());
+        }
+        if self.config.relay_mode
+            && !self.config.unlisted_bridge
+            && !self.config.directory_authorities.is_empty()
+        {
             let auths = self.config.authority_endpoints.clone();
             let identity_key = self.relay_identity_key.clone();
             let config = self.config.clone();
@@ -467,7 +478,9 @@ impl GatewayServer {
                     };
 
                     // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
-                    let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
+                    let chain = if config.private_bridges {
+                        pool.get_private_bridge_chain(&config.bridge_transports, config.enforce_subnet_diversity).await
+                    } else if config.enable_onion_routing || config.enforce_subnet_diversity {
                         let pins: Vec<_> = config.bridge_transports.iter().map(|entry| entry.identity).collect();
                         pool.get_onion_chain_with_entry_pins(
                             config.min_chain_length.max(3),
@@ -496,7 +509,13 @@ impl GatewayServer {
                                 return Err("Reverse onion transport is unsupported".into());
                             }
                             let addr = (entry.host.as_str(), entry.port);
-                            let keys = pool.get_identity_keys(&chain).await;
+                            let mut keys = pool.get_identity_keys(&chain).await;
+                            if config.private_bridges {
+                                let binding = config.bridge_transports.iter().find(|binding|
+                                    binding.bridge.ip().to_string() == entry.host && binding.bridge.port() == entry.port)
+                                    .ok_or("Unlisted entry binding missing")?;
+                                keys[0] = binding.identity;
+                            }
                             let stream = match tokio::time::timeout(
                                 std::time::Duration::from_secs(10),
                                 async {
@@ -530,7 +549,6 @@ impl GatewayServer {
                             if (circuit_id >> 24) == 0x05 || (circuit_id >> 24) == 0x00 {
                                 circuit_id ^= 0x10000000;
                             }
-                            let keys = pool.get_identity_keys(&chain).await;
                             let circuit = build_telescopic_circuit(
                                 &mut stream,
                                 circuit_id,

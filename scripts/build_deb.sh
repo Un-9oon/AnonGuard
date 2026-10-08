@@ -37,6 +37,8 @@ cp "${ROOT_DIR}/target/release/anonguard-daemon" "${STAGING_DIR}/usr/bin/anongua
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-daemon"
 cp "${ROOT_DIR}/scripts/anonguard_run_app.py" "${STAGING_DIR}/usr/bin/anonguard-run-app"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-run-app"
+cp "${ROOT_DIR}/scripts/pt_supervisor.py" "${STAGING_DIR}/usr/bin/anonguard-pt"
+chmod 755 "${STAGING_DIR}/usr/bin/anonguard-pt"
 
 # Derive minimum library versions from the actual packaged ELF, rather than
 # guessing a libc baseline or allowing installation without its dependencies.
@@ -62,6 +64,8 @@ fi
 # 2. Systemd service
 cp "${ROOT_DIR}/contrib/anonguard.service" "${STAGING_DIR}/lib/systemd/system/anonguard.service"
 chmod 644 "${STAGING_DIR}/lib/systemd/system/anonguard.service"
+cp "${ROOT_DIR}/contrib/anonguard-pt@.service" "${STAGING_DIR}/lib/systemd/system/anonguard-pt@.service"
+chmod 644 "${STAGING_DIR}/lib/systemd/system/anonguard-pt@.service"
 
 # 3. Default configuration
 cp "${ROOT_DIR}/contrib/runtime.env" "${STAGING_DIR}/etc/anonguard/runtime.env"
@@ -74,6 +78,7 @@ chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
 mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 chmod 755 "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 cp "${ROOT_DIR}/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/docs/"
+cp "${ROOT_DIR}/docs/design/PLUGGABLE_TRANSPORT.md" "${STAGING_DIR}/usr/share/doc/anonguard/docs/"
 cp "${ROOT_DIR}/deploy/apparmor/anonguard-bwrap" "${STAGING_DIR}/usr/share/doc/anonguard/anonguard-bwrap.apparmor"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/anonguard-bwrap.apparmor"
 cp "${ROOT_DIR}/README.md" "${STAGING_DIR}/usr/share/doc/anonguard/README.md"
@@ -104,7 +109,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Depends: ${SHLIBS_DEPENDS}
-Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux
+Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux, obfs4proxy
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
 Description: Experimental authenticated three-hop anonymity transport
@@ -131,6 +136,7 @@ cat << 'EOF' > "${STAGING_DIR}/DEBIAN/prerm"
 set -e
 if [ -d /run/systemd/system ]; then
     systemctl stop anonguard.service 2>/dev/null || true
+    systemctl stop 'anonguard-pt@*.service' 2>/dev/null || true
 fi
 exit 0
 EOF

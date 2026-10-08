@@ -24,6 +24,9 @@ dpkg --install "$1"
 test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
+test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-pt)" = '755:0:0'
+test -r /lib/systemd/system/anonguard-pt@.service
+test -r /usr/share/doc/anonguard/docs/PLUGGABLE_TRANSPORT.md
 test "$(stat -c '%a:%u:%g' /usr/share/doc/anonguard/anonguard-bwrap.apparmor)" = '644:0:0'
 test -r /usr/share/doc/anonguard/docs/LINUX_APP_CONTAINMENT.md
 test -r /usr/share/doc/anonguard/docs/FYP_DELIVERY.md

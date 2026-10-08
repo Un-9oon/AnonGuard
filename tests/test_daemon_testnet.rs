@@ -161,6 +161,7 @@ async fn exercise() {
         "127.2.0.1",
         "127.3.0.1",
         "127.0.0.1",
+        "127.4.0.1",
     ] {
         reserved.push(Some(std::net::TcpListener::bind((ip, 0)).unwrap()));
     }
@@ -210,6 +211,8 @@ async fn exercise() {
         );
         ready(addresses[i]).await;
     }
+    let private = std::env::var_os("ANONGUARD_TEST_PRIVATE_BRIDGES").is_some();
+    assert!(!private || std::env::var_os("ANONGUARD_OBFS4PROXY").is_some());
     for i in 0..3 {
         drop(reserved[4 + i].take());
         let mut extra = vec![
@@ -220,6 +223,9 @@ async fn exercise() {
         if i == 2 {
             extra.push("--is-exit");
         }
+        if private && i == 0 {
+            extra.push("--unlisted-bridge");
+        }
         testnet.start(
             &format!("relay-{i}"),
             addresses[4 + i],
@@ -228,7 +234,22 @@ async fn exercise() {
         );
         ready(addresses[4 + i]).await;
     }
-    let verifier = PinnedDirectoryClient::new(endpoints, 3).unwrap();
+    if private {
+        drop(reserved[8].take());
+        testnet.start(
+            "relay-spare",
+            addresses[8],
+            &authority_args,
+            &[
+                "--relay",
+                "--is-exit",
+                "--allow-private-exit",
+                "--i-know-this-is-insecure",
+            ],
+        );
+        ready(addresses[8]).await;
+    }
+    let verifier = PinnedDirectoryClient::new(endpoints.clone(), 3).unwrap();
     let pool = ProxyPool::new();
     let admitted = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -253,7 +274,7 @@ async fn exercise() {
         let client_state = testnet.directory.join("pt-client");
         fs::create_dir(&server_state).unwrap();
         fs::create_dir(&client_state).unwrap();
-        let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reservation = TcpListener::bind((addresses[4].ip(), 0)).await.unwrap();
         let bridge = reservation.local_addr().unwrap();
         drop(reservation);
         let (server, announcement) = pt::launch(
@@ -299,16 +320,44 @@ async fn exercise() {
             arguments,
         };
         fs::write(&bridge_file, serde_json::to_vec(&vec![binding]).unwrap()).unwrap();
-        testnet.start(
-            "gateway",
-            addresses[7],
-            &authority_args,
-            &[
-                "--onion",
-                "--bridge-transports",
-                bridge_file.to_str().unwrap(),
-            ],
-        );
+        let authority_file = testnet.directory.join("authority-transports.json");
+        let mut gateway_extra = vec![
+            "--onion",
+            "--bridge-transports",
+            bridge_file.to_str().unwrap(),
+        ];
+        if private {
+            let mut bindings = Vec::new();
+            for (i, endpoint) in endpoints.iter().enumerate() {
+                let state = testnet.directory.join(format!("pt-authority-{i}"));
+                fs::create_dir(&state).unwrap();
+                let (server, binding) = pt::server_binding(
+                    &binary,
+                    &state,
+                    addresses[i],
+                    endpoint.public_key,
+                    fields[3].parse().unwrap(),
+                )
+                .await;
+                transports.push(server);
+                bindings.push(binding);
+            }
+            fs::write(&authority_file, serde_json::to_vec(&bindings).unwrap()).unwrap();
+            gateway_extra.extend([
+                "--private-bridges",
+                "--authority-transports",
+                authority_file.to_str().unwrap(),
+            ]);
+            // An unlisted bridge must not appear in the public signed directory.
+            let chain = pool
+                .get_diverse_onion_chain_with_exit(2, 2, true, true)
+                .await;
+            assert_eq!(chain.len(), 2);
+            assert!(!chain
+                .iter()
+                .any(|node| node.host == addresses[4].ip().to_string()));
+        }
+        testnet.start("gateway", addresses[7], &authority_args, &gateway_extra);
     } else {
         testnet.start("gateway", addresses[7], &authority_args, &["--onion"]);
     }
@@ -390,8 +439,14 @@ async fn exercise() {
         .await
         .unwrap()
         .unwrap();
-    testnet.daemons[5].kill().unwrap();
-    testnet.daemons[5].wait().unwrap();
+    if private {
+        // Kill the actual PT client with healthy raw relays/authorities still up.
+        // Every PT-owned socket must close; subsequent gateway requests fail closed.
+        transports[1].kill().await.unwrap();
+    } else {
+        testnet.daemons[5].kill().unwrap();
+        testnet.daemons[5].wait().unwrap();
+    }
     let mut byte = [0];
     let closed = tokio::time::timeout(Duration::from_secs(10), active.read(&mut byte))
         .await
@@ -400,6 +455,13 @@ async fn exercise() {
         matches!(closed, Ok(0) | Err(_)),
         "Application stream survived a lost circuit"
     );
+    if private {
+        let retry = tokio::time::timeout(Duration::from_secs(12), connect(addresses[7])).await;
+        assert!(
+            matches!(retry, Ok(Err(_))),
+            "Gateway did not refuse traffic after PT loss"
+        );
+    }
     tokio::time::timeout(Duration::from_secs(10), destination_task)
         .await
         .unwrap()
@@ -410,7 +472,7 @@ async fn exercise() {
     let mut choice = [0; 2];
     waiting.read_exact(&mut choice).await.unwrap();
     assert_eq!(choice, [5, 0]);
-    testnet.stop_gracefully(7);
+    testnet.stop_gracefully(testnet.daemons.len() - 1);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), waiting.read(&mut byte))
             .await

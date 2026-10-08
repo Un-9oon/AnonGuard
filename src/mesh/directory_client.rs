@@ -11,6 +11,7 @@ pub struct PinnedDirectoryClient {
     trusted: HashMap<String, VerifyingKey>,
     quorum: usize,
     rpc_timeout: Duration,
+    transports: HashMap<[u8; 32], crate::onion::transport::BridgeTransport>,
 }
 
 impl PinnedDirectoryClient {
@@ -55,14 +56,45 @@ impl PinnedDirectoryClient {
             trusted,
             quorum,
             rpc_timeout: Duration::from_secs(15),
+            transports: HashMap::new(),
         })
+    }
+
+    /// Protected bootstrap is all-or-nothing: every configured authority must
+    /// have a distinct, locally provisioned transport binding to its exact pin.
+    pub fn with_transports(
+        mut self,
+        bindings: Vec<crate::onion::transport::BridgeTransport>,
+    ) -> Result<Self, String> {
+        if bindings.len() != self.endpoints.len() {
+            return Err("Protected bootstrap requires a transport for every authority".into());
+        }
+        for binding in bindings {
+            if !self
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.public_key == binding.identity)
+                || self.transports.insert(binding.identity, binding).is_some()
+            {
+                return Err(
+                    "Authority transport pins must exactly match the bootstrap authorities".into(),
+                );
+            }
+        }
+        Ok(self)
     }
 
     async fn fetch_snapshots(&self) -> Vec<ConsensusDocument> {
         let replies = futures::future::join_all(self.endpoints.iter().map(|endpoint| async move {
             let pinned = &self.trusted[&endpoint.identity];
             let request = async {
-                let socket = TcpStream::connect(endpoint.address.as_str()).await?;
+                let socket = if self.transports.is_empty() {
+                    TcpStream::connect(endpoint.address.as_str()).await?
+                } else {
+                    let binding = self.transports.get(&endpoint.public_key)
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Authority transport binding missing"))?;
+                    crate::onion::transport::connect(binding.proxy, binding.bridge, &binding.arguments).await?
+                };
                 let mut session = SecureTransportSession::client_handshake(socket, Some(pinned)).await?;
                 session.write_frame(b"GET_CONSENSUS").await?;
                 let frame = session.read_frame().await?;
@@ -183,6 +215,45 @@ mod tests {
             assert!(PinnedDirectoryClient::new(altered, 3).is_err());
         }
         assert!(PinnedDirectoryClient::new(endpoints, 3).is_ok());
+    }
+
+    #[tokio::test]
+    async fn protected_bootstrap_rejects_partial_pins_and_never_falls_back() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = closed_proxy.local_addr().unwrap();
+        drop(closed_proxy);
+        let endpoint = AuthorityEndpoint {
+            identity: "a".into(),
+            address: listener.local_addr().unwrap().to_string(),
+            public_key: SigningKey::from_bytes(&[55; 32]).verifying_key().to_bytes(),
+        };
+        let binding = crate::onion::transport::BridgeTransport {
+            identity: endpoint.public_key,
+            proxy,
+            bridge: listener.local_addr().unwrap(),
+            arguments: std::collections::BTreeMap::from([("cert".into(), "fixture".into())]),
+        };
+        assert!(PinnedDirectoryClient::new(vec![endpoint.clone()], 1)
+            .unwrap()
+            .with_transports(vec![])
+            .is_err());
+        let mut wrong = binding.clone();
+        wrong.identity = [99; 32];
+        assert!(PinnedDirectoryClient::new(vec![endpoint.clone()], 1)
+            .unwrap()
+            .with_transports(vec![wrong])
+            .is_err());
+        let client = PinnedDirectoryClient::new(vec![endpoint], 1)
+            .unwrap()
+            .with_transports(vec![binding])
+            .unwrap();
+        assert!(client.refresh(&ProxyPool::new()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

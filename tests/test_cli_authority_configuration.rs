@@ -268,3 +268,25 @@ async fn authority_refuses_corrupt_duplicate_or_foreign_vote_journals_without_re
     assert!(vote_path.is_dir());
     assert_eq!(std::fs::read(&key_path).unwrap(), original);
 }
+#[test]
+fn transport_roles_refuse_incomplete_and_conflicting_cli_profiles() {
+    for arguments in [
+        vec!["--private-bridges"],
+        vec!["--authority-transports", "/missing", "--onion"],
+        vec!["--bridge-transports", "/missing", "--relay"],
+        vec!["--unlisted-bridge", "--relay", "--is-exit"],
+        vec![
+            "--unlisted-bridge",
+            "--relay",
+            "--announce",
+            "http://127.0.0.1:1",
+        ],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_anonguard-daemon"))
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+    }
+}

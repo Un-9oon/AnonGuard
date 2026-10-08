@@ -11,6 +11,7 @@ Experimental authenticated onion-routing software written in Rust. No superiorit
 - Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
 - A fixed 20 ms scheduler in both stream directions with bounded buffers and dummy cells. This is an experimental padding profile; traffic-analysis protection is unproven.
 - Linux application isolation in a loopback-only namespace, with a private Unix-socket bridge to the gateway outside it.
+- Optional obfs4 first-hop and authority-bootstrap transports, independently provisioned unlisted entry bridges, and supervised Linux PT services. See [deployment and limits](docs/design/PLUGGABLE_TRANSPORT.md). This does not establish resistance to any particular censor or traffic-correlation attack.
 
 The former multipath transport is retired. It lacked exit-side association and symmetric framing. This release provides single-path reliability; it does not transparently reconnect or replay application transactions after a failed exit. Onion services and browser fingerprint protection are outside the implemented protocol.
 

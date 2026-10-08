@@ -37,6 +37,59 @@ mod transport_tests {
             .await
             .is_empty());
     }
+
+    #[tokio::test]
+    async fn private_entry_is_local_only_and_requires_fresh_certified_hops() {
+        let pool = ProxyPool::new();
+        for (address, pin, exit) in [("2.1.1.1", [2; 32], false), ("3.1.1.1", [3; 32], true)] {
+            pool.add_proxy(&format!("socks5://{address}:9001"))
+                .await
+                .unwrap();
+            let endpoint = format!("{address}:9001");
+            pool.identity_keys
+                .write()
+                .await
+                .insert(endpoint.clone(), pin);
+            pool.nodes.write().await.get_mut(&endpoint).unwrap().is_exit = exit;
+        }
+        let binding = crate::onion::transport::BridgeTransport {
+            identity: ed25519_dalek::SigningKey::from_bytes(&[41; 32])
+                .verifying_key()
+                .to_bytes(),
+            proxy: "127.0.0.1:31000".parse().unwrap(),
+            bridge: "1.1.1.1:443".parse().unwrap(),
+            arguments: std::collections::BTreeMap::from([("cert".into(), "fixture".into())]),
+        };
+        assert!(pool
+            .get_private_bridge_chain(std::slice::from_ref(&binding), true)
+            .await
+            .is_empty());
+        pool.consensus_deadline.store(
+            crate::mesh::current_timestamp_secs() + 60,
+            Ordering::Release,
+        );
+        let chain = pool
+            .get_private_bridge_chain(std::slice::from_ref(&binding), true)
+            .await;
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].host, "1.1.1.1");
+        assert!(!pool.is_mesh_target("1.1.1.1", 443).await);
+        assert_eq!(
+            pool.get_identity_keys(&chain).await,
+            vec![[0; 32], [2; 32], [3; 32]]
+        );
+        let mut changed = binding.clone();
+        changed.identity = [42; 32];
+        assert!(pool
+            .get_private_bridge_chain(&[changed], true)
+            .await
+            .is_empty());
+        pool.consensus_deadline.store(1, Ordering::Release);
+        assert!(pool
+            .get_private_bridge_chain(&[binding], true)
+            .await
+            .is_empty());
+    }
 }
 
 use indexmap::IndexMap;
@@ -405,6 +458,91 @@ impl ProxyPool {
             &[],
         )
         .await
+    }
+
+    /// An independently provisioned private entry followed by two certified hops.
+    /// Private metadata remains local and is never inserted into the public pool.
+    pub async fn get_private_bridge_chain(
+        &self,
+        bindings: &[crate::onion::transport::BridgeTransport],
+        enforce_diversity: bool,
+    ) -> Vec<ProxyNode> {
+        if bindings.is_empty()
+            || self.consensus_deadline.load(Ordering::Acquire) == 0
+            || self.directory_expired()
+        {
+            return Vec::new();
+        }
+        let list = self.nodes.read().await;
+        let keys = self.identity_keys.read().await;
+        let cooldowns = self.guard_cooldowns.read().await;
+        let mut state = self.guard_state.write().await;
+        if state.guards.is_empty() {
+            let previous = state.clone();
+            for binding in bindings.iter().take(3) {
+                let endpoint = format!("{}:{}", binding.bridge.ip(), binding.bridge.port());
+                state.guards.push(endpoint.clone());
+                state.identities.insert(endpoint, binding.identity);
+            }
+            if let Some(path) = self.guard_state_path.read().await.as_ref() {
+                if state.save_checked(path).is_err() {
+                    *state = previous;
+                    return Vec::new();
+                }
+            }
+        }
+        let binding = state.guards.iter().find_map(|endpoint| {
+            bindings.iter().find(|binding| {
+                *endpoint == format!("{}:{}", binding.bridge.ip(), binding.bridge.port())
+                    && state.identities.get(endpoint) == Some(&binding.identity)
+                    && cooldowns
+                        .get(&binding.identity)
+                        .is_none_or(|until| *until <= tokio::time::Instant::now())
+            })
+        });
+        let Some(binding) = binding else {
+            return Vec::new();
+        };
+        let entry = match ProxyNode::parse(&format!("socks5://{}", binding.bridge)) {
+            Ok(entry) => entry,
+            Err(_) => return Vec::new(),
+        };
+        let mut candidates: Vec<_> = list
+            .values()
+            .filter(|node| {
+                node.is_alive
+                    && keys
+                        .get(&format!("{}:{}", node.host, node.port))
+                        .is_some_and(|pin| {
+                            *pin != [0; 32]
+                                && !bindings.iter().any(|binding| binding.identity == *pin)
+                        })
+                    && !bindings
+                        .iter()
+                        .any(|binding| binding.bridge.ip().to_string() == node.host)
+            })
+            .cloned()
+            .collect();
+        candidates.shuffle(&mut rand::thread_rng());
+        for middle in candidates.iter().filter(|node| !node.is_exit) {
+            for exit in candidates.iter().filter(|node| node.is_exit) {
+                if middle.host == exit.host && middle.port == exit.port {
+                    continue;
+                }
+                if enforce_diversity
+                    && crate::mesh::sybil::validate_circuit_diversity(&[
+                        entry.host.as_str(),
+                        middle.host.as_str(),
+                        exit.host.as_str(),
+                    ])
+                    .is_err()
+                {
+                    continue;
+                }
+                return vec![entry, middle.clone(), exit.clone()];
+            }
+        }
+        Vec::new()
     }
 
     /// Mandatory entry allowlist for provisioned transport mode. Existing guards

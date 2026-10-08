@@ -54,3 +54,47 @@ pub async fn launch(
     tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
     (child, method)
 }
+
+pub async fn server_binding(
+    binary: &Path,
+    state: &Path,
+    backend: std::net::SocketAddr,
+    identity: [u8; 32],
+    proxy: std::net::SocketAddr,
+) -> (Child, anonguard::onion::transport::BridgeTransport) {
+    let reservation = tokio::net::TcpListener::bind((backend.ip(), 0))
+        .await
+        .unwrap();
+    let bridge = reservation.local_addr().unwrap();
+    drop(reservation);
+    let (server, announcement) = launch(
+        binary,
+        state,
+        &[
+            ("TOR_PT_SERVER_TRANSPORTS", "obfs4".into()),
+            ("TOR_PT_SERVER_BINDADDR", format!("obfs4-{bridge}")),
+            ("TOR_PT_ORPORT", backend.to_string()),
+        ],
+        "SMETHOD obfs4 ",
+    )
+    .await;
+    let mut arguments = std::collections::BTreeMap::new();
+    for pair in announcement
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("ARGS:"))
+        .unwrap()
+        .split(',')
+    {
+        let (key, value) = pair.split_once('=').unwrap();
+        arguments.insert(key.to_owned(), value.to_owned());
+    }
+    (
+        server,
+        anonguard::onion::transport::BridgeTransport {
+            identity,
+            proxy,
+            bridge,
+            arguments,
+        },
+    )
+}

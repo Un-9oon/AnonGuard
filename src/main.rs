@@ -116,6 +116,18 @@ struct Args {
     #[arg(long, requires = "onion", conflicts_with_all = ["relay", "authority", "reverse_relay", "initialize_identity", "tracker", "status"])]
     bridge_transports: Option<PathBuf>,
 
+    /// Use independently provisioned unlisted entries, with protected authority bootstrap
+    #[arg(long, requires_all = ["bridge_transports", "authority_transports"], conflicts_with_all = ["pool", "proxy", "fetch_from"])]
+    private_bridges: bool,
+
+    /// PT bindings for every pinned directory authority; no direct bootstrap fallback
+    #[arg(long, requires_all = ["onion", "authorities"], conflicts_with_all = ["relay", "authority", "reverse_relay", "initialize_identity", "tracker", "status", "fetch_from"])]
+    authority_transports: Option<PathBuf>,
+
+    /// Unlisted non-exit relay behind a separately supervised PT and loopback backend
+    #[arg(long, requires_all = ["relay", "authorities"], conflicts_with_all = ["is_exit", "allow_open_socks5", "announce", "reverse_relay", "authority", "tracker", "initialize_identity"])]
+    unlisted_bridge: bool,
+
     /// Enforce BGP /16 Subnet Diversity across circuit hops (Sybil resistance)
     #[arg(long, default_value_t = true)]
     enforce_subnet_diversity: bool,
@@ -431,7 +443,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )?;
     }
 
+    let authority_transports = args
+        .authority_transports
+        .as_ref()
+        .map(|path| anonguard::onion::transport::load_authorities(path))
+        .transpose()?;
+    if let Some(bindings) = authority_transports.as_ref() {
+        anonguard::mesh::PinnedDirectoryClient::new(
+            authority_endpoints.clone(),
+            args.quorum_threshold,
+        )?
+        .with_transports(bindings.clone())?;
+    }
+    if args.unlisted_bridge
+        && !args
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .is_ok_and(|address| address.ip().is_loopback())
+    {
+        return Err("Unlisted bridge backend must listen on numeric loopback".into());
+    }
+
     let config = GuardConfig {
+        private_bridges: args.private_bridges,
+        unlisted_bridge: args.unlisted_bridge,
         bridge_transports: args
             .bridge_transports
             .as_ref()
@@ -597,10 +632,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if !args.reverse_relay {
         // Wire Multi-Authority Consensus retrieval & cryptographic quorum verification
         if !config.directory_authorities.is_empty() {
-            let client = anonguard::mesh::PinnedDirectoryClient::new(
+            let mut client = anonguard::mesh::PinnedDirectoryClient::new(
                 config.authority_endpoints.clone(),
                 args.quorum_threshold,
             )?;
+            if let Some(bindings) = authority_transports {
+                client = client.with_transports(bindings)?;
+            }
             let pool_clone = pool.clone();
             tokio::spawn(async move {
                 let mut retry_seconds = 1;

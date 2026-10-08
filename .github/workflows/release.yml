@@ -45,6 +45,8 @@ jobs:
           cp target/release/anonguard-daemon target/package_linux/
           cp contrib/runtime.env target/package_linux/runtime.env.example
           install -m 755 scripts/anonguard_run_app.py target/package_linux/anonguard-run-app
+          install -m 755 scripts/pt_supervisor.py target/package_linux/anonguard-pt
+          cp contrib/anonguard-pt@.service target/package_linux/
           cp -r docs target/package_linux/docs
           cp scripts/deployment_preflight.py target/package_linux/deployment_preflight.py
           cp scripts/latency_profile.py target/package_linux/latency_profile.py

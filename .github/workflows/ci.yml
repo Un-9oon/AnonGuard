@@ -41,6 +41,8 @@ jobs:
         run: |
           cargo test --locked --test test_pluggable_transport -- --ignored
           cargo test --locked --test test_daemon_testnet
+          ANONGUARD_TEST_PRIVATE_BRIDGES=1 cargo test --locked --test test_daemon_testnet
+          python3 scripts/test_pt_supervisor.py
 
       - name: Install namespace test prerequisites
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps
@@ -62,6 +64,12 @@ jobs:
 
       - name: Verify Debian install and configuration recovery on disposable runner
         run: sudo env ANONGUARD_DISPOSABLE_PACKAGE_TEST=1 bash scripts/test_deb_lifecycle.sh dist/anonguard_*.deb
+
+      - name: Verify installed transport unit lifecycle and private credentials
+        run: |
+          sudo dpkg --install dist/anonguard_*.deb
+          sudo env ANONGUARD_DISPOSABLE_PT_TEST=1 ANONGUARD_OBFS4PROXY=/usr/bin/obfs4proxy python3 scripts/test_pt_service_live.py
+          sudo dpkg --purge anonguard
 
   app-containment:
     name: Linux Headless Application Containment

@@ -14,6 +14,10 @@ pub struct GuardConfig {
     /// Optional mandatory first-hop transport bindings; empty means direct mode.
     #[serde(default)]
     pub bridge_transports: Vec<crate::onion::transport::BridgeTransport>,
+    #[serde(default)]
+    pub private_bridges: bool,
+    #[serde(default)]
+    pub unlisted_bridge: bool,
     /// Strict kill-switch: if true, immediately drop all traffic if proxy fails
     pub strict_killswitch: bool,
     /// Enforce remote DNS resolution (SOCKS5h FQDN framing)
@@ -100,6 +104,8 @@ impl Default for GuardConfig {
     fn default() -> Self {
         Self {
             bridge_transports: Vec::new(),
+            private_bridges: false,
+            unlisted_bridge: false,
             strict_killswitch: true,
             enforce_remote_dns: true,
             disable_ipv6: true,

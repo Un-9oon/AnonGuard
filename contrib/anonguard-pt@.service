@@ -1,0 +1,36 @@
+[Unit]
+Description=AnonGuard supervised obfs4 transport (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+DynamicUser=yes
+StateDirectory=anonguard-pt-%i
+StateDirectoryMode=0700
+RuntimeDirectory=anonguard-pt-%i
+RuntimeDirectoryMode=0700
+LoadCredential=pt.json:/etc/anonguard/pt-%i.json
+ExecStart=/usr/bin/python3 /usr/bin/anonguard-pt --config ${CREDENTIALS_DIRECTORY}/pt.json --state /var/lib/anonguard-pt-%i --runtime /run/anonguard-pt-%i
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=20
+TimeoutStopSec=5
+KillMode=control-group
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=4096
+LimitCORE=0
+TasksMax=64
+MemoryMax=256M
+MemorySwapMax=0
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
