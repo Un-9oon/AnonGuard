@@ -24,6 +24,9 @@ dpkg --install "$1"
 test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
+test "$(stat -c '%a:%u:%g' /usr/share/doc/anonguard/anonguard-bwrap.apparmor)" = '644:0:0'
+test -r /usr/share/doc/anonguard/docs/LINUX_APP_CONTAINMENT.md
+test ! -e /etc/apparmor.d/anonguard-bwrap
 systemd-analyze verify /lib/systemd/system/anonguard.service
 if systemctl is-active --quiet anonguard.service; then
     echo 'Unconfigured package unexpectedly started a service' >&2

@@ -68,7 +68,11 @@ cp "${ROOT_DIR}/contrib/runtime.env" "${STAGING_DIR}/etc/anonguard/runtime.env"
 chmod 640 "${STAGING_DIR}/etc/anonguard/runtime.env"
 printf '/etc/anonguard/runtime.env\n' > "${STAGING_DIR}/DEBIAN/conffiles"
 
-# 4. Documentation
+# 4. Documentation and explicit administrator policy examples (never auto-loaded).
+mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard/docs"
+cp "${ROOT_DIR}/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/docs/"
+cp "${ROOT_DIR}/deploy/apparmor/anonguard-bwrap" "${STAGING_DIR}/usr/share/doc/anonguard/anonguard-bwrap.apparmor"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/anonguard-bwrap.apparmor"
 cp "${ROOT_DIR}/README.md" "${STAGING_DIR}/usr/share/doc/anonguard/README.md"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/README.md"
 

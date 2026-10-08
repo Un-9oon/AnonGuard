@@ -44,6 +44,9 @@ jobs:
           mkdir -p target/package_linux
           cp target/release/anonguard-daemon target/package_linux/
           cp contrib/runtime.env target/package_linux/runtime.env.example
+          install -m 755 scripts/anonguard_run_app.py target/package_linux/anonguard-run-app
+          cp -r docs target/package_linux/docs
+          cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
           cp README.md target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
           cd dist && sha256sum anonguard-linux-amd64.tar.gz > anonguard-linux-amd64.tar.gz.sha256
