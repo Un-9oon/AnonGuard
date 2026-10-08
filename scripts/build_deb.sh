@@ -36,6 +36,27 @@ find "${STAGING_DIR}" -type d -exec chmod 755 {} +
 cp "${ROOT_DIR}/target/release/anonguard-daemon" "${STAGING_DIR}/usr/bin/anonguard-daemon"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-daemon"
 
+# Derive minimum library versions from the actual packaged ELF, rather than
+# guessing a libc baseline or allowing installation without its dependencies.
+DEPS_DIR="${ROOT_DIR}/target/deb_dependencies"
+mkdir -p "${DEPS_DIR}/debian"
+cat << EOF > "${DEPS_DIR}/debian/control"
+Source: ${PKG_NAME}
+Section: net
+Priority: optional
+Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
+
+Package: ${PKG_NAME}
+Architecture: any
+Description: Experimental anonymity transport
+EOF
+SHLIBS_OUTPUT="$(cd "${DEPS_DIR}" && dpkg-shlibdeps -O -e"${STAGING_DIR}/usr/bin/anonguard-daemon")"
+SHLIBS_DEPENDS="$(printf '%s\n' "${SHLIBS_OUTPUT}" | sed -n 's/^shlibs:Depends=//p')"
+if [ -z "${SHLIBS_DEPENDS}" ]; then
+    echo 'No runtime library dependencies detected; refusing an incomplete Debian package' >&2
+    exit 1
+fi
+
 # 2. Systemd service
 cp "${ROOT_DIR}/contrib/anonguard.service" "${STAGING_DIR}/lib/systemd/system/anonguard.service"
 chmod 644 "${STAGING_DIR}/lib/systemd/system/anonguard.service"
@@ -67,6 +88,8 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
+Depends: ${SHLIBS_DEPENDS}
+Suggests: iproute2, nftables
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
 Description: Experimental authenticated three-hop anonymity transport

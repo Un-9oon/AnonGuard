@@ -18,6 +18,8 @@ cleanup() {
     dpkg --purge anonguard || true
 }
 trap cleanup EXIT
+dependencies=$(dpkg-deb --field "$1" Depends)
+[[ "$dependencies" == *libc6* && "$dependencies" == *libgcc-s1* ]]
 dpkg --install "$1"
 test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
