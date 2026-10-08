@@ -44,6 +44,12 @@ jobs:
       - name: Check Benchmark Compilation
         run: cargo bench --no-run
 
+      - name: Build Debian package from verified binary
+        run: bash scripts/build_deb.sh --prebuilt
+
+      - name: Verify Debian install and configuration recovery on disposable runner
+        run: sudo env ANONGUARD_DISPOSABLE_PACKAGE_TEST=1 bash scripts/test_deb_lifecycle.sh dist/anonguard_*.deb
+
   fuzz:
     name: Run Fuzz Targets (Short Campaign)
     runs-on: ubuntu-latest
