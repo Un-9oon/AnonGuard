@@ -32,6 +32,16 @@ jobs:
       - name: Run Test Suite
         run: cargo test --locked --all-targets --verbose
 
+      - name: Install real obfs4 transport for interoperability verification
+        run: sudo apt-get update && sudo apt-get install -y obfs4proxy
+
+      - name: Verify pinned TLS and full CLI testnet through real obfs4
+        env:
+          ANONGUARD_OBFS4PROXY: /usr/bin/obfs4proxy
+        run: |
+          cargo test --locked --test test_pluggable_transport -- --ignored
+          cargo test --locked --test test_daemon_testnet
+
       - name: Install namespace test prerequisites
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 procps
 

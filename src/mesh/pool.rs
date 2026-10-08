@@ -1,5 +1,44 @@
 //! High-concurrency proxy pool with auto-rotation on block.
 
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn entry_transport_allowlist_cannot_fall_back_to_other_guards() {
+        let pool = ProxyPool::new();
+        for (address, pin, exit) in [
+            ("1.1.1.1", [1; 32], false),
+            ("2.1.1.1", [2; 32], false),
+            ("3.1.1.1", [3; 32], true),
+        ] {
+            pool.add_proxy(&format!("socks5://{address}:9001"))
+                .await
+                .unwrap();
+            let endpoint = format!("{address}:9001");
+            pool.identity_keys
+                .write()
+                .await
+                .insert(endpoint.clone(), pin);
+            pool.nodes.write().await.get_mut(&endpoint).unwrap().is_exit = exit;
+        }
+        let chain = pool
+            .get_onion_chain_with_entry_pins(3, 3, true, true, &[[2; 32]])
+            .await;
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0].host, "2.1.1.1");
+        assert!(pool
+            .get_onion_chain_with_entry_pins(3, 3, true, true, &[[1; 32]])
+            .await
+            .is_empty());
+        pool.note_guard_link_failure([2; 32]).await;
+        assert!(pool
+            .get_onion_chain_with_entry_pins(3, 3, true, true, &[[2; 32]])
+            .await
+            .is_empty());
+    }
+}
+
 use indexmap::IndexMap;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -358,6 +397,26 @@ impl ProxyPool {
         enforce_diversity: bool,
         require_exit_at_last: bool,
     ) -> Vec<ProxyNode> {
+        self.get_onion_chain_with_entry_pins(
+            min_hops,
+            max_hops,
+            enforce_diversity,
+            require_exit_at_last,
+            &[],
+        )
+        .await
+    }
+
+    /// Mandatory entry allowlist for provisioned transport mode. Existing guards
+    /// outside this set fail closed; switching profiles needs separate guard state.
+    pub async fn get_onion_chain_with_entry_pins(
+        &self,
+        min_hops: usize,
+        max_hops: usize,
+        enforce_diversity: bool,
+        require_exit_at_last: bool,
+        entry_pins: &[[u8; 32]],
+    ) -> Vec<ProxyNode> {
         if self.directory_expired() {
             return Vec::new();
         }
@@ -432,7 +491,16 @@ impl ProxyPool {
             let mut state = self.guard_state.write().await;
             let previous = state.clone();
             if state.guards.is_empty() {
-                for node in pool_for_middles.iter().take(3) {
+                for node in pool_for_middles
+                    .iter()
+                    .filter(|node| {
+                        entry_pins.is_empty()
+                            || keys
+                                .get(&format!("{}:{}", node.host, node.port))
+                                .is_some_and(|pin| entry_pins.contains(pin))
+                    })
+                    .take(3)
+                {
                     let endpoint = format!("{}:{}", node.host, node.port);
                     if let Some(key) = keys.get(&endpoint) {
                         state.identities.insert(endpoint.clone(), *key);
@@ -452,8 +520,13 @@ impl ProxyPool {
                     .find(|node| {
                         let candidate = format!("{}:{}", node.host, node.port);
                         match state.identities.get(endpoint) {
-                            Some(pin) => keys.get(&candidate) == Some(pin),
-                            None => keys.is_empty() && &candidate == endpoint,
+                            Some(pin) => {
+                                keys.get(&candidate) == Some(pin)
+                                    && (entry_pins.is_empty() || entry_pins.contains(pin))
+                            }
+                            None => {
+                                entry_pins.is_empty() && keys.is_empty() && &candidate == endpoint
+                            }
                         }
                     })
                     .cloned()

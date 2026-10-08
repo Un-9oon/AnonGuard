@@ -3,6 +3,8 @@
 //! This is deployment-path regression coverage, not independent anonymity evidence.
 use anonguard::core::config::AuthorityEndpoint;
 use anonguard::mesh::{PinnedDirectoryClient, ProxyPool};
+#[path = "support/pt.rs"]
+mod pt;
 use std::{
     fs,
     net::SocketAddr,
@@ -243,7 +245,73 @@ async fn exercise() {
         testnet.diagnostics()
     );
     drop(reserved[7].take());
-    testnet.start("gateway", addresses[7], &authority_args, &["--onion"]);
+    let mut transports = Vec::new();
+    let bridge_file = testnet.directory.join("bridge-transports.json");
+    if let Some(binary) = std::env::var_os("ANONGUARD_OBFS4PROXY") {
+        let binary = fs::canonicalize(binary).unwrap();
+        let server_state = testnet.directory.join("pt-server");
+        let client_state = testnet.directory.join("pt-client");
+        fs::create_dir(&server_state).unwrap();
+        fs::create_dir(&client_state).unwrap();
+        let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge = reservation.local_addr().unwrap();
+        drop(reservation);
+        let (server, announcement) = pt::launch(
+            &binary,
+            &server_state,
+            &[
+                ("TOR_PT_SERVER_TRANSPORTS", "obfs4".into()),
+                ("TOR_PT_SERVER_BINDADDR", format!("obfs4-{bridge}")),
+                ("TOR_PT_ORPORT", addresses[4].to_string()),
+            ],
+            "SMETHOD obfs4 ",
+        )
+        .await;
+        transports.push(server);
+        let mut arguments = std::collections::BTreeMap::new();
+        for pair in announcement
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix("ARGS:"))
+            .unwrap()
+            .split(',')
+        {
+            let (key, value) = pair.split_once('=').unwrap();
+            arguments.insert(key.to_owned(), value.to_owned());
+        }
+        let (client, method) = pt::launch(
+            &binary,
+            &client_state,
+            &[("TOR_PT_CLIENT_TRANSPORTS", "obfs4".into())],
+            "CMETHOD obfs4 ",
+        )
+        .await;
+        transports.push(client);
+        let fields: Vec<_> = method.split_whitespace().collect();
+        assert_eq!(fields[2], "socks5");
+        let key = anonguard::core::storage::load_or_create_signing_key(
+            &testnet.directory.join("relay-0/identity.key"),
+        )
+        .unwrap();
+        let binding = anonguard::onion::transport::BridgeTransport {
+            identity: key.verifying_key().to_bytes(),
+            proxy: fields[3].parse().unwrap(),
+            bridge,
+            arguments,
+        };
+        fs::write(&bridge_file, serde_json::to_vec(&vec![binding]).unwrap()).unwrap();
+        testnet.start(
+            "gateway",
+            addresses[7],
+            &authority_args,
+            &[
+                "--onion",
+                "--bridge-transports",
+                bridge_file.to_str().unwrap(),
+            ],
+        );
+    } else {
+        testnet.start("gateway", addresses[7], &authority_args, &["--onion"]);
+    }
     ready(addresses[7]).await;
     // Every circuit participant must admit a directory, not just the gateway.
     // Relays can reject an early refresh while registrations are still arriving.

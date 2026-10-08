@@ -112,6 +112,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     onion: bool,
 
+    /// JSON entry transport bindings; requires onion gateway mode (no direct fallback)
+    #[arg(long, requires = "onion", conflicts_with_all = ["relay", "authority", "reverse_relay", "initialize_identity", "tracker", "status"])]
+    bridge_transports: Option<PathBuf>,
+
     /// Enforce BGP /16 Subnet Diversity across circuit hops (Sybil resistance)
     #[arg(long, default_value_t = true)]
     enforce_subnet_diversity: bool,
@@ -428,6 +432,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = GuardConfig {
+        bridge_transports: args
+            .bridge_transports
+            .as_ref()
+            .map(|path| anonguard::onion::transport::load_bridges(path))
+            .transpose()?
+            .unwrap_or_default(),
         listen_addr: args.listen.clone(),
         enable_jitter: args.jitter,
         jitter_lambda: args.jitter_lambda,

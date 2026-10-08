@@ -468,10 +468,13 @@ impl GatewayServer {
 
                     // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                     let chain = if config.enable_onion_routing || config.enforce_subnet_diversity {
-                        pool.get_diverse_onion_chain(
+                        let pins: Vec<_> = config.bridge_transports.iter().map(|entry| entry.identity).collect();
+                        pool.get_onion_chain_with_entry_pins(
                             config.min_chain_length.max(3),
                             config.max_chain_length.max(3),
                             config.enforce_subnet_diversity,
+                            true,
+                            &pins,
                         )
                         .await
                     } else {
@@ -496,7 +499,16 @@ impl GatewayServer {
                             let keys = pool.get_identity_keys(&chain).await;
                             let stream = match tokio::time::timeout(
                                 std::time::Duration::from_secs(10),
-                                TcpStream::connect(addr),
+                                async {
+                                    if config.bridge_transports.is_empty() {
+                                        TcpStream::connect(addr).await
+                                    } else {
+                                        let transport = config.bridge_transports.iter()
+                                            .find(|binding| binding.identity == keys[0])
+                                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Entry has no provisioned transport"))?;
+                                        crate::onion::transport::connect(transport.proxy, transport.bridge, &transport.arguments).await
+                                    }
+                                },
                             )
                             .await
                             {
