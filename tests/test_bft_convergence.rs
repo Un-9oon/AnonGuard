@@ -1,7 +1,6 @@
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
-use std::time::Duration;
-use tokio::time::sleep;
+use tokio::{net::TcpListener, task::JoinSet};
 
 use anonguard::mesh::authority::DirectoryAuthority;
 use anonguard::mesh::consensus::RelayDescriptor;
@@ -9,17 +8,26 @@ use anonguard::mesh::sybil::{current_timestamp_secs, solve_pow_bounded};
 
 #[tokio::test]
 async fn test_gossip_convergence_multi_round() {
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
     let test_difficulty = 8;
+    // Reserve both ephemeral endpoints before starting either server. The
+    // listener owns the port throughout startup, without timing-based readiness.
+    let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address_a = listener_a.local_addr().unwrap().to_string();
+    let address_b = listener_b.local_addr().unwrap().to_string();
 
     // Setup two peer authorities
     let mut auth_a = DirectoryAuthority::with_difficulty(
         "auth-A".to_string(),
-        "127.0.0.1:19200".to_string(),
+        address_a.clone(),
         test_difficulty,
     );
     let mut auth_b = DirectoryAuthority::with_difficulty(
         "auth-B".to_string(),
-        "127.0.0.1:19201".to_string(),
+        address_b.clone(),
         test_difficulty,
     );
 
@@ -30,25 +38,21 @@ async fn test_gossip_convergence_multi_round() {
     let key_b = auth_b.verifying_key();
 
     auth_a.peer_authorities = vec![
-        ("127.0.0.1:19200".to_string(), Some(key_a)),
-        ("127.0.0.1:19201".to_string(), Some(key_b)),
+        (address_a.clone(), Some(key_a)),
+        (address_b.clone(), Some(key_b)),
     ];
-    auth_b.peer_authorities = vec![
-        ("127.0.0.1:19200".to_string(), Some(key_a)),
-        ("127.0.0.1:19201".to_string(), Some(key_b)),
-    ];
+    auth_b.peer_authorities = vec![(address_a, Some(key_a)), (address_b, Some(key_b))];
 
     let auth_a_clone = auth_a.clone();
     let auth_b_clone = auth_b.clone();
 
-    tokio::spawn(async move {
-        let _ = auth_a_clone.run().await;
+    let mut servers = JoinSet::new();
+    servers.spawn(async move {
+        auth_a_clone.run_listener(listener_a).await.unwrap();
     });
-    tokio::spawn(async move {
-        let _ = auth_b_clone.run().await;
+    servers.spawn(async move {
+        auth_b_clone.run_listener(listener_b).await.unwrap();
     });
-
-    sleep(Duration::from_millis(100)).await;
 
     // Register a relay directly on Authority A ONLY.
     let now = current_timestamp_secs();
@@ -68,12 +72,10 @@ async fn test_gossip_convergence_multi_round() {
 
     auth_a.register_relay(desc.clone()).await.unwrap();
 
-    sleep(Duration::from_millis(500)).await;
-
     // Run 10 rounds of consensus generation (which triggers gossip reconciliation)
     for round in 1..=10 {
         // A generates consensus (meaningless for A, but normal routine)
-        let _ = auth_a.generate_consensus().await;
+        auth_a.generate_consensus().await.unwrap();
         // B generates consensus, pulling gossip from A
         let consensus_b = auth_b.generate_consensus().await;
 
@@ -89,6 +91,10 @@ async fn test_gossip_convergence_multi_round() {
             round
         );
 
-        sleep(Duration::from_millis(50)).await;
+        assert!(servers.try_join_next().is_none(), "Authority exited early");
+    }
+    servers.abort_all();
+    while let Some(result) = servers.join_next().await {
+        assert!(result.unwrap_err().is_cancelled());
     }
 }

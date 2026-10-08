@@ -206,12 +206,10 @@ impl ProxyPool {
             }
             let endpoint = if relay.host.starts_with("reverse://") {
                 relay.host.clone()
+            } else if relay.host.contains(':') {
+                format!("socks5://[{}]:{}", relay.host, relay.port)
             } else {
-                if relay.host.contains(':') {
-                    format!("socks5://[{}]:{}", relay.host, relay.port)
-                } else {
-                    format!("socks5://{}:{}", relay.host, relay.port)
-                }
+                format!("socks5://{}:{}", relay.host, relay.port)
             };
             let mut node = ProxyNode::parse(&endpoint)?;
             node.enforce_remote_dns();

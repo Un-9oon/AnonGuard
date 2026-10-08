@@ -543,7 +543,10 @@ impl DirectoryAuthority {
         self.run_listener(listener).await
     }
 
-    async fn run_listener(
+    /// Serve an already-bound listener. Configure `listen_addr` to its bound
+    /// endpoint before configuring peers so self-requests are excluded correctly.
+    /// This lets callers reserve an ephemeral port without a close/rebind race.
+    pub async fn run_listener(
         &self,
         listener: TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
