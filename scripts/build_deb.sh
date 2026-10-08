@@ -93,6 +93,9 @@ chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/copyright"
 cp "${ROOT_DIR}/LICENSE-MIT" "${ROOT_DIR}/LICENSE-APACHE" "${STAGING_DIR}/usr/share/doc/anonguard/"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/"LICENSE-*
 
+cp "${ROOT_DIR}/scripts/latency_profile.py" "${STAGING_DIR}/usr/share/doc/anonguard/latency_profile.py"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/latency_profile.py"
+
 # 5. DEBIAN control file
 cat << EOF > "${STAGING_DIR}/DEBIAN/control"
 Package: ${PKG_NAME}

@@ -47,6 +47,7 @@ jobs:
           install -m 755 scripts/anonguard_run_app.py target/package_linux/anonguard-run-app
           cp -r docs target/package_linux/docs
           cp scripts/deployment_preflight.py target/package_linux/deployment_preflight.py
+          cp scripts/latency_profile.py target/package_linux/latency_profile.py
           cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
           cp README.md LICENSE-MIT LICENSE-APACHE target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .

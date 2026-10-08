@@ -23,6 +23,9 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all -- --check
 
+      - name: Verify HTTP evaluation and failed-proxy refusal
+        run: python3 scripts/test_latency_profile.py
+
       - name: Check Cargo.lock reproducibility
         run: cargo check --locked --all-targets
 

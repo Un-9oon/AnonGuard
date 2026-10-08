@@ -111,3 +111,22 @@ after acceptance and keep a tested fallback installation for the presentation.
 The remaining wider-release gates are tracked in [production readiness](PRODUCTION_READINESS.md).
 Passing this checklist does not establish superiority to Tor or safety against
 a global observer or a compromised user host.
+
+## Repeatable HTTP measurements
+
+Install curl from the OS repository. Use only an owned endpoint. The measurement
+script requires an explicit target and never contacts a default external service.
+Replace OWNED_HOST with your destination; use a fixed response body:
+
+```sh
+python3 /usr/share/doc/anonguard/latency_profile.py --url http://OWNED_HOST:8080/payload --requests 20 > direct.json
+python3 /usr/share/doc/anonguard/latency_profile.py --url http://OWNED_HOST:8080/payload --proxy socks5h://127.0.0.1:9050 --requests 20 > anonguard.json
+```
+
+SOCKS mode resolves destination names remotely and does not fall back to direct
+access. Each trial starts a fresh curl process; results include connection setup.
+The JSON records all failures and successful-trial latency percentiles (nearest
+rank). Any failed request produces exit status 1 while retaining the report.
+Downloaded bytes are application body bytes, not network overhead. Measure wire
+traffic, CPU and RSS separately. This script runs on the measurement host; it does
+not itself establish application containment or traffic-analysis resistance.
