@@ -72,7 +72,7 @@ while True:
                             lines = trace.read_text().splitlines()
                             important = [line for line in lines if any(word in line for word in
                                          ("uid_map", "gid_map", "EPERM", "EACCES", "DUMPABLE", "NO_NEW_PRIVS"))]
-                            print("\n".join(important[-30:]), flush=True)
+                            print("\n".join(important[:12] + important[-30:]), flush=True)
                 assert result == 0, f"Sandbox probe failed, exit={result}"
             server.terminate()
             server.wait(timeout=5)
