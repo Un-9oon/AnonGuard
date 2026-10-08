@@ -104,6 +104,10 @@ struct Args {
     #[arg(long)]
     authority_keys: Option<String>,
 
+    /// Quorum-signed offline identity retirement policy; applied at restart
+    #[arg(long, requires = "authorities", conflicts_with_all = ["initialize_identity", "status", "tracker", "reverse_relay", "fetch_from", "allow_open_socks5", "pool", "proxy"])]
+    revocation_policy: Option<PathBuf>,
+
     /// Quorum threshold for Directory Authority consensus
     #[arg(long, default_value_t = 1)]
     quorum_threshold: usize,
@@ -518,6 +522,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..GuardConfig::default()
     };
 
+    if args.revocation_policy.is_some() && !(args.onion || args.relay || args.authority) {
+        return Err("Identity retirement requires an authenticated onion routing role".into());
+    }
+    let retirement_journal = if args.authority {
+        config.identity_key_path.with_extension("revocation.json")
+    } else {
+        config.guard_state_path.with_extension("revocation.json")
+    };
+    let revoked = anonguard::core::revocation::load_and_commit(
+        args.revocation_policy.as_deref(),
+        &retirement_journal,
+        &bound_authorities,
+        args.quorum_threshold,
+    )?;
+    if config
+        .authority_endpoints
+        .iter()
+        .any(|endpoint| revoked.contains(&endpoint.public_key))
+        || config
+            .bridge_transports
+            .iter()
+            .any(|binding| revoked.contains(&binding.identity))
+    {
+        return Err(
+            "Configured authority or private bridge identity is retired; update authenticated pins"
+                .into(),
+        );
+    }
+
     if (config.allow_open_socks5 || config.allow_private_exit) && !args.i_know_this_is_insecure {
         error!("FATAL: You have enabled an insecure configuration flag (allow-open-socks5 or allow-private-exit).");
         error!("This can lead to severe security and privacy compromises.");
@@ -537,7 +570,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             args.listen,
             args.pow_difficulty,
             config.identity_key_path,
-        );
+        )
+        .with_revoked_identities(revoked.clone());
+        if revoked.contains(&authority.verifying_key().to_bytes()) {
+            return Err("Local authority identity is retired".into());
+        }
         if let Some(own) = config
             .authority_endpoints
             .iter()
@@ -573,7 +610,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return res;
     }
 
-    let pool = ProxyPool::new();
+    let relay_identity_key =
+        std::sync::Arc::new(load_or_create_identity_key(&config.identity_key_path));
+    if revoked.contains(&relay_identity_key.verifying_key().to_bytes()) {
+        return Err("Local routing identity is retired".into());
+    }
+    let pool = ProxyPool::with_revoked_identities(revoked.clone());
     pool.init_guard_state(config.guard_state_path.clone())
         .await?;
 
@@ -710,8 +752,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.killswitch_trip_threshold,
         std::time::Duration::from_secs(1),
     );
-    let relay_identity_key =
-        std::sync::Arc::new(load_or_create_identity_key(&config.identity_key_path));
     #[cfg(target_os = "linux")]
     let gateway_state_path = config.guard_state_path.clone();
     #[cfg(target_os = "linux")]

@@ -12,7 +12,7 @@ impl GuardState {
         Self::default()
     }
     pub fn load_checked(path: &Path) -> Result<Self, String> {
-        match std::fs::read(path) {
+        match crate::core::storage::read_bounded_file(path, 65536) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| format!("Invalid persistent guard state: {e}")),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),

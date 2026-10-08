@@ -16,6 +16,10 @@ name = "anonguard-daemon"
 path = "src/main.rs"
 
 [[bin]]
+name = "anonguard-identity-policy"
+path = "tools/identity_policy.rs"
+
+[[bin]]
 name = "anonymity-set-calc"
 path = "tools/anonymity_set_calc.rs"
 
@@ -73,8 +77,12 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], option
 hmac = "0.12"
 hkdf = "0.12"
 indexmap = "2"
+
 hex = "0.4.3"
 futures = "0.3.34"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = []

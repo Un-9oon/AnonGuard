@@ -1,6 +1,45 @@
 //! Private, exclusive temporary files and atomic durable state replacement.
 use std::io::Write;
 use std::{fs, io, path::Path};
+
+/// Open a bounded regular input without blocking on a FIFO. Parent directories
+/// must remain administrator-controlled; this is not a hostile-filesystem jail.
+pub fn open_regular_file(path: &Path, maximum: u64) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Security input must be a bounded regular file",
+        ));
+    }
+    Ok(file)
+}
+
+/// Bound both the initial size and bytes read if a regular file grows concurrently.
+pub fn read_bounded_file(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let read_limit = maximum
+        .checked_add(1)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid input size limit"))?;
+    let file = open_regular_file(path, maximum)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Security input exceeds size limit",
+        ));
+    }
+    Ok(bytes)
+}
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
@@ -30,9 +69,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn read_identity_key(path: &std::path::Path) -> std::io::Result<ed25519_dalek::SigningKey> {
+pub fn read_identity_key(path: &std::path::Path) -> std::io::Result<ed25519_dalek::SigningKey> {
     use std::io::{Error, ErrorKind, Read};
-    let file = std::fs::File::open(path)?;
+    let file = open_regular_file(path, 32)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() != 32 {
         return Err(Error::new(
@@ -181,5 +220,44 @@ mod identity_tests {
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read_identity_key(&path).unwrap().verifying_key(), expected);
+    }
+
+    #[test]
+    fn bounded_input_rejects_oversized_and_nonregular_files() {
+        let directory = Directory::new();
+        let path = directory.0.join("state.json");
+        std::fs::write(&path, b"1234").unwrap();
+        assert_eq!(read_bounded_file(&path, 4).unwrap(), b"1234");
+        assert!(read_bounded_file(&path, 3).is_err());
+        assert!(read_bounded_file(&directory.0, 4096).is_err());
+        assert!(read_bounded_file(&path, u64::MAX).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_and_symlink_keys_fail_without_creating_or_replacing_identity() {
+        use std::os::unix::fs::{symlink, FileTypeExt};
+        let directory = Directory::new();
+        let target = directory.0.join("real.key");
+        load_or_create_signing_key(&target).unwrap();
+        let original = std::fs::read(&target).unwrap();
+        let alias = directory.0.join("alias.key");
+        symlink(&target, &alias).unwrap();
+        assert!(load_or_create_signing_key(&alias).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        let fifo = directory.0.join("fifo.key");
+        // The test owns this path and creates no writer, exercising the nonblocking open.
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(load_or_create_signing_key(&fifo).is_err());
+        assert!(read_bounded_file(&fifo, 4096).is_err());
+        assert!(std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+        assert_eq!(std::fs::read_dir(&directory.0).unwrap().count(), 3);
     }
 }

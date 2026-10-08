@@ -34,14 +34,7 @@ pub fn load_authorities(path: &std::path::Path) -> io::Result<Vec<BridgeTranspor
 }
 
 fn load_bindings(path: &std::path::Path, maximum: usize) -> io::Result<Vec<BridgeTransport>> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(65537)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 65536 {
-        return Err(invalid("Bridge configuration exceeds 64 KiB"));
-    }
+    let bytes = crate::core::storage::read_bounded_file(path, 65536)?;
     let bridges: Vec<BridgeTransport> =
         serde_json::from_slice(&bytes).map_err(|_| invalid("Invalid bridge configuration JSON"))?;
     if bridges.is_empty() || bridges.len() > maximum {

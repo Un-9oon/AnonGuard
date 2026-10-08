@@ -77,10 +77,10 @@ pub struct GuardConfig {
     /// this list (matching the authority ordering in `directory_authorities`). An empty
     /// list means unauthenticated mode, which is insecure and logged as a warning.
     ///
-    /// Bootstrap: bake in the canonical authority keys at compile time (mirroring Tor's
-    /// hardcoded dirauth list). Rotation procedure: update this list and redeploy; old
-    /// keys can be kept for a grace period by appending rather than replacing. See
-    /// docs/reports/hardening_findings.md for the full bootstrap threat model.
+    /// Bootstrap pins must be authenticated out of band and bound to endpoints.
+    /// Replacement is coordinated; never alias old/new signing keys to inflate votes.
+    /// Enrolled retirement policies must advance with the updated authority set.
+    /// See docs/key_rotation_runbook.md for migration and state preservation.
     ///
     /// Reference: Diffie, van Oorschot, Wiener, "Authentication and Authenticated Key
     /// Exchanges", Designs, Codes and Cryptography, 1992 (STS protocol).

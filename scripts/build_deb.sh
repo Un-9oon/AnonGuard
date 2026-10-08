@@ -17,8 +17,8 @@ case "${1:-}" in
     --prebuilt) ;;
     *) echo "Usage: $0 [--prebuilt]" >&2; exit 2 ;;
 esac
-if [ "$#" -gt 1 ] || [ ! -x "${ROOT_DIR}/target/release/anonguard-daemon" ]; then
-    echo "Expected one executable release binary and at most one option" >&2
+if [ "$#" -gt 1 ] || [ ! -x "${ROOT_DIR}/target/release/anonguard-daemon" ] || [ ! -x "${ROOT_DIR}/target/release/anonguard-identity-policy" ]; then
+    echo "Expected daemon and identity-policy release binaries and at most one option" >&2
     exit 2
 fi
 
@@ -35,6 +35,8 @@ find "${STAGING_DIR}" -type d -exec chmod 755 {} +
 # 1. Binary
 cp "${ROOT_DIR}/target/release/anonguard-daemon" "${STAGING_DIR}/usr/bin/anonguard-daemon"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-daemon"
+cp "${ROOT_DIR}/target/release/anonguard-identity-policy" "${STAGING_DIR}/usr/bin/anonguard-identity-policy"
+chmod 755 "${STAGING_DIR}/usr/bin/anonguard-identity-policy"
 cp "${ROOT_DIR}/scripts/anonguard_run_app.py" "${STAGING_DIR}/usr/bin/anonguard-run-app"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-run-app"
 cp "${ROOT_DIR}/scripts/pt_supervisor.py" "${STAGING_DIR}/usr/bin/anonguard-pt"

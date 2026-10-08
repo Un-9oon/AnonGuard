@@ -1,6 +1,6 @@
 # Relay identity replacement and decommissioning
 
-Identity replacement is a coordinated operational migration, not an automatic reputation warm-up. No uptime/bandwidth reputation ramp or in-band cryptographic revocation protocol is implemented.
+Identity replacement is a coordinated operational migration, not an automatic reputation warm-up. [Quorum-signed offline identity retirement](IDENTITY_RETIREMENT.md) is implemented for enrolled deployments. No uptime/bandwidth reputation ramp or online revocation-distribution protocol is implemented.
 
 1. Inventory the relay's signed identity, advertised endpoint, pinned guards and operator dependencies. Plan an outage and replacement circuit capacity.
 2. Stop the affected relay, preserve restricted identity/state evidence where appropriate, and repair or replace a compromised host before provisioning a new identity.
@@ -9,4 +9,4 @@ Identity replacement is a coordinated operational migration, not an automatic re
 5. Demonstrate new pinned transport, valid proof of work, fresh quorum directories, guard behavior and usable circuits in an isolated testnet before restoring service.
 6. Rehearse old-key rejection, state recovery and operator incident response. Preserve client rollback protections and document any explicit guard migration.
 
-A runtime authority blacklist command is not implemented. A compromise therefore needs coordinated bootstrap/directory policy changes; merely restarting with a new key does not revoke distributed old descriptors or existing pins. Reviewed revocation and rotation remain production gates. See [authority replacement](key_rotation_runbook.md) and [production readiness](PRODUCTION_READINESS.md).
+For enrolled deployments, stop the affected routing processes, sign a higher-generation cumulative retirement policy, distribute it to every authority/relay/gateway, and restart using the preserved retirement journals. Authorities reject retired registrations/gossip and clients exclude retired descriptors even from otherwise valid signed directories. Private bridge and bootstrap profiles containing retired pins must be updated explicitly. A frozen authority vote containing a retired relay is refused until a new epoch; do not rewrite the vote journal to force immediate availability. Unenrolled or unrestarted clients retain their previous trust. Independent review and automated authenticated distribution remain production gates. See [authority replacement](key_rotation_runbook.md) and [production readiness](PRODUCTION_READINESS.md).

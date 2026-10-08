@@ -95,7 +95,6 @@ mod transport_tests {
 use indexmap::IndexMap;
 use rand::seq::SliceRandom;
 use rand::Rng;
-use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -112,6 +111,8 @@ struct AcceptedSnapshot {
 
 #[derive(Clone)]
 pub struct ProxyPool {
+    initialization: Arc<tokio::sync::Mutex<()>>,
+    revoked: Arc<std::collections::HashSet<[u8; 32]>>,
     /// Keyed by "host:port" — inserting the same key overwrites, preventing duplicates (#6).
     nodes: Arc<RwLock<IndexMap<String, ProxyNode>>>,
     cursor: Arc<AtomicUsize>,
@@ -130,7 +131,14 @@ pub struct ProxyPool {
 
 impl ProxyPool {
     pub fn new() -> Self {
+        Self::with_revoked_identities(std::collections::HashSet::new())
+    }
+
+    /// Immutable retirement policy installed before any directory or listener.
+    pub fn with_revoked_identities(revoked: std::collections::HashSet<[u8; 32]>) -> Self {
         Self {
+            initialization: Arc::new(tokio::sync::Mutex::new(())),
+            revoked: Arc::new(revoked),
             nodes: Arc::new(RwLock::new(IndexMap::new())),
             cursor: Arc::new(AtomicUsize::new(0)),
             guard_cooldowns: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -149,6 +157,7 @@ impl ProxyPool {
     }
 
     pub async fn init_guard_state(&self, path: std::path::PathBuf) -> Result<(), String> {
+        let _initialization = self.initialization.lock().await;
         if let Some(existing) = self.guard_state_path.read().await.as_ref() {
             return if existing == &path {
                 Ok(())
@@ -157,17 +166,19 @@ impl ProxyPool {
             };
         }
         let snapshot_path = path.with_extension("consensus.json");
-        match std::fs::read(&snapshot_path) {
+        let accepted = match crate::core::storage::read_bounded_file(&snapshot_path, 4096) {
             Ok(bytes) => {
                 let state = serde_json::from_slice(&bytes)
                     .map_err(|e| format!("Invalid directory rollback state: {e}"))?;
-                *self.accepted_snapshot.write().await = Some(state);
+                Some(state)
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("Cannot read directory rollback state: {e}")),
-        }
-        *self.snapshot_path.write().await = Some(snapshot_path);
+        };
         let state = crate::mesh::guards::GuardState::load_checked(&path)?;
+        // Do not publish rollback state or paths when guard loading fails.
+        *self.accepted_snapshot.write().await = accepted;
+        *self.snapshot_path.write().await = Some(snapshot_path);
         *self.guard_state.write().await = state;
         *self.guard_state_path.write().await = Some(path);
         Ok(())
@@ -186,8 +197,9 @@ impl ProxyPool {
     /// Validates a complete proxy file before publishing any endpoints.
     /// Returns the number of distinct endpoints admitted from that file.
     pub async fn load_file(&self, path: impl AsRef<Path>) -> Result<usize, String> {
-        let file = File::open(path).map_err(|e| format!("Failed to open proxy file: {}", e))?;
-        let reader = BufReader::new(file);
+        let bytes = crate::core::storage::read_bounded_file(path.as_ref(), 1024 * 1024)
+            .map_err(|e| format!("Failed to read proxy file: {e}"))?;
+        let reader = BufReader::new(bytes.as_slice());
         let mut staged = IndexMap::new();
 
         for (index, line) in reader.lines().enumerate() {
@@ -296,6 +308,9 @@ impl ProxyPool {
             {
                 return Err("Duplicate relay identifier in directory snapshot".into());
             }
+            if self.revoked.contains(&relay.identity_key_ed25519) {
+                continue;
+            }
             let endpoint = if relay.host.starts_with("reverse://") {
                 relay.host.clone()
             } else if relay.host.contains(':') {
@@ -317,6 +332,9 @@ impl ProxyPool {
             epoch: selected.valid_after,
             digest,
         };
+        if replacement.is_empty() {
+            return Err("Directory contains no non-retired relays".into());
+        }
         if let Some(path) = self.snapshot_path.read().await.as_ref() {
             let bytes = serde_json::to_vec(&next).map_err(|e| e.to_string())?;
             crate::core::storage::atomic_write(path, &bytes)
@@ -468,6 +486,9 @@ impl ProxyPool {
         enforce_diversity: bool,
     ) -> Vec<ProxyNode> {
         if bindings.is_empty()
+            || bindings
+                .iter()
+                .any(|binding| self.revoked.contains(&binding.identity))
             || self.consensus_deadline.load(Ordering::Acquire) == 0
             || self.directory_expired()
         {
@@ -756,5 +777,74 @@ impl ProxyPool {
 impl Default for ProxyPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    struct Directory(std::path::PathBuf);
+    impl Directory {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("anonguard-init-{:032x}", rand::random::<u128>()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_guard_state_does_not_publish_rollback_state_or_paths() {
+        let directory = Directory::new();
+        let path = directory.0.join("guards.json");
+        let state = AcceptedSnapshot {
+            epoch: 99,
+            digest: [7; 32],
+        };
+        std::fs::write(
+            path.with_extension("consensus.json"),
+            serde_json::to_vec(&state).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&path, b"{invalid").unwrap();
+        let pool = ProxyPool::new();
+        assert!(pool.init_guard_state(path.clone()).await.is_err());
+        assert!(pool.accepted_snapshot.read().await.is_none());
+        assert!(pool.snapshot_path.read().await.is_none());
+        assert!(pool.guard_state_path.read().await.is_none());
+        crate::mesh::guards::GuardState::new()
+            .save_checked(&path)
+            .unwrap();
+        pool.init_guard_state(path.clone()).await.unwrap();
+        assert_eq!(
+            pool.accepted_snapshot.read().await.as_ref().unwrap().epoch,
+            99
+        );
+        assert_eq!(pool.guard_state_path.read().await.as_ref(), Some(&path));
+    }
+
+    #[tokio::test]
+    async fn concurrent_initialization_cannot_switch_state_paths() {
+        let directory = Directory::new();
+        let pool = ProxyPool::new();
+        let first = directory.0.join("first.json");
+        let second = directory.0.join("second.json");
+        let (one, two) = tokio::join!(
+            pool.init_guard_state(first.clone()),
+            pool.init_guard_state(second.clone())
+        );
+        assert_ne!(one.is_ok(), two.is_ok());
+        let accepted = if one.is_ok() { first } else { second };
+        assert_eq!(pool.guard_state_path.read().await.as_ref(), Some(&accepted));
+        assert_eq!(
+            pool.snapshot_path.read().await.as_ref(),
+            Some(&accepted.with_extension("consensus.json"))
+        );
     }
 }

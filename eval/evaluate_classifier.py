@@ -2,7 +2,7 @@
 """
 AnonGuard Empirical Evaluation & Classifier Benchmark.
 Trains ML traffic correlation classifiers against 4 transport configurations
-and computes empirical degradation metrics proving Q-RMT security.
+using historical synthetic traces; this does not prove routing security.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ from traffic_harness import generate_full_dataset, CLASSES
 from feature_extraction import extract_dataset
 
 class SoftmaxNeuralClassifier:
-    """A multi-class neural network classifier trained with Adam optimizer."""
+    """A multi-class neural network classifier trained with full-batch gradient descent."""
     def __init__(self, in_features, num_classes=10, hidden_dim=64):
         self.in_features = in_features
         self.num_classes = num_classes
@@ -124,7 +124,7 @@ def evaluate_mode(traces):
     knn_pred = knn.predict(X_test)
     knn_acc = np.mean(knn_pred == y_test) * 100.0
     
-    # 3. Shannon Mutual Information proxy I(X; Y)
+    # 3. Model-dependent entropy minus held-out cross-entropy; not measured mutual information.
     p_marginal = np.bincount(y_test, minlength=10) / len(y_test)
     cond_entropy = 0.0
     for i in range(len(y_test)):
@@ -138,12 +138,12 @@ def evaluate_mode(traces):
         "nn_top1": top1_acc,
         "nn_top3": top3_acc,
         "knn_acc": knn_acc,
-        "mutual_info": mi
+        "entropy_minus_cross_entropy_bits": mi
     }
 
 def main():
     print("=" * 78)
-    print("ANONGUARD EMPIRICAL CLASSIFIER BENCHMARK & THESIS DEGRADATION SUITE")
+    print("HISTORICAL SYNTHETIC CLASSIFIER EXPERIMENT — NOT A LIVE ROUTING BENCHMARK")
     print("=" * 78)
     print("[*] Generating 10-Class Website Fingerprinting Traces (50 samples per class)...")
     dataset = generate_full_dataset(samples_per_class=50)
@@ -161,21 +161,21 @@ def main():
         results[key] = evaluate_mode(dataset[key])
         
     print("\n" + "=" * 78)
-    print("EMPIRICAL BENCHMARK RESULTS (10-Class Closed World Fingerprinting)")
+    print("SYNTHETIC RESULTS (10-Class Closed World; No Anonymity Proof)")
     print("=" * 78)
-    print(f"{'Defense Strategy':<38} | {'NN Top-1':<9} | {'NN Top-3':<9} | {'k-NN Acc':<9} | {'MI (bits)'}")
+    print(f"{'Defense Strategy':<38} | {'NN Top-1':<9} | {'NN Top-3':<9} | {'k-NN Acc':<9} | {'H minus CE (bits)'}")
     print("-" * 78)
     
     names = {
         "raw": "Unprotected TCP / SOCKS5",
-        "tor": "Standard Tor (Fixed Cells)",
+        "tor": "Synthetic fixed-cell model",
         "chaos": "Lorenz Chaos Attractor",
-        "quantum": "AnonGuard Q-RMT (Wigner Surmise)"
+        "quantum": "Synthetic Wigner model"
     }
     
     for k in ["raw", "tor", "chaos", "quantum"]:
         r = results[k]
-        print(f"{names[k]:<38} | {r['nn_top1']:>7.1f}% | {r['nn_top3']:>7.1f}% | {r['knn_acc']:>7.1f}% | {r['mutual_info']:>7.2f}")
+        print(f"{names[k]:<38} | {r['nn_top1']:>7.1f}% | {r['nn_top3']:>7.1f}% | {r['knn_acc']:>7.1f}% | {r['entropy_minus_cross_entropy_bits']:>7.2f}")
     print("=" * 78)
     print("Random Guess Baseline: 10.0% Top-1 Accuracy (Uniform Random Distribution)\n")
 

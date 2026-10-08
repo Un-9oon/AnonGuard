@@ -43,6 +43,7 @@ jobs:
         run: |
           mkdir -p target/package_linux
           cp target/release/anonguard-daemon target/package_linux/
+          cp target/release/anonguard-identity-policy target/package_linux/
           cp contrib/runtime.env target/package_linux/runtime.env.example
           install -m 755 scripts/anonguard_run_app.py target/package_linux/anonguard-run-app
           install -m 755 scripts/pt_supervisor.py target/package_linux/anonguard-pt
@@ -85,6 +86,7 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force
           New-Item -ItemType Directory -Path target/package_windows -Force
           Copy-Item target/release/anonguard-daemon.exe target/package_windows/
+          Copy-Item target/release/anonguard-identity-policy.exe target/package_windows/
           Copy-Item contrib/runtime.env target/package_windows/runtime.env.example
           Copy-Item README.md,LICENSE-MIT,LICENSE-APACHE target/package_windows/
           Compress-Archive -Path target/package_windows/* -DestinationPath dist/anonguard-windows-amd64.zip
@@ -125,6 +127,10 @@ jobs:
             target/aarch64-apple-darwin/release/anonguard-daemon \
             target/x86_64-apple-darwin/release/anonguard-daemon
           chmod +x target/package_macos/anonguard-daemon
+          lipo -create -output target/package_macos/anonguard-identity-policy \
+            target/aarch64-apple-darwin/release/anonguard-identity-policy \
+            target/x86_64-apple-darwin/release/anonguard-identity-policy
+          chmod +x target/package_macos/anonguard-identity-policy
           cp contrib/runtime.env target/package_macos/runtime.env.example
           cp README.md LICENSE-MIT LICENSE-APACHE target/package_macos/
           tar -czvf dist/anonguard-macos-universal.tar.gz -C target/package_macos .

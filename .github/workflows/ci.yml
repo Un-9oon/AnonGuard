@@ -113,7 +113,7 @@ jobs:
       - name: Run Fuzz Targets
         run: |
           campaign_result=0
-          for target in fuzz_target_1 fuzz_consensus_deser fuzz_proxy_node_parse fuzz_onion_cell_parse fuzz_peel_forward fuzz_exit_policy fuzz_decode_extend fuzz_decode_relay_target fuzz_socks5_frame fuzz_verify_pow fuzz_multipath_reassembler; do
+          for target in fuzz_target_1 fuzz_consensus_deser fuzz_revocation_policy fuzz_proxy_node_parse fuzz_onion_cell_parse fuzz_peel_forward fuzz_exit_policy fuzz_decode_extend fuzz_decode_relay_target fuzz_socks5_frame fuzz_verify_pow fuzz_multipath_reassembler; do
             if ! cargo +nightly fuzz run "$target" -- -max_total_time=60; then
               campaign_result=1
             fi

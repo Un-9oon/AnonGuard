@@ -31,6 +31,7 @@ fn relay_conflicts(relays: &HashMap<String, RelayDescriptor>, candidate: &RelayD
 
 #[derive(Clone)]
 pub struct DirectoryAuthority {
+    revoked: Arc<std::collections::HashSet<[u8; 32]>>,
     pub authority_id: String,
     signing_key: SigningKey,
     listen_addr: String,
@@ -63,6 +64,7 @@ impl DirectoryAuthority {
             hex::encode(signing_key.verifying_key().to_bytes())
         );
         Self {
+            revoked: Arc::new(std::collections::HashSet::new()),
             authority_id,
             signing_key,
             listen_addr,
@@ -125,22 +127,31 @@ impl DirectoryAuthority {
             hex::encode(signing_key.verifying_key().to_bytes())
         );
         let vote_path = key_path.as_ref().with_extension("votes.json");
-        let votes: Vec<ConsensusDocument> = match std::fs::read(&vote_path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                error!("Invalid persisted authority vote state");
-                std::process::exit(1);
-            }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(_) => {
-                error!("Cannot read persisted authority vote state");
-                std::process::exit(1);
-            }
-        };
+        // At most thirteen retained five-minute snapshots of bounded relay data.
+        let votes: Vec<ConsensusDocument> =
+            match crate::core::storage::read_bounded_file(&vote_path, 16 * 1024 * 1024) {
+                Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    error!("Invalid persisted authority vote state");
+                    std::process::exit(1);
+                }),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(_) => {
+                    error!("Cannot read persisted authority vote state");
+                    std::process::exit(1);
+                }
+            };
         let own =
             std::collections::HashMap::from([(authority_id.clone(), signing_key.verifying_key())]);
+        if votes.len() > 13 {
+            error!("Persisted authority vote state exceeds retained epoch limit");
+            std::process::exit(1);
+        }
         let mut signed_epochs = HashMap::new();
         for doc in votes {
-            if !doc.verify_quorum(&own, 1, doc.valid_after)
+            if doc.relays.len() > crate::mesh::consensus::MAX_DIRECTORY_RELAYS
+                || doc.signatures.len() > 16
+                || doc.relays.iter().any(|relay| !relay.verify_identity())
+                || !doc.verify_quorum(&own, 1, doc.valid_after)
                 || signed_epochs.insert(doc.valid_after, doc).is_some()
             {
                 error!("Persisted authority vote state failed authentication");
@@ -148,6 +159,7 @@ impl DirectoryAuthority {
             }
         }
         Self {
+            revoked: Arc::new(std::collections::HashSet::new()),
             authority_id,
             signing_key,
             listen_addr,
@@ -165,6 +177,15 @@ impl DirectoryAuthority {
         }
     }
 
+    /// Install once, before serving. Frozen votes are never rewritten in place.
+    pub fn with_revoked_identities(
+        mut self,
+        identities: std::collections::HashSet<[u8; 32]>,
+    ) -> Self {
+        self.revoked = Arc::new(identities);
+        self
+    }
+
     async fn frozen_view(
         &self,
         mut relays: Vec<RelayDescriptor>,
@@ -176,6 +197,15 @@ impl DirectoryAuthority {
             return Err("Authority clock rollback rejected".into());
         }
         if let Some(doc) = votes.get(&epoch) {
+            if doc
+                .relays
+                .iter()
+                .any(|relay| self.revoked.contains(&relay.identity_key_ed25519))
+            {
+                return Err(
+                    "Frozen vote contains a retired identity; waiting for next epoch".into(),
+                );
+            }
             if self.require_usable_snapshot
                 && (doc.relays.len() < 3 || !doc.relays.iter().any(|r| r.is_exit))
             {
@@ -187,7 +217,10 @@ impl DirectoryAuthority {
             return Err("Directory capacity exceeded".into());
         }
         relays.retain(|r| {
-            r.verify_identity() && r.registered_at <= now && now - r.registered_at <= RELAY_TTL_SECS
+            !self.revoked.contains(&r.identity_key_ed25519)
+                && r.verify_identity()
+                && r.registered_at <= now
+                && now - r.registered_at <= RELAY_TTL_SECS
         });
         if self.require_usable_snapshot && (relays.len() < 3 || !relays.iter().any(|r| r.is_exit)) {
             return Err(
@@ -215,6 +248,9 @@ impl DirectoryAuthority {
 
     /// Registers a relay after verifying its Proof-of-Work and Ed25519 identity signature.
     pub async fn register_relay(&self, descriptor: RelayDescriptor) -> Result<(), String> {
+        if self.revoked.contains(&descriptor.identity_key_ed25519) {
+            return Err("Relay identity is retired".into());
+        }
         if !descriptor.verify_identity() {
             return Err("Invalid or missing Ed25519 cryptographic identity signature".to_string());
         }
@@ -390,6 +426,7 @@ impl DirectoryAuthority {
             let relays = self.active_relays.read().await;
             relays.clone()
         };
+        local_map.retain(|_, relay| !self.revoked.contains(&relay.identity_key_ed25519));
 
         let peer_lists = futures::future::join_all(
             self.peer_authorities
@@ -421,7 +458,9 @@ impl DirectoryAuthority {
                         {
                             continue;
                         }
-                        if desc.verify_identity() {
+                        if !self.revoked.contains(&desc.identity_key_ed25519)
+                            && desc.verify_identity()
+                        {
                             // Validate PoW and freshness to reject malicious peers pushing fake views
                             let is_valid_pow = verify_pow(
                                 &desc.node_id,
@@ -474,6 +513,7 @@ impl DirectoryAuthority {
         // Persist confirmed-good gossiped descriptors back into `self.active_relays`
         // so we don't have to re-fetch them successfully on every round.
         let mut active = self.active_relays.write().await;
+        active.retain(|_, relay| !self.revoked.contains(&relay.identity_key_ed25519));
         for (id, desc) in &local_map {
             if relay_conflicts(&active, desc) {
                 continue;

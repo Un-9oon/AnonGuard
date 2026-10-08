@@ -63,6 +63,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "indexmap",
+ "libc",
  "loom",
  "metrics",
  "metrics-exporter-prometheus",

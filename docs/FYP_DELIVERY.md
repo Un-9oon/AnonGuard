@@ -43,6 +43,11 @@ then the gateway using [deployment instructions](../deploy/README.md). Preserve
 vote, directory and guard state through restarts. Readiness requires a matching,
 fresh certified directory, not simply an open listener.
 
+Enroll the owned deployment with the reviewed [identity retirement policy](IDENTITY_RETIREMENT.md).
+Rehearse compromised relay exclusion, authority replacement, policy omission and
+rollback refusal locally before the later live acceptance. Distribute the same
+approved generation/digest to every role and preserve the additional journals.
+
 An owned private-address destination requires an explicitly acknowledged lab exit
 exception. Record that exception; do not distribute it as a production default.
 The repository CLI process test is a separate disposable regression fixture with

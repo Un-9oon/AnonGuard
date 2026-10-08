@@ -47,6 +47,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "indexmap",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "ml-kem",
@@ -75,6 +76,7 @@ name = "anonguard-fuzz"
 version = "0.0.0"
 dependencies = [
  "anonguard",
+ "ed25519-dalek",
  "libfuzzer-sys",
  "serde_json",
 ]

@@ -24,6 +24,9 @@ running each case; an empty entry is not a pass. Follow [delivery procedures](FY
 | Insufficient/expired directory | | | | NOT RUN |
 | Relay loss with no direct fallback | | | | NOT RUN |
 | Restart preserves state | | | | NOT RUN |
+| Quorum retirement and policy rollback refusal | | | | NOT RUN |
+| Retired relay/bridge and local identity refused | | | | NOT RUN |
+| Authority replacement preserves quorum and old-journal refusal | | | | NOT RUN |
 | Direct IPv4/IPv6 blocked | | | | NOT RUN |
 | Direct DNS/UDP blocked | | | | NOT RUN |
 | Host IPC and inherited descriptors contained | | | | NOT RUN |

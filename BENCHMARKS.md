@@ -1,30 +1,42 @@
-> Historical research material. These descriptions and simulation results do not specify or validate protocol v3. See `docs/PROTOCOL_V3.md` for implemented behavior. No zero-leak, classifier-immunity, or Tor-superiority claim is supported by this document.
+# AnonGuard performance evaluation
 
-# AnonGuard Performance Benchmarks
+Protocol v3 has no validated production performance baseline or measured
+superiority over Tor. Earlier microsecond, circuit-latency and hundreds-of-Mbps
+figures lacked reproducible measurements and have been removed. Correctness tests
+do not establish network throughput.
 
-This document contains baseline performance metrics for AnonGuard's cryptographic and networking layers.
+## Measurement contract
 
-## Cryptographic Hot Path (AEAD)
-All cell crypto operates in-place using a zero-allocation buffer strategy.
+Record the exact commit, configuration, OS/kernel, hardware, link capacity,
+relay locations, operator ownership, workload and capture points. Preserve raw
+measurements and commands. Report sample counts, median and tail latency,
+failures and uncertainty; include failed and timed-out requests.
 
-- **`peel_forward` (AEAD decryption & validation)**: ~1-2 μs per cell.
-- **`wrap_forward` (AEAD encryption)**: ~1-2 μs per cell.
+Measure circuit establishment separately from steady-state transfer. Include
+useful application bytes, total wire bytes in both directions, idle cover traffic,
+CPU/RAM consumption and connection failure behavior. Cell encryption benchmarks
+measure cryptographic operations, not application throughput. Current cells are
+2048 bytes; framing, onion layers and pacing impose additional limits. Read the
+active scheduler configuration when calculating capacity, and label estimates
+as models rather than measured results.
 
-At 1024 bytes per cell, this yields a theoretical cryptographic throughput of **>500 MB/s per core**, easily outstripping typical network link speeds.
+## Comparison with Tor
 
-## Proof of Work (Sybil Defense)
-The PoW difficulty determines the cost of registering a new relay on the network.
+Use equivalent three-hop topology, workload, hardware and observation models.
+Record padding and transport settings. Private laboratory Tor and public Tor
+answer different questions; report them separately. Report padding's bandwidth
+and latency costs alongside any classifier results.
 
-- **Difficulty 20 (Legacy)**: ~1-5 ms per registration on a standard CPU core.
-- **Difficulty 28 (Current)**: ~2-5 seconds per registration on a standard CPU core.
-- **Verification (`verify_pow`)**: < 1 μs (Constant time, robust against DoS).
+Website fingerprinting and end-to-end timing correlation are separate attacks.
+Split real captures by collection session/day and workload identity before model
+fitting; fit normalization on training data alone. Keep variants of the same
+source trace out of opposing splits. Include multiple seeds, baselines and
+held-out environments. Low accuracy for one classifier does not establish
+anonymity against other observers or attacks.
 
-## Circuit Build Time
-- **1-hop circuit**: ~20-30 ms (dominated by X25519 key generation and network RTT).
-- **3-hop circuit (Default)**: ~80-120 ms (3 sequential RTTs + 3 ECDHE exchanges).
-
-## Steady-State Throughput
-Throughput over a 3-hop local circuit vs a plain SOCKS5 baseline:
-- **Plain SOCKS5**: ~1.5 Gbps (Loopback)
-- **AnonGuard 3-Hop**: ~300-400 Mbps (Loopback)
-*Note: The primary bottleneck is cell padding and framing overhead, not the AEAD cryptography. Future cell-batching features are expected to improve this.*
+Scripts in `eval/` include historical synthetic emulations. Their `tor` and
+`quantum` labels describe simulations, not executions of Tor or current AnonGuard.
+Results cannot substantiate production, quantum-security or Tor-superiority
+claims. Real-network testing is a separate gate, currently deferred by the
+operator. See [production readiness](docs/PRODUCTION_READINESS.md) and
+[FYP acceptance record](docs/FYP_ACCEPTANCE_RECORD.md).

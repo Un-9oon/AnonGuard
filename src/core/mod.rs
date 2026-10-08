@@ -8,4 +8,5 @@ pub use state_machine::{
     ActiveGuarded, DroppedFailClosed, GuardError, GuardedSocket, State, Uninitialized, Verifying,
 };
 
+pub mod revocation;
 pub mod storage;
