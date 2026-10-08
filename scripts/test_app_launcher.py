@@ -34,6 +34,11 @@ with tempfile.TemporaryFile() as f:
   else: raise AssertionError(f"family {family} admitted")
  socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
  socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+ import threading
+ completed = []
+ thread = threading.Thread(target=lambda: completed.append(True))
+ thread.start(); thread.join(timeout=2)
+ assert completed == [True], "ordinary application threads must work"
 '''
         import os
         environment = dict(os.environ, LAUNCHER_SOURCE=str(Path(launcher.__file__).resolve()))

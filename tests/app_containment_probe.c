@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include <unistd.h>
 
 #define CHECK(x) do { if (!(x)) return __LINE__; } while (0)
+static void *thread_probe(void *value) { return value; }
 int main(int argc, char **argv) {
     CHECK(argc == 3);
     alarm(10);
@@ -30,6 +32,13 @@ int main(int argc, char **argv) {
 #ifdef SYS_pidfd_getfd
     CHECK(syscall(SYS_pidfd_getfd, -1, 0, 0) == -1 && errno == EPERM);
 #endif
+#ifdef SYS_clone3
+    CHECK(syscall(SYS_clone3, NULL, 0) == -1 && errno == ENOSYS);
+#endif
+    pthread_t thread;
+    void *thread_result = NULL;
+    CHECK(pthread_create(&thread, NULL, thread_probe, &thread_result) == 0);
+    CHECK(pthread_join(thread, &thread_result) == 0 && thread_result == &thread_result);
     FILE *status = fopen("/proc/self/status", "r");
     CHECK(status != NULL);
     char line[512];

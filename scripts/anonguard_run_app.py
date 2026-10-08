@@ -46,17 +46,19 @@ def export_filter(fd):
     if not ctx:
         raise OSError("Cannot initialize syscall policy")
     try:
-        def deny(name, comparison=None):
+        def deny(name, comparison=None, error=errno.EPERM):
             number = lib.seccomp_syscall_resolve_name(name.encode())
             if number < 0:  # Native architecture may not implement this syscall.
                 return
             ptr = ctypes.byref(comparison) if comparison is not None else None
-            result = lib.seccomp_rule_add_array(ctx, 0x00050000 | errno.EPERM,
+            result = lib.seccomp_rule_add_array(ctx, 0x00050000 | error,
                                                number, int(comparison is not None), ptr)
             if result != 0:
                 raise OSError(f"Cannot restrict syscall {name}: {result}")
         for name in DENIED:
-            deny(name)
+            # libc falls back to clone only when clone3 reports ENOSYS.
+            # clone3 remains unavailable; namespace flags in clone stay denied.
+            deny(name, error=errno.ENOSYS if name == "clone3" else errno.EPERM)
         # No pathname/abstract host IPC, netlink administration or packet sockets.
         # Only AF_INET=2 and AF_INET6=10. One comparison per rule/argument,
         # including unknown future families, rather than an incomplete denylist.

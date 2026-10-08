@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix="anonguard-rootfs-", dir="/var/lib") as 
     for name in ("proc", "dev", "tmp", "run"):
         (root / name).mkdir()
     source = Path(__file__).resolve().parent.parent / "tests/app_containment_probe.c"
-    subprocess.run(["gcc", "-static", "-Wall", "-Wextra", "-Werror", str(source),
+    subprocess.run(["gcc", "-static", "-pthread", "-Wall", "-Wextra", "-Werror", str(source),
                     "-o", str(root / "app/probe")], check=True)
     with tempfile.TemporaryDirectory(prefix="anonguard-host-") as host_directory:
         sentinel = Path(host_directory) / "host-secret"
