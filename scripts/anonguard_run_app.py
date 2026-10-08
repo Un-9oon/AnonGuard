@@ -118,7 +118,13 @@ def sandbox_arguments(root, fd, command):
             "--unshare-uts", "--unshare-cgroup", "--disable-userns",
             "--assert-userns-disabled", "--uid", "1000", "--gid", "1000",
             "--cap-drop", "ALL", "--die-with-parent", "--new-session",
-            "--ro-bind", str(root), "/", "--proc", "/proc", "--dev", "/dev",
+            "--ro-bind", str(root), "/", "--proc", "/proc", "--tmpfs", "/dev",
+            # Headless jobs need only these byte devices, never devpts/TTY.
+            # Avoid Bubblewrap's devpts UID-0 remapping before userns lockdown.
+            "--dev-bind", "/dev/null", "/dev/null",
+            "--dev-bind", "/dev/zero", "/dev/zero",
+            "--dev-bind", "/dev/random", "/dev/random",
+            "--dev-bind", "/dev/urandom", "/dev/urandom",
             "--size", "67108864", "--perms", "1777", "--tmpfs", "/tmp",
             "--tmpfs", "/run", "--chdir", "/tmp",
             "--clearenv", "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",

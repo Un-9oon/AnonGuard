@@ -64,6 +64,11 @@ with tempfile.TemporaryFile() as f:
         self.assertIn("--disable-userns", arguments)
         self.assertIn("--seccomp", arguments)
         self.assertNotIn("--unshare-net", arguments)
+        self.assertNotIn("--dev", arguments)
+        devices = [arguments[i + 1:i + 3] for i, value in enumerate(arguments)
+                   if value == "--dev-bind"]
+        self.assertEqual(devices, [[f"/dev/{name}"] * 2
+                                  for name in ("null", "zero", "random", "urandom")])
         with self.assertRaises(ValueError):
             launcher.sandbox_arguments(Path("/rootfs"), 7, ["--bind", "/"])
 
