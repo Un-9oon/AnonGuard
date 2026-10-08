@@ -20,8 +20,11 @@ raw traffic captures and private state outside Git and the presentation bundle.
 Synchronize clocks and allow only the required role ports. Keep the gateway's
 SOCKS listener local.
 
-Install the Debian package built for the machine's architecture and runtime
-libraries. Install optional containment prerequisites only on the relevant hosts:
+Before installing a published package, follow [release verification](RELEASE_VERIFICATION.md)
+using an independently trusted verifier and the selected tag's signed manifest.
+Install the verified staged Debian package built for the machine's architecture
+and runtime libraries. Record unsigned local lab builds separately. Install
+optional containment prerequisites only on the relevant hosts:
 
 ```sh
 sudo apt-get install iproute2 nftables bubblewrap python3 libseccomp2 util-linux

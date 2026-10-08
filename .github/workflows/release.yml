@@ -49,6 +49,7 @@ jobs:
           cp contrib/anonguard-pt@.service target/package_linux/
           cp -r docs target/package_linux/docs
           cp scripts/deployment_preflight.py target/package_linux/deployment_preflight.py
+          cp scripts/verify_release.py target/package_linux/verify_release.py
           cp scripts/latency_profile.py target/package_linux/latency_profile.py
           cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
           cp README.md LICENSE-MIT LICENSE-APACHE target/package_linux/
@@ -174,6 +175,23 @@ jobs:
             if [ -f "$file" ]; then
               cosign sign-blob --yes "$file" --bundle "$file.sigstore.json"
             fi
+          done
+
+      - name: Verify signed assets before publication
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          verification_root="$(mktemp -d)"
+          trap 'rm -rf "$verification_root"' EXIT
+          for artifact in release_assets/*.tar.gz release_assets/*.zip release_assets/*.deb; do
+            python3 -I scripts/verify_release.py \
+              --tag "$RELEASE_TAG" --artifact "$artifact" \
+              --manifest release_assets/SHA256SUMS \
+              --bundle release_assets/SHA256SUMS.sigstore.json \
+              --cosign "$(command -v cosign)" \
+              --staging "$verification_root/verified"
+            rm -rf "$verification_root/verified"
           done
 
       - name: Create GitHub Release

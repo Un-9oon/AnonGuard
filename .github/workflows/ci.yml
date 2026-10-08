@@ -26,6 +26,9 @@ jobs:
       - name: Verify HTTP evaluation and failed-proxy refusal
         run: python3 scripts/test_latency_profile.py
 
+      - name: Verify signed-release admission boundaries
+        run: python3 scripts/test_verify_release.py
+
       - name: Check Cargo.lock reproducibility
         run: cargo check --locked --all-targets
 

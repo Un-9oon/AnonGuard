@@ -41,6 +41,14 @@ Required before a production release:
 
 ## Packaging and operation
 
+The Linux [release verifier](RELEASE_VERIFICATION.md) authenticates the signed
+checksum manifest against an exact release workflow/tag identity and stages a
+verified artifact copy before installation. Tagged publication now runs this gate
+against the actual signature bundles. Passing the gate establishes artifact
+origin and integrity, not independent protocol review or anonymity. It does not
+yet enforce a persistent release revocation/rollback policy. Unsigned local lab
+builds are explicitly outside the signed-release gate.
+
 Release packaging now depends on the full reusable verification workflow and dependency audit at the release commit. Tagged releases remain explicitly marked as experimental prereleases. Distribution archives include a runtime argument example rather than an unsupported config.toml; the checksum manifest and binaries are signed by the release workflow. Passing these engineering gates does not substitute for independent review.
 
 The Debian service uses a dynamic user and private persistent state. Configure `/etc/anonguard/runtime.env` with real endpoint-bound pins and a valid quorum; the daemon does not parse the former sample config.toml. Kernel isolation needs administrative namespace privileges and is a separate operational mode, not a privilege automatically granted by the packaged service.

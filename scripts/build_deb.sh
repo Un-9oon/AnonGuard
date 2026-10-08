@@ -75,6 +75,8 @@ printf '/etc/anonguard/runtime.env\n' > "${STAGING_DIR}/DEBIAN/conffiles"
 # 4. Documentation and explicit administrator policy examples (never auto-loaded).
 cp "${ROOT_DIR}/scripts/deployment_preflight.py" "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
+cp "${ROOT_DIR}/scripts/verify_release.py" "${STAGING_DIR}/usr/share/doc/anonguard/verify_release.py"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/verify_release.py"
 mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 chmod 755 "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 cp "${ROOT_DIR}/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/docs/"
