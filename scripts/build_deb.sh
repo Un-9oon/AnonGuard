@@ -35,6 +35,8 @@ find "${STAGING_DIR}" -type d -exec chmod 755 {} +
 # 1. Binary
 cp "${ROOT_DIR}/target/release/anonguard-daemon" "${STAGING_DIR}/usr/bin/anonguard-daemon"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-daemon"
+cp "${ROOT_DIR}/scripts/anonguard_run_app.py" "${STAGING_DIR}/usr/bin/anonguard-run-app"
+chmod 755 "${STAGING_DIR}/usr/bin/anonguard-run-app"
 
 # Derive minimum library versions from the actual packaged ELF, rather than
 # guessing a libc baseline or allowing installation without its dependencies.
@@ -89,7 +91,7 @@ Section: net
 Priority: optional
 Architecture: ${ARCH}
 Depends: ${SHLIBS_DEPENDS}
-Suggests: iproute2, nftables
+Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
 Description: Experimental authenticated three-hop anonymity transport

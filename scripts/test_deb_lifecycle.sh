@@ -23,6 +23,7 @@ dependencies=$(dpkg-deb --field "$1" Depends)
 dpkg --install "$1"
 test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
+test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
 systemd-analyze verify /lib/systemd/system/anonguard.service
 if systemctl is-active --quiet anonguard.service; then
     echo 'Unconfigured package unexpectedly started a service' >&2
@@ -35,6 +36,7 @@ test "$(sha256sum /etc/anonguard/runtime.env)" = "$before"
 dpkg --remove anonguard
 test -f /etc/anonguard/runtime.env
 test ! -e /usr/bin/anonguard-daemon
+test ! -e /usr/bin/anonguard-run-app
 dpkg --install "$1"
 test "$(sha256sum /etc/anonguard/runtime.env)" = "$before"
 dpkg --purge anonguard

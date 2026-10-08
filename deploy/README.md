@@ -1,51 +1,11 @@
-# Native Deployment Guide (Forensic Hardening)
+# Linux deployment
 
-This guide covers deploying AnonGuard directly onto a hardened Linux system (bare-metal or VM) utilizing `systemd` to achieve maximum forensic protection and network stack camouflage.
+AnonGuard remains experimental. Read [production readiness](../docs/PRODUCTION_READINESS.md) and [the relay operator guide](../docs/RELAY_OPERATOR_GUIDE.md) before deployment. Native installation does not establish fingerprint indistinguishability or anonymity.
 
-## Prerequisites
-- A Linux host with `systemd` (e.g., Debian/Ubuntu server).
-- Root access.
+Prefer the Debian package for a local gateway service. It installs the daemon, headless launcher, DynamicUser service, and `/etc/anonguard/runtime.env`. Configure real authority endpoints, pinned keys and quorum before starting. Installation does not automatically start an unconfigured service. Preserve identity, vote, guard and accepted-directory state during upgrades; do not rotate identities merely to repair connectivity.
 
-## Deployment Steps
+`deploy/anonguard.service` is an alternate manually configured relay template. Install the daemon at `/usr/local/bin/anonguard-daemon`, create its dedicated account, and add the required authority/identity arguments from the operator guide. Its default command alone is not a complete working deployment. Retain diagnostics and restrict journal/metrics access. Do not expose an unauthenticated gateway publicly.
 
-1. **Build the binary:**
-   Ensure you have Rust installed, then compile AnonGuard for release.
-   ```bash
-   cargo build --release
-   ```
+Application isolation is a separate administrative mode. See [the headless launcher](../docs/LINUX_APP_CONTAINMENT.md) for rootfs, identity, proxy and kernel requirements. The packaged service does not grant itself namespace privileges. Service teardown does not delete host nftables tables. Stop protected applications before explicit namespace cleanup.
 
-2. **Install the binary:**
-   Copy the binary to the system path.
-   ```bash
-   sudo cp target/release/anonguard-daemon /usr/local/bin/
-   sudo chmod +x /usr/local/bin/anonguard-daemon
-   ```
-
-3. **Create the unprivileged service user:**
-   AnonGuard should never run as root.
-   ```bash
-   sudo useradd -r -s /bin/false anonguard
-   ```
-
-4. **Install the `systemd` service:**
-   Copy the provided `anonguard.service` configuration file to the systemd directory.
-   ```bash
-   sudo cp deploy/anonguard.service /etc/systemd/system/
-   ```
-
-5. **Customize Role (Optional):**
-   By default, the service is configured to run as an `exit` node on port `9050`. To change this, edit the `ExecStart` line in `/etc/systemd/system/anonguard.service`:
-   ```bash
-   sudo nano /etc/systemd/system/anonguard.service
-   ```
-
-6. **Enable and start the service:**
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable anonguard
-   sudo systemctl start anonguard
-   ```
-
-## Why deploy natively?
-- **Zero Network Fingerprinting:** No Docker NAT or bridge modifying your MTU/TTL packets, blending perfectly into normal internet traffic.
-- **Forensic & Observability Controls:** The `systemd` configuration explicitly drops privileges, strictly isolates the filesystem (`ProtectSystem=strict`), and defaults to standard `journald` log capture. Operators desiring a zero log retention posture can uncomment `StandardOutput=null` / `StandardError=null` in `anonguard.service`. Production observability metrics can be exposed via `--metrics-addr 127.0.0.1:9052` (Prometheus text format).
+Before public use, run exact-release checks, rehearse state recovery, verify live kernel boundaries and record sustained multi-region reliability/traffic-analysis evidence. Set explicit cgroup budgets for memory, CPU and processes. Configure time synchronization, monitor authority disagreement/expiry, and establish operator ownership and incident response. A clean build or running service is insufficient evidence.
