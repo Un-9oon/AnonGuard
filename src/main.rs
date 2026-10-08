@@ -509,12 +509,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Ok(count) => {
                 info!(count = count, path = %file_path.display(), "[AnonGuard] Loaded proxies from file")
             }
-            Err(e) => tracing::error!(error = %e, "[AnonGuard] Failed to load proxy file"),
+            Err(e) => return Err(format!("Configured proxy file rejected: {e}").into()),
         }
     }
 
     if let Some(inline) = args.proxy {
-        let _ = pool.add_proxy(&inline).await;
+        pool.add_proxy(&inline)
+            .await
+            .map_err(|_| "Invalid --proxy endpoint")?;
         info!("[AnonGuard] Added inline proxy to pool");
     }
 

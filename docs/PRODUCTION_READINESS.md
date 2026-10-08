@@ -11,6 +11,7 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - PoW replay records retained through the inclusive acceptance boundary; registry exhaustion refuses new admissions instead of forgetting live proofs, with bounded identity sizes. Clock rollback behind a replay-cache purge refuses admission until time catches up.
 - Shared private signing-key storage with exclusive publication under concurrent startup, bounded reads and Unix permission checks.
 - Strict SOCKS5 method negotiation and destination parsing; bounded optional decoy operations.
+- Explicit proxy files are read and validated completely before distinct endpoints are published; read and parse errors preserve the existing pool. Bad file or inline proxy configuration stops gateway startup without printing URL credentials.
 - Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
 - Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes. Expired certified directories are excluded from every pool selection API.
 - Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.

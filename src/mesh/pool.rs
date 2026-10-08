@@ -91,21 +91,28 @@ impl ProxyPool {
         Ok(())
     }
 
-    /// Loads proxies line-by-line from a text file.
+    /// Validates a complete proxy file before publishing any endpoints.
+    /// Returns the number of distinct endpoints admitted from that file.
     pub async fn load_file(&self, path: impl AsRef<Path>) -> Result<usize, String> {
         let file = File::open(path).map_err(|e| format!("Failed to open proxy file: {}", e))?;
         let reader = BufReader::new(file);
-        let mut loaded = 0;
+        let mut staged = IndexMap::new();
 
-        for l in reader.lines().map_while(Result::ok) {
+        for (index, line) in reader.lines().enumerate() {
+            let l =
+                line.map_err(|e| format!("Failed to read proxy file line {}: {e}", index + 1))?;
             let trimmed = l.trim();
-            if !trimmed.is_empty()
-                && !trimmed.starts_with('#')
-                && self.add_proxy(trimmed).await.is_ok()
-            {
-                loaded += 1;
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
             }
+            // URL parser diagnostics can include credentials; expose the line only.
+            let mut node = ProxyNode::parse(trimmed)
+                .map_err(|_| format!("Invalid proxy on line {}", index + 1))?;
+            node.enforce_remote_dns();
+            staged.insert(format!("{}:{}", node.host, node.port), node);
         }
+        let loaded = staged.len();
+        self.nodes.write().await.extend(staged);
         Ok(loaded)
     }
 
