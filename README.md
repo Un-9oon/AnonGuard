@@ -48,13 +48,18 @@ The CLI requires a quorum greater than two thirds of configured authorities. A s
 
 `--enable-firewall-killswitch --strict-fail-closed --namespace-name anonguard` creates a fresh application namespace. It requires administrative namespace/nftables privileges and a numeric loopback listener. The host's firewall is not changed. The transport process remains outside the namespace.
 
-Launch only the applications to be protected inside that namespace, as an unprivileged user:
+For the FYP's supported headless applications, use the restricted
+[application launcher](docs/LINUX_APP_CONTAINMENT.md), with a dedicated immutable
+rootfs, unprivileged application identity and syscall restrictions. Configure
+SOCKS5 with remote DNS at `127.0.0.1:9050` inside the namespace. Follow its explicit
+administrative setup instructions; the packaged gateway service does not create
+this privileged environment automatically.
 
-```sh
-sudo ip netns exec anonguard runuser -u YOUR_USER -- YOUR_APPLICATION
-```
-
-Configure the application for SOCKS5 with remote DNS at `127.0.0.1:9050`. Direct TCP/UDP, including ordinary DNS, has no external route. Applications elsewhere on the host are not protected by this namespace. The bridge and rules are not a browser sandbox.
+A network namespace alone blocks external IP routes but does not contain host
+pathname UNIX sockets, brokers or inherited descriptors. Launching an arbitrary
+host application with `ip netns exec` is therefore not the full containment
+profile. Applications elsewhere on the host are not protected. GUI/browser
+containment and persistent application output are outside the current profile.
 
 Namespace rules survive gateway exit or crash. Restart does not silently reuse a namespace or another daemon's socket. After stopping protected applications, administrative cleanup is explicit:
 
@@ -69,6 +74,9 @@ Windows and macOS support the application transport; they do not implement this 
 Protocol v3 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
 
 A directory snapshot must be current and quorum signed. New circuits fail after directory expiry. Existing circuits are bounded to one hour and are not silently migrated. Protect persistent authority votes, directory rollback state, guard state and identity keys from modification. Clock rollback, stale directories, unreachable guards and conflicting authority views may stop service rather than lower security requirements.
+
+For installation, acceptance evidence and the examiner walkthrough, start with
+[practical FYP delivery](docs/FYP_DELIVERY.md).
 
 See [protocol specification](docs/PROTOCOL_V3.md), [threat model](THREAT_MODEL.md), and [production readiness](docs/PRODUCTION_READINESS.md). Historical research documents and simulations are not evidence about the current protocol.
 

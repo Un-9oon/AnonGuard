@@ -69,6 +69,8 @@ chmod 640 "${STAGING_DIR}/etc/anonguard/runtime.env"
 printf '/etc/anonguard/runtime.env\n' > "${STAGING_DIR}/DEBIAN/conffiles"
 
 # 4. Documentation and explicit administrator policy examples (never auto-loaded).
+cp "${ROOT_DIR}/scripts/deployment_preflight.py" "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
 mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 chmod 755 "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 cp "${ROOT_DIR}/docs/"*.md "${STAGING_DIR}/usr/share/doc/anonguard/docs/"
@@ -87,6 +89,9 @@ Copyright: 2026 AnonGuard Research Group
 License: MIT or Apache-2.0
 EOF
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/copyright"
+
+cp "${ROOT_DIR}/LICENSE-MIT" "${ROOT_DIR}/LICENSE-APACHE" "${STAGING_DIR}/usr/share/doc/anonguard/"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/"LICENSE-*
 
 # 5. DEBIAN control file
 cat << EOF > "${STAGING_DIR}/DEBIAN/control"

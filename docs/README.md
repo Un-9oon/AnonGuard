@@ -1,63 +1,43 @@
-# AnonGuard Documentation & Supply-Chain Integrity Guide
+# AnonGuard documentation
 
-Welcome to the AnonGuard documentation directory.
+Start with [practical FYP delivery](FYP_DELIVERY.md), [Linux deployment](../deploy/README.md),
+[authority bootstrap](runbook_authority.md), [relay operations](RELAY_OPERATOR_GUIDE.md)
+and [headless application containment](LINUX_APP_CONTAINMENT.md).
 
-## Documentation Index
-- [`architecture.md`](architecture.md): Subsystem architecture, cell specifications, and design trade-offs.
-- [`handshake_spec.md`](handshake_spec.md): Telecopic onion circuit handshake protocol & key agreement specification.
-- [`key_rotation.md`](key_rotation.md): Session key derivation and forward secrecy guarantees.
-- [`runbook_authority.md`](runbook_authority.md): Deployment runbook for Directory Authority nodes.
+The current normative protocol is [v3](PROTOCOL_V3.md). Historical reports and
+research descriptions may describe earlier behavior; use the v3 specification,
+current source and [readiness gates](PRODUCTION_READINESS.md) for release claims.
 
----
+## Artifact provenance
 
-## Supply-Chain Integrity & Verification Guide
+The tagged release workflow is configured to build with cargo-auditable, generate
+SHA256SUMS and sign archives, Debian packages and the manifest using Sigstore.
+That configuration alone does not establish that a release ran or that a specific
+artifact contains an SBOM or a valid signature. Ordinary local cargo builds and
+local FYP bundles may be unsigned and lack embedded dependency metadata.
 
-AnonGuard release binaries are built with embedded dependency Software Bill of Materials (SBOM) metadata via `cargo-auditable` and signed cryptographically using Sigstore `cosign`.
+For a tagged release, obtain the artifact and its matching `.sigstore.json` bundle.
+Verify using a trusted cosign installation, the exact release tag and the expected
+repository workflow identity. Replace VERSION with the authenticated tag:
 
-### 1. Verifying Binary Signatures with Cosign
+```sh
+cosign verify-blob \
+  --bundle anonguard-linux-amd64.tar.gz.sigstore.json \
+  --certificate-identity "https://github.com/Un-9oon/AnonGuard/.github/workflows/release.yml@refs/tags/VERSION" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  anonguard-linux-amd64.tar.gz
+```
 
-To verify the integrity and origin of an official release archive or binary:
+Verify SHA256SUMS with its corresponding signature in the same way before using
+it to check the extracted release artifacts. A checksum from an unauthenticated
+source detects accidental corruption but does not prove origin. Run checksum
+verification in a dedicated release directory containing the listed files:
 
-1. Install `cosign` (v2.0+):
-   ```bash
-   go install github.com/sigstore/cosign/v2/cmd/cosign@latest
-   # Or via brew on macOS:
-   brew install cosign
-   ```
+```sh
+sha256sum -c SHA256SUMS
+```
 
-2. Download the release archive, signature bundle (`.sigstore.json`), and `SHA256SUMS`.
-
-3. Verify the binary signature against the official AnonGuard repository identity:
-   ```bash
-   cosign verify-blob \
-     --bundle anonguard-linux-amd64.tar.gz.sigstore.json \
-     --certificate-identity-regex "^https://github.com/Un-9oon/AnonGuard/.*" \
-     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-     anonguard-linux-amd64.tar.gz
-   ```
-
-4. Verify the SHA256 checksum:
-   ```bash
-   sha256sum -c SHA256SUMS
-   ```
-
-### 2. Inspecting Embedded Dependency SBOM with `cargo-auditable`
-
-AnonGuard embeds its exact dependency tree directly inside compiled binaries using `cargo-auditable`. You can inspect and audit dependencies of a compiled `anonguard-daemon` binary without needing source code:
-
-1. Install `cargo-auditable`:
-   ```bash
-   cargo install cargo-auditable
-   ```
-
-2. Audit the compiled binary for known vulnerabilities (VEX/Advisories):
-   ```bash
-   cargo audit binary ./anonguard-daemon
-   ```
-
-3. Extract the raw JSON dependency SBOM from the binary:
-   ```bash
-   cargo auditable get ./anonguard-daemon
-   ```
-
-This ensures full supply-chain transparency and tamper-evidence for production deployments.
+If no signature bundle exists, record the build as unsigned instead of claiming
+signed provenance. Record the source commit, build toolchain and dependency lock
+file. Embedded dependency metadata, when present, supports inventory and known
+advisory analysis; it is not an independent cryptographic or anonymity review.

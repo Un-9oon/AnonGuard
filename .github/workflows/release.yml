@@ -46,8 +46,9 @@ jobs:
           cp contrib/runtime.env target/package_linux/runtime.env.example
           install -m 755 scripts/anonguard_run_app.py target/package_linux/anonguard-run-app
           cp -r docs target/package_linux/docs
+          cp scripts/deployment_preflight.py target/package_linux/deployment_preflight.py
           cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
-          cp README.md target/package_linux/
+          cp README.md LICENSE-MIT LICENSE-APACHE target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
           cd dist && sha256sum anonguard-linux-amd64.tar.gz > anonguard-linux-amd64.tar.gz.sha256
 
@@ -81,7 +82,7 @@ jobs:
           New-Item -ItemType Directory -Path target/package_windows -Force
           Copy-Item target/release/anonguard-daemon.exe target/package_windows/
           Copy-Item contrib/runtime.env target/package_windows/runtime.env.example
-          Copy-Item README.md target/package_windows/
+          Copy-Item README.md,LICENSE-MIT,LICENSE-APACHE target/package_windows/
           Compress-Archive -Path target/package_windows/* -DestinationPath dist/anonguard-windows-amd64.zip
           $archiveHash = (Get-FileHash dist/anonguard-windows-amd64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
           "$archiveHash  anonguard-windows-amd64.zip" | Set-Content -Encoding ascii dist/anonguard-windows-amd64.zip.sha256
@@ -121,7 +122,7 @@ jobs:
             target/x86_64-apple-darwin/release/anonguard-daemon
           chmod +x target/package_macos/anonguard-daemon
           cp contrib/runtime.env target/package_macos/runtime.env.example
-          cp README.md target/package_macos/
+          cp README.md LICENSE-MIT LICENSE-APACHE target/package_macos/
           tar -czvf dist/anonguard-macos-universal.tar.gz -C target/package_macos .
           cd dist && shasum -a 256 anonguard-macos-universal.tar.gz > anonguard-macos-universal.tar.gz.sha256
 

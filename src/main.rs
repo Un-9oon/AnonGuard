@@ -45,7 +45,7 @@ struct Args {
     #[arg(long, default_value_t = 0.05)]
     jitter_lambda: f64,
 
-    /// Enable Chaotic Attractor Morphing
+    /// Enable experimental deterministic Lorenz morphing; no proven anonymity benefit
     #[arg(long, default_value_t = false)]
     chaos: bool,
 
@@ -60,13 +60,18 @@ struct Args {
 
     /// Enable statistical RMT (Wigner-surmise) traffic-timing morphing. This is a
     /// classical statistical technique from random matrix theory, not quantum computing.
-    #[arg(long = "rmt-morphing", visible_aliases = ["rmt", "quantum"], default_value_t = false)]
+    #[arg(
+        long = "rmt-morphing",
+        visible_alias = "rmt",
+        alias = "quantum",
+        default_value_t = false
+    )]
     rmt_morphing: bool,
 
     /// Statistical RMT ensemble type: "goe" (Gaussian Orthogonal) or "gue" (Gaussian Unitary)
     #[arg(
         long = "rmt-ensemble",
-        visible_alias = "quantum-ensemble",
+        alias = "quantum-ensemble",
         default_value = "goe"
     )]
     rmt_ensemble: String,

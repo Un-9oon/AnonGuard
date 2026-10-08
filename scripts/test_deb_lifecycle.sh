@@ -26,6 +26,13 @@ test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/share/doc/anonguard/anonguard-bwrap.apparmor)" = '644:0:0'
 test -r /usr/share/doc/anonguard/docs/LINUX_APP_CONTAINMENT.md
+test -r /usr/share/doc/anonguard/docs/FYP_DELIVERY.md
+test -r /usr/share/doc/anonguard/LICENSE-MIT
+test -r /usr/share/doc/anonguard/LICENSE-APACHE
+python3 /usr/share/doc/anonguard/deployment_preflight.py --profile gateway
+for setting in MemoryHigh=768M MemoryMax=1G MemorySwapMax=0 TasksMax=256 CPUQuota=200% LimitCORE=0; do
+    grep -qx "$setting" /lib/systemd/system/anonguard.service
+done
 test ! -e /etc/apparmor.d/anonguard-bwrap
 systemd-analyze verify /lib/systemd/system/anonguard.service
 if systemctl is-active --quiet anonguard.service; then

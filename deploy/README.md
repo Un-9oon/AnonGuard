@@ -9,3 +9,5 @@ Prefer the Debian package for a local gateway service. It installs the daemon, h
 Application isolation is a separate administrative mode. See [the headless launcher](../docs/LINUX_APP_CONTAINMENT.md) for rootfs, identity, proxy and kernel requirements. The packaged service does not grant itself namespace privileges. Service teardown does not delete host nftables tables. Stop protected applications before explicit namespace cleanup.
 
 Before public use, run exact-release checks, rehearse state recovery, verify live kernel boundaries and record sustained multi-region reliability/traffic-analysis evidence. Set explicit cgroup budgets for memory, CPU and processes. Configure time synchronization, monitor authority disagreement/expiry, and establish operator ownership and incident response. A clean build or running service is insufficient evidence.
+
+For the current Linux FYP acceptance and examiner walkthrough, use [FYP delivery](../docs/FYP_DELIVERY.md). The package includes a read-only prerequisite inventory at `/usr/share/doc/anonguard/deployment_preflight.py`; it does not certify live isolation.

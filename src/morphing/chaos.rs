@@ -1,8 +1,8 @@
 //! Deterministic Chaos Engine for Traffic Morphing
 //!
-//! Uses the Lorenz Attractor equations to generate pseudo-random, highly unpredictable
-//! (but mathematically deterministic) packet shard sizes and timing delays.
-//! This defeats AI correlation models that rely on stochastic noise filtering.
+//! Uses deterministic Lorenz trajectories to vary experimental shard sizes and delays.
+//! Fixed initial conditions are reproducible, not cryptographic randomness.
+//! Resistance to traffic correlation has not been established by this mechanism.
 
 use std::sync::Arc;
 use std::sync::Mutex;
