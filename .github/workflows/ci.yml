@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install containment test prerequisites
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 bubblewrap libseccomp2 gcc libc6-dev util-linux
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables python3 bubblewrap libseccomp2 gcc libc6-dev util-linux strace
       - name: Verify launcher and loaded syscall policy
         run: python3 scripts/test_app_launcher.py
       - name: Verify privileged headless boundaries and helper death

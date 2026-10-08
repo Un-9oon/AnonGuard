@@ -57,11 +57,22 @@ while True:
                     with tempfile.TemporaryFile() as diagnostics:
                         def diagnostic_popen(*args, **kwargs):
                             kwargs["stderr"] = diagnostics
-                            return original_popen(*args, **kwargs)
+                            argv = args[0]
+                            if "/usr/bin/bwrap" in argv and shutil.which("strace"):
+                                argv = ["strace", "-f", "-e",
+                                        "trace=openat,write,prctl,clone,unshare,setresuid,setresgid",
+                                        "-o", str(root / "setup-trace.log"), *argv]
+                            return original_popen(argv, *args[1:], **kwargs)
                         with patch.object(launcher.subprocess, "Popen", side_effect=diagnostic_popen):
                             launcher.run(namespace, root, 9050, command, 65534, 65534)
                         diagnostics.seek(0)
                         print(diagnostics.read(8192).decode(errors="replace"), flush=True)
+                        trace = root / "setup-trace.log"
+                        if trace.exists():
+                            lines = trace.read_text().splitlines()
+                            important = [line for line in lines if any(word in line for word in
+                                         ("uid_map", "gid_map", "EPERM", "EACCES", "DUMPABLE", "NO_NEW_PRIVS"))]
+                            print("\n".join(important[-30:]), flush=True)
                 assert result == 0, f"Sandbox probe failed, exit={result}"
             server.terminate()
             server.wait(timeout=5)
