@@ -1,0 +1,8 @@
+# Namespace permission for the trusted OS Bubblewrap setup executable only.
+# Application confinement is provided by Bubblewrap and AnonGuard seccomp/nftables.
+# This is not an application syscall or filesystem AppArmor allowlist.
+abi <abi/4.0>,
+include <tunables/global>
+profile anonguard-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

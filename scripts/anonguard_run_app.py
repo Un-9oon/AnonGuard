@@ -21,12 +21,7 @@ DENIED = """setns unshare mount umount2 pivot_root chroot ptrace process_vm_read
 process_vm_writev pidfd_getfd io_uring_setup bpf perf_event_open open_by_handle_at
 keyctl add_key request_key userfaultfd reboot kexec_load kexec_file_load init_module
 finit_module delete_module swapon swapoff syslog acct quotactl personality clone3""".split()
-RESET_DUMPABLE = """import ctypes, os, sys
-libc = ctypes.CDLL(None, use_errno=True)
-if libc.prctl(4, 1, 0, 0, 0) != 0:
- raise OSError(ctypes.get_errno(), 'Cannot prepare unprivileged namespace mapping')
-os.execve(sys.argv[1], sys.argv[1:], dict(os.environ))
-"""
+
 
 
 class Comparison(ctypes.Structure):
@@ -176,11 +171,9 @@ add rule inet anonguard_launcher input iifname "lo" ip saddr 127.0.0.1 tcp sport
         # before Bubblewrap maps that identity to UID/GID 1000 inside its userns.
         drop = ["/usr/bin/setpriv", f"--reuid={host_uid}", f"--regid={host_gid}",
                 "--clear-groups", "--no-new-privs",
-                # UID changes reset dumpability and can leave /proc mapping
-                # files root-owned. Restore it only AFTER host privilege drop,
-                # before creating user namespaces. The dedicated host UID must
-                # not be shared with another untrusted process.
-                "/usr/bin/python3", "-I", "-c", RESET_DUMPABLE]
+                # Bubblewrap sets dumpability and prepares its UID mappings.
+                # OS AppArmor must authorize its executable's user namespaces.
+                ]
         with subprocess.Popen(prefix + drop + arguments, env=ENV, close_fds=True,
                               pass_fds=(policy.fileno(),), stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as child:
