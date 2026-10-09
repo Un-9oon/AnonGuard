@@ -41,6 +41,9 @@ class LoadedPolicy(unittest.TestCase):
                 elif source.name in ('firefox','firefox-esr','firefox-bin') and source.is_file():
                     shutil.copy2(source,destination)
                 else:destination.symlink_to(source,target_is_directory=source.is_dir())
+            # Upstream Mozilla archives may omit defaults/pref entirely.
+            # Create it in the disposable layout, never in the vendor install.
+            (layout/'defaults/pref').mkdir(parents=True,exist_ok=True)
             (layout/'anonguard.cfg').write_text(session.autoconfig())
             (layout/'defaults/pref/anonguard.js').write_text(session.AUTOCONFIG_LOADER)
             (layout/'distribution').mkdir()
