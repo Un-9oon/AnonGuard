@@ -144,15 +144,24 @@ async fn ready(address: SocketAddr) {
 
 #[tokio::test]
 async fn pinned_cli_testnet_bootstraps_transfers_and_closes_after_relay_loss() {
-    tokio::time::timeout(Duration::from_secs(90), exercise(false))
-        .await
-        .expect("CLI testnet exceeded its bounded lifetime");
+    tokio::time::timeout(
+        Duration::from_secs(if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
+            600
+        } else {
+            90
+        }),
+        exercise(false),
+    )
+    .await
+    .expect("CLI testnet exceeded its bounded lifetime");
 }
 
 #[tokio::test]
 async fn padded_cli_testnet_transfers_and_closes_after_relay_loss() {
     tokio::time::timeout(
-        Duration::from_secs(if std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
+        Duration::from_secs(if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
+            600
+        } else if std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
             180
         } else {
             90
@@ -410,6 +419,42 @@ async fn exercise(padded: bool) {
         "Circuit participants did not admit the directory:\n{}",
         testnet.diagnostics()
     );
+
+    if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
+        let gateway = addresses[7];
+        let relays = addresses[4..7]
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let gateway_pid = testnet.daemons.last().unwrap().id();
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("python3")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/eval/capture_owned_testnet.py"
+                ))
+                .env("ANONGUARD_TESTNET_GATEWAY_PORT", gateway.port().to_string())
+                .env("ANONGUARD_TESTNET_GATEWAY_PID", gateway_pid.to_string())
+                .env("ANONGUARD_TESTNET_RELAYS", relays)
+                .env(
+                    "ANONGUARD_TESTNET_PROFILE",
+                    if padded { "strict" } else { "unpadded" },
+                )
+                .output()
+                .expect("Could not start owned traffic collector")
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "Traffic collector failed: {}\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            testnet.diagnostics()
+        );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
 
     if padded && std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
         let gateway = addresses[7];
