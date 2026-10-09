@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from selenium import webdriver
@@ -49,9 +50,17 @@ class LoadedPolicy(unittest.TestCase):
             (layout/'distribution').mkdir()
             shutil.copy2(policy,layout/'distribution/policies.json')
             options=Options();options.binary_location=str(layout/vendor.name)
-            options.add_argument('-headless');options.add_argument('-remote-allow-system-access')
+            options.add_argument('-headless')
+            driver_binary=os.environ.get('ANONGUARD_GECKODRIVER') or shutil.which('geckodriver')
+            driver_help=subprocess.run([driver_binary,'--help'],check=True,capture_output=True,text=True,timeout=10).stdout
+            service_args=[]
+            if '--allow-system-access' in driver_help:
+                service_args=['--allow-system-access']
+            else:
+                # Older drivers forward this test-only browser argument directly.
+                options.add_argument('-remote-allow-system-access')
             environment=dict(os.environ,MOZ_AUTOMATION='1')
-            service=Service(os.environ.get('ANONGUARD_GECKODRIVER') or shutil.which('geckodriver'),env=environment,log_output=str(Path(temporary)/'driver.log'))
+            service=Service(driver_binary,service_args=service_args,env=environment,log_output=str(Path(temporary)/'driver.log'))
             driver=webdriver.Firefox(options=options,service=service)
             try:
                 driver.set_context('chrome')
