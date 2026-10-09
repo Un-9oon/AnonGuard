@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "AnonGuard Circuit Isolation",
+  "version": "0.1.0",
+  "description": "Experimental native Linux browser circuit isolation. Requires AnonGuard padded sessions.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "isolation@anonguard.local",
+      "strict_min_version": "140.0"
+    }
+  },
+  "permissions": [
+    "proxy",
+    "webRequest",
+    "webRequestBlocking",
+    "webNavigation",
+    "tabs",
+    "<all_urls>",
+    "cookies"
+  ],
+  "background": {
+    "scripts": [
+      "isolation.js",
+      "background.js"
+    ],
+    "persistent": true
+  },
+  "content_security_policy": "script-src 'self'; object-src 'none'"
+}

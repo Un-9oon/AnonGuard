@@ -17,6 +17,7 @@ Status: experimental v5. Completion of this engineering redesign is not approval
 - Bounded regular-file reads for keys, guards, votes, directory rollback state, proxy files and transport profiles; Unix final-symlink/FIFO refusal. Serialized guard initialization validates all input before publishing paths or rollback state.
 - Offline two-VM Linux deployment-profile generator with SOCKS-only application rules, no routed forwarding, loopback daemon/private bounded socket proxy and early firewall/service dependencies. Unit parsing and offline contracts are tested; [live VM acceptance](VM_SEPARATION.md) and browser hardening remain outstanding.
 - Experimental [Firefox ESR session integration](BROWSER_SESSIONS.md) supplies locked-policy generation, protected-config/topology checks and disposable-profile launch/cleanup. Policy loading, browser leak/fingerprint evaluation and per-site circuit isolation remain unverified or unimplemented; this is not a hardened browser distribution.
+- Experimental [browser circuit-isolation source and opt-in policy](BROWSER_CIRCUIT_ISOLATION.md) now bind local labels to document contexts and block default-proxy fallback. Source-only packages and offline contract tests do not establish addon signing, installation or real-browser event attribution; the ordinary browser profile still shares its default circuit.
 - Strict SOCKS5 method negotiation and destination parsing; bounded optional decoy operations.
 - Explicit proxy files are read and validated completely before distinct endpoints are published; read and parse errors preserve the existing pool. Bad file or inline proxy configuration stops gateway startup without printing URL credentials.
 - Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
@@ -39,7 +40,7 @@ Required before a production release:
 
 1. Independent cryptographic protocol and implementation review, with attention to layered cell framing, malicious relay behavior, transcript binding and secret lifetime.
 2. Passing CI on the exact release commit, sustained fuzz campaigns and enforced coverage thresholds. Do not lower thresholds to hide failures.
-3. Privileged Linux IPv5/IPv6/DNS leak and crash tests; install/upgrade/removal, state persistence, Windows key ACLs and recovery tests. Platform compilation does not prove kernel protection.
+3. Privileged Linux IPv4/IPv6/DNS leak and crash tests; install/upgrade/removal, state persistence, Windows key ACLs and recovery tests. Platform compilation does not prove kernel protection.
 4. A multi-region testnet with independent operators, recorded circuit success, partitions, authority convergence, clock changes, load, guard outages and churn. Frozen divergent authority views can currently stall service until another epoch.
 5. Resource-budget and scheduling evaluation. The current directory admits 512 relays and at most 16 authorities; scaling needs a reviewed paginated design. Fixed pacing has substantial bandwidth/throughput cost.
 6. Authenticated bootstrap distribution, key rotation/revocation, signed reproducible releases, incident response, abuse management and explicit operator ownership.

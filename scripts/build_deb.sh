@@ -51,6 +51,12 @@ install -d -m 755 "${STAGING_DIR}/usr/lib" "${STAGING_DIR}/usr/lib/sysusers.d"
 cp "${ROOT_DIR}/contrib/anonguard-native.conf" "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
 chmod 644 "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
 
+# Ship reviewable extension sources; never install an unsigned extension as active.
+install -d -m 755 "${STAGING_DIR}/usr/share/doc/anonguard/browser-isolation"
+for source in manifest.json isolation.js background.js; do
+    install -m 644 "${ROOT_DIR}/browser/isolation/${source}" "${STAGING_DIR}/usr/share/doc/anonguard/browser-isolation/${source}"
+done
+
 # Derive minimum library versions from the actual packaged ELF, rather than
 # guessing a libc baseline or allowing installation without its dependencies.
 DEPS_DIR="${ROOT_DIR}/target/deb_dependencies"

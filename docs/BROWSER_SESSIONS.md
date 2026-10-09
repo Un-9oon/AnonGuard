@@ -88,8 +88,9 @@ Use owned test pages and captures to verify remote DNS, no direct IPv4/IPv6,
 WebRTC/QUIC behavior, gateway-loss refusal, cookie/storage separation after restart,
 letterboxing and observable fingerprint consistency across supported machines.
 Test version upgrades as well as current installation. Fresh profiles do not
-provide per-site SOCKS identity/circuit isolation; that remains separate gateway
-work. A personal login still identifies its user. Fonts, graphics, locale, browser
+provide per-site SOCKS identity/circuit isolation. The separate experimental
+[native isolation extension](BROWSER_CIRCUIT_ISOLATION.md) adds source and policy
+contracts, but still needs signing and real-browser acceptance. A personal login still identifies its user. Fonts, graphics, locale, browser
 version, custom features and small population can still distinguish sessions.
 This integration does not reproduce Tor Browser's complete patch set or establish
 equivalent anonymity. No browser integration live acceptance is recorded yet.

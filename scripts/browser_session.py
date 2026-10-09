@@ -48,9 +48,11 @@ def endpoint(host, port, native=False):
     return str(address), port
 
 
-def policy(host, port, native=False):
+def policy(host, port, native=False, isolated=False):
     host, port = endpoint(host, port, native)
-    return {"policies": {
+    if isolated and not native:
+        raise ValueError("Circuit isolation extension supports native clients only")
+    document = {"policies": {
         "Proxy": {"Mode": "manual", "Locked": True, "SOCKSProxy": f"{host}:{port}",
                   "SOCKSVersion": 5, "UseProxyForDNS": True, "Passthrough": "",
                   "HTTPProxy": "", "SSLProxy": "", "AutoConfigURL": ""},
@@ -69,6 +71,14 @@ def policy(host, port, native=False):
         "OverridePostUpdatePage": "about:blank",
         "DontCheckDefaultBrowser": True,
     }}
+    if isolated:
+        # Extension failure must never fall back to the shared NOAUTH circuit.
+        document['policies']['Proxy']['SOCKSProxy'] = '127.0.0.1:9'
+        document['policies']['ExtensionSettings']['isolation@anonguard.local'] = {
+            'installation_mode': 'force_installed',
+            'install_url': 'file:///usr/share/anonguard/browser/isolation-signed.xpi',
+        }
+    return document
 
 
 def trusted_file(path, maximum=65536):
@@ -91,9 +101,9 @@ def trusted_file(path, maximum=65536):
     return result
 
 
-def validate_policy(document, host, port, native=False):
+def validate_policy(document, host, port, native=False, isolated=False):
     # Exact generated policy prevents hidden proxy exceptions or weakening extras.
-    if document != policy(host, port, native):
+    if document != policy(host, port, native, isolated):
         raise ValueError("Installed browser policy differs from the supported policy")
 
 
@@ -217,6 +227,8 @@ def main():
     action.add_argument('--launch', action='store_true')
     parser.add_argument('--proxy-host')
     parser.add_argument('--native-client', action='store_true')
+    parser.add_argument('--circuit-isolation', action='store_true',
+                        help='Experimental native-only signed extension profile; not yet browser-accepted')
     parser.add_argument('--device-profile', type=Path, default=Path('/etc/anonguard/device.json'))
     parser.add_argument('--proxy-port', type=int, default=9050)
     parser.add_argument('--policy-path', type=Path, default=Path('/etc/firefox/policies/policies.json'))
@@ -229,7 +241,7 @@ def main():
             descriptor = os.open(args.emit_policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 with os.fdopen(descriptor, 'w') as stream:
-                    json.dump(policy(host, port, args.native_client), stream, indent=2)
+                    json.dump(policy(host, port, args.native_client, args.circuit_isolation), stream, indent=2)
                     stream.write('\n')
             except BaseException:
                 args.emit_policy.unlink()
@@ -238,7 +250,9 @@ def main():
             return 0
         if sys.platform != 'linux' or os.geteuid() == 0:
             raise ValueError('Browser sessions require an ordinary user in the Linux application VM')
-        validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client)
+        validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client, args.circuit_isolation)
+        if args.circuit_isolation:
+            trusted_file(Path("/usr/share/anonguard/browser/isolation-signed.xpi"), maximum=1024 * 1024)
         if args.native_client:
             validate_native(json.loads(trusted_file(args.device_profile)))
         else:

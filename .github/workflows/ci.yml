@@ -35,7 +35,10 @@ jobs:
           python3 scripts/test_vm_profile.py
 
       - name: Verify disposable browser policy and session contracts
-        run: python3 scripts/test_browser_session.py
+        run: |
+          python3 scripts/test_browser_session.py
+          python3 scripts/test_browser_extension.py
+          node browser/isolation/test_isolation.js
 
       - name: Verify native setup, adapter and evaluation contracts
         run: |
