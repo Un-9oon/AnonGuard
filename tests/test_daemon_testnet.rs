@@ -151,9 +151,16 @@ async fn pinned_cli_testnet_bootstraps_transfers_and_closes_after_relay_loss() {
 
 #[tokio::test]
 async fn padded_cli_testnet_transfers_and_closes_after_relay_loss() {
-    tokio::time::timeout(Duration::from_secs(90), exercise(true))
-        .await
-        .expect("Padded CLI deadline");
+    tokio::time::timeout(
+        Duration::from_secs(if std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
+            180
+        } else {
+            90
+        }),
+        exercise(true),
+    )
+    .await
+    .expect("Padded CLI deadline");
 }
 
 async fn exercise(padded: bool) {
@@ -404,6 +411,29 @@ async fn exercise(padded: bool) {
         testnet.diagnostics()
     );
 
+    if padded && std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
+        let gateway = addresses[7];
+        let output = tokio::task::spawn_blocking(move || {
+            Command::new("python3")
+                .arg(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/scripts/test_browser_testnet.py"
+                ))
+                .env("ANONGUARD_TESTNET_GATEWAY_PORT", gateway.port().to_string())
+                .output()
+                .expect("Could not start Firefox testnet fixture")
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "Browser testnet failed: {}\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            testnet.diagnostics()
+        );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
     let destination = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = destination.local_addr().unwrap();
     let (arrived, receiving) = tokio::sync::oneshot::channel();

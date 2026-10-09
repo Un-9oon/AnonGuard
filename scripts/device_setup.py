@@ -76,10 +76,10 @@ flush table inet anonguard_native
 add chain inet anonguard_native input {{ type filter hook input priority -10; policy drop; }}
 add chain inet anonguard_native output {{ type filter hook output priority -10; policy drop; }}
 add chain inet anonguard_native forward {{ type filter hook forward priority -10; policy drop; }}
-add chain inet anonguard_native redirect {{ type nat hook output priority -100; policy accept; }}
-add rule inet anonguard_native redirect meta skuid != {{ {net}, {adapter} }} ip protocol udp udp dport 53 redirect to :1053
-add rule inet anonguard_native redirect meta skuid != {{ {net}, {adapter} }} ip protocol tcp tcp dport 53 redirect to :1053
-add rule inet anonguard_native redirect meta skuid != {{ {net}, {adapter} }} ip daddr != 127.0.0.0/8 ip protocol tcp redirect to :9040
+add chain inet anonguard_native nat_output {{ type nat hook output priority -100; policy accept; }}
+add rule inet anonguard_native nat_output meta skuid != {{ {net}, {adapter} }} ip protocol udp udp dport 53 redirect to :1053
+add rule inet anonguard_native nat_output meta skuid != {{ {net}, {adapter} }} ip protocol tcp tcp dport 53 redirect to :1053
+add rule inet anonguard_native nat_output meta skuid != {{ {net}, {adapter} }} ip daddr != 127.0.0.0/8 ip protocol tcp redirect to :9040
 add rule inet anonguard_native input ct state invalid drop
 add rule inet anonguard_native input ct state established accept
 add rule inet anonguard_native input iifname "lo" ip daddr 127.0.0.1 tcp dport {{ 9050, 9040, 1053 }} accept

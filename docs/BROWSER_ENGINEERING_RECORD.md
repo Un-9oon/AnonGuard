@@ -61,3 +61,45 @@ connection isolation, failure/leak behavior and fingerprint consistency on the
 supported machines. Mozilla signing is needed for normal distribution, not these
 development fixtures. Independent crypto review, traffic-analysis experiments,
 operator diversity and broader platform work remain separate release gates.
+
+## Follow-up: actual onion testnet and enforced privacy locks
+
+On 2026-10-10, real Firefox ESR 140.16.0 also passed the CLI onion-testnet path:
+four pinned authorities, three relay processes and the real padded gateway.
+Owned HTTP pages and iframe resources loaded through the actual daemon chain.
+A local SOCKS tap observes distinct origin credentials and forwards gateway
+responses unchanged, with no synthesized success or direct destination fallback.
+The existing 128 KiB transfer and relay-loss test still completes afterward.
+
+A new real-browser policy test exposed another engineering defect: Firefox's
+enterprise Preferences policy rejects the RFP/first-party privacy keys, so JSON
+presence did not mean those preferences were locked. Those keys are now removed
+from enterprise Preferences and locked using protected standard Firefox
+AutoConfig. The launcher requires the exact protected loader/config and rejects
+conflicting loaders. Operators must migrate previously generated policy files.
+Eight launcher/generator tests now pass.
+
+Both ordinary and isolated policies passed actual Firefox loading/preference-lock
+checks inside private executable layouts. The test never writes installed host
+policy or disables Firefox's AutoConfig sandbox. The Firefox CI now repeats both
+these checks and the real CLI testnet browser path.
+
+This strengthens local integration evidence. It still does not supply an
+operator-installed client acceptance record, packet-capture DNS/IPv6/QUIC leak
+proof, standardized font/graphics distribution, Mozilla-signed addon or an
+independent anonymity/cryptographic assessment.
+
+
+## Follow-up: generated native rules exercised in kernel
+
+An isolated user/network-namespace test found that `redirect` was invalid as the
+unquoted chain name. The generator now uses `nat_output`. After fixing it, the
+real generated firewall and native adapter passed transparent TCP, DNS refusal
+on authenticated-DoT failure, UDP/IPv6 drop, active-stream closure on backend
+crash and bounded refusal of new streams. tcpdump observed only these owned
+fixture flows; denial counters and table persistence were checked. No host
+firewall, host account or user's VM was changed. The SOCKS backend here is a
+fixture, with the actual relay/browser test performed separately.
+The separate Firefox CI now runs this namespace/capture regression as well.
+Operator-installed combined browser/client acceptance and broader adversarial
+traffic-analysis evaluation are still not established by these tests.

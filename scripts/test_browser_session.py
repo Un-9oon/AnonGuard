@@ -110,6 +110,21 @@ class BrowserSessionTests(unittest.TestCase):
             self.assertEqual(browser.launch(Path('/usr/bin/firefox-esr'), '10.77.0.1', 9050), 0)
         self.assertFalse(observed[0].exists())
 
+    def test_privacy_locks_use_exact_autoconfig_not_unsupported_enterprise_preferences(self):
+        policy = browser.policy('10.77.0.1', 9050)['policies']['Preferences']
+        for name, value in browser.AUTOCONFIG_PREFERENCES.items():
+            self.assertNotIn(name, policy)
+            self.assertIn(f'lockPref({json.dumps(name)}, {json.dumps(value)});', browser.autoconfig())
+        self.assertNotIn('sandbox_enabled', browser.AUTOCONFIG_LOADER)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'config'
+            command = [sys.executable, browser.__file__, '--emit-autoconfig', str(output)]
+            first = subprocess.run(command, capture_output=True, text=True, timeout=5)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual((output / 'anonguard.cfg').read_text(), browser.autoconfig())
+            self.assertEqual((output / 'anonguard.js').read_text(), browser.AUTOCONFIG_LOADER)
+            self.assertEqual(subprocess.run(command, capture_output=True, timeout=5).returncode, 1)
+
     def test_invalid_endpoint_never_creates_policy(self):
         for host in ('127.0.0.1', '8.8.8.8', '::1', '10.77.0.1;exec'):
             with self.subTest(host=host), self.assertRaises(ValueError):

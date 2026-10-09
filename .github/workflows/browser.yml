@@ -10,7 +10,7 @@ permissions:
 jobs:
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,3 +28,17 @@ jobs:
         env:
           ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
         run: python scripts/test_browser_live.py
+      - name: Verify loaded policy and actual preference locks
+        env:
+          ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
+        run: python scripts/test_browser_policy_live.py
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify Firefox through real pinned onion testnet
+        env:
+          ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
+          ANONGUARD_BROWSER_TESTNET: '1'
+        run: cargo test --locked --test test_daemon_testnet padded_cli_testnet_transfers_and_closes_after_relay_loss -- --exact --nocapture
+      - name: Install namespace capture tools on disposable runner
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables tcpdump
+      - name: Verify generated native firewall and crash refusal in private namespace
+        run: sudo python3 scripts/test_native_namespace.py

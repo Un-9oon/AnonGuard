@@ -98,3 +98,34 @@ equivalent anonymity. No browser integration live acceptance is recorded yet.
 References: [Mozilla policy configuration](https://firefox-admin-docs.mozilla.org/guides/policies-configuration/),
 [locked SOCKS/remote-DNS policy](https://firefox-admin-docs.mozilla.org/reference/policies/proxy/),
 [preference policies](https://firefox-admin-docs.mozilla.org/reference/policies/preferences/).
+
+
+## Required privacy AutoConfig migration
+
+Real Firefox ESR testing found that enterprise `Preferences` accepts network
+preferences but rejects the RFP/first-party privacy preferences used here. These
+privacy locks now use Firefox's standard AutoConfig `lockPref`, with its sandbox
+left enabled. The launcher requires exact protected AutoConfig files and refuses
+conflicting loaders. Regenerate old policies, which contained ineffective locks.
+
+Generate files offline:
+
+```sh
+anonguard-browser --emit-autoconfig /tmp/anonguard-privacy-config
+```
+
+On the dedicated client only, an administrator reviews and installs
+`anonguard.cfg` in the actual Firefox executable directory and `anonguard.js` in
+its `defaults/pref` directory, both root-owned mode 644. Resolve existing
+AutoConfig first; do not overwrite an organization's configuration. For a native
+Debian ESR layout, those paths are `/usr/lib/firefox-esr/anonguard.cfg` and
+`/usr/lib/firefox-esr/defaults/pref/anonguard.js`. Other layouts need their actual
+vendor executable directory. The launcher checks that directory based on the
+resolved executable, not a guessed system-wide path. Firefox/vendor updates must
+preserve/revalidate these inputs; missing/changed inputs refuse launch.
+
+The local policy test uses a private executable layout with read-only vendor
+resources and an actual `distribution/policies.json`. It verifies policy loading
+and all relevant preference locks in ordinary and isolated profiles, without
+changing the installed Firefox. It does not establish the operator's installed
+client configuration, addon signature acceptance or all fingerprint surfaces.

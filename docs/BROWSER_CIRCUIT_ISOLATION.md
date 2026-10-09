@@ -119,3 +119,22 @@ the native isolated profile and refuses missing protected configuration or a
 missing signed addon. This is a launcher for maintained Firefox, not a new engine.
 The entry remains unusable for normal deployment until the signed addon and
 native client have been provisioned; local tests use temporary installation.
+
+
+## Verified real testnet and privacy locks
+
+`ANONGUARD_BROWSER_TESTNET=1 cargo test --locked --test test_daemon_testnet
+padded_cli_testnet_transfers_and_closes_after_relay_loss -- --exact --nocapture`
+now also runs real headless Firefox through four pinned authorities, three actual
+relay daemons and the padded gateway to owned HTTP fixtures. A local SOCKS tap
+observes local labels and forwards the real gateway response/data unchanged; it
+never fabricates CONNECT success, resolves a destination or provides a direct
+fallback. Sites and iframe resources load through the actual onion testnet.
+Lab-only private-exit/zero-PoW settings do not escape temporary processes.
+
+`python3 scripts/test_browser_policy_live.py` verifies the generated policy and
+privacy preference locks inside actual Firefox using a private executable
+layout. Follow the [AutoConfig migration](BROWSER_SESSIONS.md) before normal
+launcher use. Enterprise-policy JSON alone did not enforce these privacy locks.
+These checks are now part of the browser CI; full packet-capture and installed
+client acceptance remain distinct tasks.

@@ -36,6 +36,31 @@ LOCKED_PREFERENCES = {
 }
 
 
+AUTOCONFIG_PREFERENCES = {
+    name: value for name, value in LOCKED_PREFERENCES.items() if name.startswith('privacy.')
+}
+AUTOCONFIG_LOADER = ('// AnonGuard privacy preference locks\n'
+                     'pref("general.config.filename", "anonguard.cfg");\n'
+                     'pref("general.config.obscure_value", 0);\n')
+
+
+def autoconfig():
+    return '// AnonGuard privacy preference locks\n' + ''.join(
+        f'lockPref({json.dumps(name)}, {json.dumps(value)});\n'
+        for name, value in sorted(AUTOCONFIG_PREFERENCES.items()))
+
+
+def validate_autoconfig(browser):
+    root = Path(browser).parent
+    if (trusted_file(root / 'anonguard.cfg').decode() != autoconfig()
+            or trusted_file(root / 'defaults/pref/anonguard.js').decode() != AUTOCONFIG_LOADER):
+        raise ValueError('Firefox privacy AutoConfig differs from the supported configuration')
+    for loader in (root / 'defaults/pref').glob('*.js'):
+        if loader.name != 'anonguard.js' and b'general.config.' in trusted_file(loader):
+            raise ValueError('Conflicting Firefox AutoConfig loader requires administrator migration')
+
+
+
 def endpoint(host, port, native=False):
     address = ipaddress.IPv4Address(host)
     if native:
@@ -59,7 +84,7 @@ def policy(host, port, native=False, isolated=False):
         "DNSOverHTTPS": {"Enabled": False, "Locked": True},
         "Preferences": {name: {"Value": value, "Status": "locked",
                                "Type": "boolean" if isinstance(value, bool) else "number"}
-                        for name, value in LOCKED_PREFERENCES.items()},
+                        for name, value in LOCKED_PREFERENCES.items() if name not in AUTOCONFIG_PREFERENCES},
         "ExtensionSettings": {"*": {"installation_mode": "blocked"}},
         "DisableTelemetry": True,
         "DisableFirefoxStudies": True,
@@ -223,6 +248,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--emit-policy', type=Path)
+    action.add_argument('--emit-autoconfig', type=Path)
     action.add_argument('--check', action='store_true')
     action.add_argument('--launch', action='store_true')
     parser.add_argument('--proxy-host')
@@ -237,6 +263,13 @@ def main():
     args = parser.parse_args()
     try:
         host, port = endpoint(args.proxy_host or ('127.0.0.1' if args.native_client else '10.77.0.1'), args.proxy_port, args.native_client)
+        if args.emit_autoconfig:
+            args.emit_autoconfig.mkdir(mode=0o700)
+            for name, content in (('anonguard.cfg', autoconfig()), ('anonguard.js', AUTOCONFIG_LOADER)):
+                with (args.emit_autoconfig / name).open('x') as stream:
+                    stream.write(content)
+            print(json.dumps({'autoconfig_created': True, 'browser_accepted': False}))
+            return 0
         if args.emit_policy:
             descriptor = os.open(args.emit_policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
@@ -249,7 +282,7 @@ def main():
             print(json.dumps({'policy_created': True, 'browser_accepted': False}))
             return 0
         if sys.platform != 'linux' or os.geteuid() == 0:
-            raise ValueError('Browser sessions require an ordinary user in the Linux application VM')
+            raise ValueError('Browser sessions require an ordinary user in the Linux client environment')
         validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client, args.circuit_isolation)
         if args.circuit_isolation:
             trusted_file(Path("/usr/share/anonguard/browser/isolation-signed.xpi"), maximum=1024 * 1024)
@@ -259,6 +292,7 @@ def main():
             vm = json.loads(trusted_file(args.vm_profile))
         browser = args.browser.resolve(strict=True)
         trusted_file(browser, maximum=64 * 1024 * 1024)
+        validate_autoconfig(browser)
         if not os.access(browser, os.X_OK):
             raise ValueError('Browser executable is not executable')
         version = subprocess.run([str(browser), '--version'], capture_output=True, text=True,

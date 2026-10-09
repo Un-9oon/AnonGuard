@@ -99,3 +99,29 @@ Before acceptance, test boot ordering, DNS/IPv6/UDP leaks, pre-existing sockets,
 backend/adapter death, suspend/resume, firewall reload, install/upgrade/removal,
 new network attachment and browser policy enforcement on the actual device.
 No deployment-accepted status is generated automatically.
+
+
+## Generated rules: execution regression and namespace capture
+
+The earlier `redirect` chain name was rejected as an nftables keyword by a real
+kernel test. The generator now names that chain `nat_output`. Regenerate old
+native output before installation; file/string unit tests had missed this error.
+
+`python3 scripts/test_native_namespace.py` creates a private user/network
+namespace with no external interface, dedicated numeric backend/adapter UIDs,
+the generated nftables rules and the real native adapter. It verifies transparent
+TCP to a controlled SOCKS backend, DNS SERVFAIL without clear-DNS fallback,
+UDP/IPv6 denial with counters/capture, active-stream closure after backend crash,
+bounded refusal for new streams and table survival after service death.
+Only account-name substitution and a terminal drop counter differ from the
+production rules. It never activates host rules, creates host accounts, connects
+real destinations or uses the user's VM. Non-root invocation requires subordinate
+UID/GID mapping plus iproute2, nftables and tcpdump; privileged CI still unshares
+its network namespace before activation. The fake SOCKS backend is explicitly not
+a real relay; real relay/browser integration is tested separately.
+
+This is controlled kernel/adapter regression evidence, not operator-installed
+whole-device acceptance, complete host IPC containment, all-channel browser leak
+proof or a compromised-root defense. Backend-loss setup refusal can take the
+adapter's bounded 15-second timeout because firewall rules can also block kernel
+RST responses. Successful protocol connections are never replayed directly.
