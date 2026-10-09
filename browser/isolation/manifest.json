@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "AnonGuard Circuit Isolation",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Experimental native Linux browser circuit isolation. Requires AnonGuard padded sessions.",
   "browser_specific_settings": {
     "gecko": {
@@ -13,7 +13,6 @@
     "proxy",
     "webRequest",
     "webRequestBlocking",
-    "webNavigation",
     "tabs",
     "<all_urls>",
     "cookies"

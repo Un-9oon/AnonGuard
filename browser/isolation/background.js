@@ -13,8 +13,8 @@ browser.proxy.onRequest.addListener(details => {
   catch (_) { return blocked(); }
 }, {urls: ['<all_urls>']});
 // Blocking webRequest is a second guard: it also prevents navigation when
-// origin/document attribution is unavailable. Never guess using destination,
-// iframe host, a referrer or a mutable tab URL.
+// root-frame attribution is unavailable. Never guess using destination,
+// iframe host, a referrer header or a mutable tab URL.
 browser.webRequest.onBeforeRequest.addListener(details => {
   try { isolation.route(details); return {}; }
   catch (_) { return {cancel: true}; }

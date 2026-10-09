@@ -51,6 +51,9 @@ install -d -m 755 "${STAGING_DIR}/usr/lib" "${STAGING_DIR}/usr/lib/sysusers.d"
 cp "${ROOT_DIR}/contrib/anonguard-native.conf" "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
 chmod 644 "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
 
+install -d -m 755 "${STAGING_DIR}/usr/share/applications"
+install -m 644 "${ROOT_DIR}/contrib/anonguard-browser.desktop" "${STAGING_DIR}/usr/share/applications/anonguard-browser.desktop"
+
 # Ship reviewable extension sources; never install an unsigned extension as active.
 install -d -m 755 "${STAGING_DIR}/usr/share/doc/anonguard/browser-isolation"
 for source in manifest.json isolation.js background.js; do
@@ -129,7 +132,7 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
-Depends: ${SHLIBS_DEPENDS}
+Depends: ${SHLIBS_DEPENDS}, python3 (>= 3.10)
 Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux, obfs4proxy
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard

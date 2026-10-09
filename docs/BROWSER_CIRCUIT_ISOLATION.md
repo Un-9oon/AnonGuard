@@ -1,7 +1,8 @@
 # Browser circuit-isolation engineering and release gates
 
-Status: experimental source and offline contracts implemented. **Not yet a
-signed, installed or browser-accepted feature.** The ordinary browser profile
+Status: experimental source, offline contracts and a real headless Firefox local
+fixture test implemented and passing on ESR 140.16.0. **Not yet a signed or
+production-accepted feature.** The ordinary browser profile
 still uses the daemon's shared default context. This document does not certify
 Tor Browser equivalence or production anonymity.
 
@@ -12,23 +13,26 @@ Tor Browser equivalence or production anonymity.
 key APIs. It targets the native Linux client at 127.0.0.1:9050 with padded sessions.
 It does not change cryptographic algorithms or route through Tor.
 
-Each top-level navigation receives fresh random 256-bit local credentials.
-Credentials are scoped to tab, cookie store, private mode, request identity and
-hostname. Redirecting to a different hostname receives a different context.
-Subframes and resources inherit the originating document's context, including
-third-party destinations. Opaque document IDs bind parent/child attribution;
-missing IDs are refused rather than inferred from a referrer or destination.
-An ESR build that does not expose these IDs at the necessary events is **not
-supported by this integration**, even if it passes the launcher's version floor.
+Each browser-provided top-level origin gets random 256-bit local credentials,
+scoped additionally to tab, cookie store and private mode. Same-origin reloads
+keep their context; a different origin, tab or container gets another. Closing a
+tab removes its labels, and browser restart creates fresh labels.
+Subframes and resources inherit their owning top-level origin, including nested
+third-party destinations. Firefox ESR 140 supplies `frameAncestors` and
+`documentUrl`, not the optional document IDs assumed by the original draft.
+The initial implementation consequently loaded a root page but blocked scripts;
+a real browser repro confirmed this, and the integration now uses browser-supplied
+frame ancestry. Missing or ambiguous attribution refuses instead of guessing from
+a destination, Referer header or mutable tab URL. Old-document requests keep their
+own source context during navigation.
 
 The daemon hashes length-framed SOCKS labels into its context key. Different
 labels cannot use the same cached session; existing 8-context/16-stream bounds
 remain. Busy contexts can be refused, not merged. These labels are local circuit
 selectors, not access-control credentials and not website account anonymization.
-No browsing records are saved to disk. Memory is bounded to 2048 pending/document
-entries and cleaned on tab closure. A full table requires closing tabs or a new
+No browsing records are saved to disk. Memory is bounded to 512 origin contexts and cleaned on tab closure. A full table requires closing tabs or a new
 browser session. Expected compatibility risks include background requests,
-service workers without document attribution, long-lived tabs and redirect IDs.
+service workers without frame attribution, long-lived tabs and special browser channels.
 
 The extension returns no direct proxy and terminates every fallback list. A
 second blocking request listener cancels missing attribution. Proxy API errors
@@ -83,13 +87,35 @@ available while this profile awaits acceptance.
 5. Benchmark availability and padding overhead under the daemon's context caps.
    Independent review and defended-training/flow-correlation evaluation remain.
 
-Offline tests cover parent-resource inheritance, tab/container/navigation
-separation, redirect rejection, attribution failure, bounds and listener wiring;
-Python tests cover deterministic packages and policy fallback boundaries. They
-are not real Firefox leak tests. Universal endpoint protection, a standardized
+Offline tests cover parent-resource inheritance, site/tab/container/private-mode
+separation, redirect-origin separation, attribution failure, bounds and listener wiring;
+Python tests cover deterministic packages and policy fallback boundaries. A real Firefox test also verifies nested frame loading, shared third-party
+credentials within a site, separate site/tab labels, remote-domain SOCKS targets,
+WebRTC API disablement, loopback bypass refusal, missing-addon refusal and
+proxy-loss refusal. This uses a disposable profile and temporary addon, with a
+fixture-only HTTP exception. It is not a full DNS/IPv6/QUIC packet-capture audit
+or signed-policy acceptance. Universal endpoint protection, a standardized
 font/graphics distribution and an independently audited browser remain open.
 
 Primary API references:
 [Mozilla proxy event](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/proxy/onRequest),
 [SOCKS and connection isolation fields](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/proxy/ProxyInfo),
-[request document identities](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/proxy/RequestDetails).
+[request attribution fields](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/proxy/RequestDetails).
+
+
+## Local testing without a signing account
+
+Install Selenium, Firefox ESR and geckodriver in a controlled test environment.
+Run `python3 scripts/test_browser_live.py`; it loads the actual addon temporarily,
+starts only loopback fixture servers, and deletes its browser profile on exit.
+The native proxy port 9050 must be free: the test refuses an occupied port and
+never stops another service. It does not use the user's VM or resolve/connect
+real destination servers. A direct-connection canary checks failure boundaries.
+GitHub's separate Firefox Browser Integration workflow repeats this against
+maintained ESR. Signing is not needed for these development tests.
+
+The Debian package now installs an **AnonGuard Browser** desktop entry. It starts
+the native isolated profile and refuses missing protected configuration or a
+missing signed addon. This is a launcher for maintained Firefox, not a new engine.
+The entry remains unusable for normal deployment until the signed addon and
+native client have been provisioned; local tests use temporary installation.

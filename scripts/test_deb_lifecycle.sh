@@ -42,6 +42,9 @@ for setting in MemoryHigh=768M MemoryMax=1G MemorySwapMax=0 TasksMax=256 CPUQuot
 done
 test ! -e /etc/apparmor.d/anonguard-bwrap
 systemd-analyze verify /lib/systemd/system/anonguard.service
+test -f /usr/share/applications/anonguard-browser.desktop
+test -f /usr/share/doc/anonguard/browser-isolation/isolation.js
+test ! -e /usr/share/anonguard/browser/isolation-signed.xpi
 if systemctl is-active --quiet anonguard.service; then
     echo 'Unconfigured package unexpectedly started a service' >&2
     exit 1

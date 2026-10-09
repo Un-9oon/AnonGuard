@@ -1,0 +1,30 @@
+name: Firefox Browser Integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: browser-actions/setup-firefox@0bc507ddf224827e3b1af68e014d5e42ab93e795 # v1
+        id: firefox
+        with:
+          firefox-version: latest-esr
+      - uses: browser-actions/setup-geckodriver@fac5b0424c584257f32cf12c5eb4ba86014c34f8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: python -m pip install selenium==4.31.0
+      - name: Run actual browser against local fixtures
+        env:
+          ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
+        run: python scripts/test_browser_live.py

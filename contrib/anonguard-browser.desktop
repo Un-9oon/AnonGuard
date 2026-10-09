@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AnonGuard Browser
+Comment=Browse through the configured AnonGuard client
+Exec=anonguard-browser --native-client --circuit-isolation --launch
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
