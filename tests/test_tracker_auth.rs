@@ -3,7 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::sleep;
 
-use anonguard::mesh::sybil::{current_timestamp_secs, solve_pow_bounded};
+use anonguard::mesh::sybil::{current_timestamp_secs, solve_pow_bounded, verify_pow};
 use anonguard::mesh::tracker::TrackerServer;
 
 #[tokio::test]
@@ -41,8 +41,13 @@ async fn test_tracker_re_registration_auth() {
     sleep(Duration::from_millis(50)).await;
 
     // (b) Attempt to register node X again with a DIFFERENT token (and new PoW since nonces can't be replayed)
-    let now2 = current_timestamp_secs() + 1;
-    let nonce2 = solve_pow_bounded(node_id, now2, test_difficulty).unwrap();
+    let now2 = now;
+    // The replay registry keys on (node_id, nonce), not timestamp. Solving
+    // from zero at different timestamps can return the same nonce and test
+    // replay refusal instead of token authentication. Use disjoint valid proofs.
+    let nonce2 = ((nonce1 + 1)..10_000_000)
+        .find(|nonce| verify_pow(node_id, now2, *nonce, test_difficulty, now))
+        .expect("fresh second proof");
 
     let mut stream2 = TcpStream::connect(&addr_str).await.unwrap();
     // Use an empty token here! The tracker space-separated parsing will parse empty token if we format it differently,
@@ -64,9 +69,11 @@ async fn test_tracker_re_registration_auth() {
     );
 
     // Also try with a DIFFERENT non-empty token
-    let now3 = current_timestamp_secs() + 2;
+    let now3 = now;
     println!("Solving PoW 3");
-    let nonce3 = solve_pow_bounded(node_id, now3, test_difficulty).unwrap();
+    let nonce3 = ((nonce2 + 1)..10_000_000)
+        .find(|nonce| verify_pow(node_id, now3, *nonce, test_difficulty, now))
+        .expect("fresh third proof");
     println!("Connecting stream3");
     let mut stream3 = TcpStream::connect(&addr_str).await.unwrap();
     let reg3 = format!(
