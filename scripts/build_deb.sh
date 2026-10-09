@@ -44,6 +44,13 @@ chmod 755 "${STAGING_DIR}/usr/bin/anonguard-pt"
 cp "${ROOT_DIR}/scripts/browser_session.py" "${STAGING_DIR}/usr/bin/anonguard-browser"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-browser"
 
+cp "${ROOT_DIR}/scripts/device_setup.py" "${STAGING_DIR}/usr/bin/anonguard-setup"
+cp "${ROOT_DIR}/scripts/native_adapter.py" "${STAGING_DIR}/usr/bin/anonguard-native-adapter"
+chmod 755 "${STAGING_DIR}/usr/bin/anonguard-setup" "${STAGING_DIR}/usr/bin/anonguard-native-adapter"
+install -d -m 755 "${STAGING_DIR}/usr/lib" "${STAGING_DIR}/usr/lib/sysusers.d"
+cp "${ROOT_DIR}/contrib/anonguard-native.conf" "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
+chmod 644 "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
+
 # Derive minimum library versions from the actual packaged ELF, rather than
 # guessing a libc baseline or allowing installation without its dependencies.
 DEPS_DIR="${ROOT_DIR}/target/deb_dependencies"
@@ -120,7 +127,7 @@ Depends: ${SHLIBS_DEPENDS}
 Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux, obfs4proxy
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
-Description: Experimental authenticated three-hop anonymity transport
+Description: Experimental authenticated multihop anonymity transport
  AnonGuard provides pinned relay links, layered circuits and optional Linux
  application namespace isolation. Production anonymity and resistance to
  traffic correlation have not been independently established.
@@ -143,6 +150,8 @@ cat << 'EOF' > "${STAGING_DIR}/DEBIAN/prerm"
 #!/bin/sh
 set -e
 if [ -d /run/systemd/system ]; then
+    systemctl stop anonguard-native-adapter.service anonguard-client.service anonguard-relay.service 2>/dev/null || true
+    # Preserve native firewall restrictions after package removal.
     systemctl stop anonguard.service 2>/dev/null || true
     systemctl stop 'anonguard-pt@*.service' 2>/dev/null || true
 fi

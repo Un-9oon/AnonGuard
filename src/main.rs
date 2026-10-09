@@ -41,6 +41,14 @@ struct Args {
     #[arg(long)]
     proxy: Option<String>,
 
+    /// Enable experimental multiplexed sessions with coordinated padding
+    #[arg(long, requires = "onion", conflicts_with_all = ["relay", "authority", "reverse_relay", "tracker", "jitter", "chaos", "rmt_morphing", "chaffing"])]
+    padded_sessions: bool,
+
+    /// Shared padding policy; research profiles have no established anonymity benefit
+    #[arg(long, requires = "padded_sessions", default_value = "balanced", value_parser = ["balanced", "strict", "research-rmt", "research-poisson"])]
+    privacy_profile: String,
+
     /// Minimum onion circuit length (guard, middle relays, exit)
     #[arg(long, requires = "onion", default_value_t = 3, value_parser = clap::value_parser!(u8).range(3..=8))]
     min_hops: u8,
@@ -124,7 +132,7 @@ struct Args {
     #[arg(long, default_value_t = 1)]
     quorum_threshold: usize,
 
-    /// Enable 3-hop Layered Onion Encryption (Sphinx / Tor-style cell peeling)
+    /// Enable bounded multihop onion encryption with identity-bound relay keys
     #[arg(long, default_value_t = false)]
     onion: bool,
 
@@ -484,6 +492,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = GuardConfig {
+        padded_sessions: args.padded_sessions,
+        privacy_profile: args.privacy_profile.clone(),
         min_chain_length: if args.onion {
             usize::from(args.min_hops)
         } else {

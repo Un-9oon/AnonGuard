@@ -5,7 +5,7 @@ Experimental authenticated onion-routing software written in Rust. No superiorit
 ## Supported protocol
 
 - One destination TCP stream through an authenticated randomized 3–8-hop circuit (CLI default range 3–5).
-- TLS 1.3 between adjacent nodes, mandatory `anonguard/4` ALPN, and Ed25519 identity pins from a signed directory.
+- TLS 1.3 between adjacent nodes, mandatory `anonguard/5` ALPN, and Ed25519 identity pins from a signed directory.
 - Per-link circuit identifiers, hybrid X25519/ML-KEM-768 circuit handshakes, transcript-bound keys, and layered encryption.
 - Exact-snapshot directory quorum verification with persistent rollback/equivocation rejection.
 - Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
@@ -72,7 +72,7 @@ Windows and macOS support the application transport; they do not implement this 
 
 ## Migration and limits
 
-Protocol v4 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
+Protocol v5 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
 
 A directory snapshot must be current and quorum signed. New circuits fail after directory expiry. Existing circuits are bounded to one hour and are not silently migrated. Protect persistent authority votes, directory rollback state, guard state and identity keys from modification. Clock rollback, stale directories, unreachable guards and conflicting authority views may stop service rather than lower security requirements.
 
@@ -82,3 +82,12 @@ For installation, acceptance evidence and the examiner walkthrough, start with
 See [protocol specification](docs/PROTOCOL_V3.md), [threat model](THREAT_MODEL.md), and [production readiness](docs/PRODUCTION_READINESS.md). Historical research documents and simulations are not evidence about the current protocol.
 
 Licensed under MIT or Apache-2.0.
+
+### Experimental padded sessions and native devices
+
+Opt-in `--onion --padded-sessions --privacy-profile balanced` adds authenticated
+profile negotiation, shared stream scheduling, independent bidirectional cover
+and bounded idle tails. See [the session contract](docs/PADDED_SESSIONS.md).
+The Debian package includes [native Client/Volunteer setup](docs/NATIVE_INSTALLATION.md);
+VMs remain optional test fixtures. The new [measured-trace evaluator](eval/TRACE_EVALUATION.md)
+is a defense-aware held-out baseline, not proof of AI resistance or production anonymity.

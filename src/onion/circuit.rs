@@ -172,7 +172,7 @@ impl HopCryptState {
 /// Key derivation function turning an X25519 + ML-KEM-768 hybrid secret into forward, backward, and MAC keys.
 /// Uses RFC 5869 HKDF-SHA256 with domain-separated info labels for key commitment.
 pub fn derive_hop_keys(shared_secret: &[u8]) -> Result<HopKeys, CircuitError> {
-    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v4")
+    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v5")
 }
 
 fn derive_hop_keys_with_context(
@@ -192,13 +192,13 @@ fn derive_hop_keys_with_context(
         backward_aead_key: [0u8; 32],
     };
 
-    hk.expand(b"AnonGuard-Forward-Key-v4", &mut keys.forward_key)
+    hk.expand(b"AnonGuard-Forward-Key-v5", &mut keys.forward_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Backward-Key-v4", &mut keys.backward_key)
+    hk.expand(b"AnonGuard-Backward-Key-v5", &mut keys.backward_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Forward-MAC-v4", &mut keys.forward_mac)
+    hk.expand(b"AnonGuard-Forward-MAC-v5", &mut keys.forward_mac)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Backward-MAC-v4", &mut keys.backward_mac)
+    hk.expand(b"AnonGuard-Backward-MAC-v5", &mut keys.backward_mac)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
     // Dedicated, full-entropy, single-purpose AEAD keys (v5). Previously the AEAD
     // path reused the first 16 bytes each of forward_key and forward_mac spliced
@@ -600,7 +600,7 @@ pub fn handle_create_cell(
 
     let identity_pub = relay_identity_key.verifying_key();
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v4");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v5");
     preimage.extend_from_slice(&context_id.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(identity_pub.as_bytes());
@@ -685,7 +685,7 @@ pub fn process_created_cell(
     let signature = Signature::from_bytes(&sig_bytes);
 
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v4");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v5");
     preimage.extend_from_slice(&cid.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(&relay_identity_pub_bytes);
@@ -911,7 +911,7 @@ mod aead_key_derivation_tests {
 
         // The AEAD key must not equal, and must not be derivable by simple
         // truncation/concatenation of, the stream-cipher key or the legacy
-        // MAC key. This guards against reintroducing the v4 bug where
+        // MAC key. This guards against reintroducing the legacy key-splicing bug where
         // aead_key = forward_key[0..16] || forward_mac[0..16].
         assert_ne!(keys.forward_aead_key, keys.forward_key);
         assert_ne!(keys.forward_aead_key, keys.forward_mac);

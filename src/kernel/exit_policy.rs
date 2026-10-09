@@ -166,6 +166,17 @@ impl ExitPolicy {
                     )
                 })??
                 .collect();
+        self.connect_resolved(host, addrs, deadline).await
+    }
+
+    // Keep validation and connection in the same path: a resolved address list
+    // is checked in full before any socket is opened, then used without re-resolution.
+    async fn connect_resolved(
+        &self,
+        host: &str,
+        addrs: Vec<SocketAddr>,
+        deadline: tokio::time::Instant,
+    ) -> Result<tokio::net::TcpStream, std::io::Error> {
         let ips: Vec<IpAddr> = addrs.iter().map(|a| a.ip()).collect();
         self.validate_resolved_ips(host, &ips)?;
         let mut last =
@@ -499,17 +510,27 @@ mod tests {
             .validate_resolved_ips("legitimate-bank-api.com", &public_ips)
             .is_ok());
 
-        // 5. Live DNS Rebinding test using 127.0.0.1.nip.io (resolves to 127.0.0.1 via DNS, not on string blocklist)
-        assert!(
-            policy.is_permitted("127.0.0.1.nip.io", 80),
-            "nip.io domain passes string check"
-        );
-        let nip_res = policy.resolve_and_connect("127.0.0.1.nip.io", 80).await;
-        assert!(nip_res.is_err());
+        // 5. Controlled resolver output exercises the actual post-DNS connect path.
+        // No public DNS service is required by the regression suite.
+        let blocked_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let resolved = blocked_listener.local_addr().unwrap();
+        assert!(policy.is_permitted("public-looking.example", resolved.port()));
+        let result = policy
+            .connect_resolved(
+                "public-looking.example",
+                vec![resolved],
+                tokio::time::Instant::now() + policy.connect_timeout,
+            )
+            .await;
         assert_eq!(
-            nip_res.unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied,
-            "127.0.0.1.nip.io must be blocked upon resolving to loopback"
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), blocked_listener.accept())
+                .await
+                .is_err(),
+            "A forbidden resolved address must never be contacted"
         );
 
         // 6. Permitted private network mode succeeds when enabled

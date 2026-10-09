@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Experimental disposable Firefox ESR sessions inside the SOCKS-only application VM."""
+"""Experimental disposable Firefox ESR sessions on a native client or inside the optional SOCKS-only application VM."""
 import argparse
 import ipaddress
 import json
@@ -36,16 +36,20 @@ LOCKED_PREFERENCES = {
 }
 
 
-def endpoint(host, port):
+def endpoint(host, port, native=False):
     address = ipaddress.IPv4Address(host)
+    if native:
+        if str(address) != '127.0.0.1' or port != 9050:
+            raise ValueError('Native browser requires loopback SOCKS 127.0.0.1:9050')
+        return str(address), port
     ranges = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
     if not any(address in ipaddress.IPv4Network(n) for n in ranges) or not 1024 <= port <= 65535:
         raise ValueError("Browser requires an RFC1918 IPv4 gateway and port 1024..65535")
     return str(address), port
 
 
-def policy(host, port):
-    host, port = endpoint(host, port)
+def policy(host, port, native=False):
+    host, port = endpoint(host, port, native)
     return {"policies": {
         "Proxy": {"Mode": "manual", "Locked": True, "SOCKSProxy": f"{host}:{port}",
                   "SOCKSVersion": 5, "UseProxyForDNS": True, "Passthrough": "",
@@ -87,9 +91,9 @@ def trusted_file(path, maximum=65536):
     return result
 
 
-def validate_policy(document, host, port):
+def validate_policy(document, host, port, native=False):
     # Exact generated policy prevents hidden proxy exceptions or weakening extras.
-    if document != policy(host, port):
+    if document != policy(host, port, native):
         raise ValueError("Installed browser policy differs from the supported policy")
 
 
@@ -128,6 +132,16 @@ def validate_vm(document, host, port, addresses, routes):
         target = ipaddress.ip_network(destination, strict=False)
         if target.version != 4 or not (target.subnet_of(network) or target.subnet_of(ipaddress.IPv4Network("127.0.0.0/8"))):
             raise ValueError("Application VM route escapes the internal subnet")
+
+
+def validate_native(document):
+    if (not isinstance(document, dict) or document.get('version') != 1
+            or document.get('role') != 'client' or document.get('socks') != '127.0.0.1:9050'):
+        raise ValueError('Native device profile is not a supported client')
+    for unit in ('anonguard-native-firewall.service', 'anonguard-client.service',
+                 'anonguard-native-adapter.service'):
+        subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', unit],
+                       check=True, timeout=5)
 
 
 def preferences(host, port, downloads):
@@ -201,19 +215,21 @@ def main():
     action.add_argument('--emit-policy', type=Path)
     action.add_argument('--check', action='store_true')
     action.add_argument('--launch', action='store_true')
-    parser.add_argument('--proxy-host', default='10.77.0.1')
+    parser.add_argument('--proxy-host')
+    parser.add_argument('--native-client', action='store_true')
+    parser.add_argument('--device-profile', type=Path, default=Path('/etc/anonguard/device.json'))
     parser.add_argument('--proxy-port', type=int, default=9050)
     parser.add_argument('--policy-path', type=Path, default=Path('/etc/firefox/policies/policies.json'))
     parser.add_argument('--vm-profile', type=Path, default=Path('/etc/anonguard/vm-profile.json'))
     parser.add_argument('--browser', type=Path, default=Path('/usr/bin/firefox-esr'))
     args = parser.parse_args()
     try:
-        host, port = endpoint(args.proxy_host, args.proxy_port)
+        host, port = endpoint(args.proxy_host or ('127.0.0.1' if args.native_client else '10.77.0.1'), args.proxy_port, args.native_client)
         if args.emit_policy:
             descriptor = os.open(args.emit_policy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:
                 with os.fdopen(descriptor, 'w') as stream:
-                    json.dump(policy(host, port), stream, indent=2)
+                    json.dump(policy(host, port, args.native_client), stream, indent=2)
                     stream.write('\n')
             except BaseException:
                 args.emit_policy.unlink()
@@ -222,8 +238,11 @@ def main():
             return 0
         if sys.platform != 'linux' or os.geteuid() == 0:
             raise ValueError('Browser sessions require an ordinary user in the Linux application VM')
-        validate_policy(json.loads(trusted_file(args.policy_path)), host, port)
-        vm = json.loads(trusted_file(args.vm_profile))
+        validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client)
+        if args.native_client:
+            validate_native(json.loads(trusted_file(args.device_profile)))
+        else:
+            vm = json.loads(trusted_file(args.vm_profile))
         browser = args.browser.resolve(strict=True)
         trusted_file(browser, maximum=64 * 1024 * 1024)
         if not os.access(browser, os.X_OK):
@@ -232,11 +251,12 @@ def main():
                                  check=True, timeout=10, env={'PATH': '/usr/bin:/bin'}).stdout
         if not re.search(r'Firefox (?:1[4-9]\d|[2-9]\d{2})\.\d+(?:\.\d+)*esr\b', version):
             raise ValueError('Supported foundation is maintained Firefox ESR 140 or later')
-        addresses = json.loads(subprocess.run(['/usr/sbin/ip', '-j', 'address', 'show'],
-                                             check=True, capture_output=True, timeout=5).stdout)
-        routes = json.loads(subprocess.run(['/usr/sbin/ip', '-j', '-4', 'route', 'show', 'table', 'all'],
-                                          check=True, capture_output=True, timeout=5).stdout)
-        validate_vm(vm, host, port, addresses, routes)
+        if not args.native_client:
+            addresses = json.loads(subprocess.run(['/usr/sbin/ip', '-j', 'address', 'show'],
+                                                 check=True, capture_output=True, timeout=5).stdout)
+            routes = json.loads(subprocess.run(['/usr/sbin/ip', '-j', '-4', 'route', 'show', 'table', 'all'],
+                                              check=True, capture_output=True, timeout=5).stdout)
+            validate_vm(vm, host, port, addresses, routes)
         if args.check:
             print(json.dumps({'configuration_present': True, 'browser_accepted': False,
                               'policy_loaded_by_browser': 'NOT VERIFIED', 'version': version.strip()}))

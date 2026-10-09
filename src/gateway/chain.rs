@@ -93,6 +93,20 @@ pub async fn read_socks5_request<S>(stream: &mut S) -> std::io::Result<(String, 
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + ?Sized,
 {
+    read_socks5_request_context(stream, false)
+        .await
+        .map(|(host, port, _)| (host, port))
+}
+
+/// RFC1929 credentials are local privacy-context labels, not account authentication.
+/// No-auth uses the daemon's default context; credentials never leave this process.
+pub async fn read_socks5_request_context<S>(
+    stream: &mut S,
+    context_mode: bool,
+) -> std::io::Result<(String, u16, Option<[u8; 32]>)>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + ?Sized,
+{
     // 1. Initial auth negotiation
     let mut auth_req = [0u8; 2];
     stream.read_exact(&mut auth_req).await?;
@@ -107,7 +121,7 @@ where
     let mut methods = vec![0u8; num_methods];
     stream.read_exact(&mut methods).await?;
 
-    if !methods.contains(&0x00) {
+    if !(methods.contains(&0x00) || context_mode && methods.contains(&0x02)) {
         stream.write_all(&[0x05, 0xff]).await?;
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -115,8 +129,44 @@ where
         ));
     }
 
-    // Reply NO AUTH REQUIRED
-    stream.write_all(&[0x05, 0x00]).await?;
+    let context = if context_mode && methods.contains(&0x02) {
+        use sha2::{Digest, Sha256};
+        use zeroize::Zeroize;
+        stream.write_all(&[5, 2]).await?;
+        let version = stream.read_u8().await?;
+        let length = stream.read_u8().await?;
+        if version != 1 || length == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid privacy context framing",
+            ));
+        }
+        let mut username = zeroize::Zeroizing::new(vec![0; length as usize]);
+        stream.read_exact(&mut username).await?;
+        let length = stream.read_u8().await?;
+        if length == 0 {
+            username.zeroize();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Empty privacy context password",
+            ));
+        }
+        let mut password = zeroize::Zeroizing::new(vec![0; length as usize]);
+        stream.read_exact(&mut password).await?;
+        let mut digest = Sha256::new();
+        digest.update(b"AnonGuard-local-context-v1");
+        digest.update([username.len() as u8]);
+        digest.update(username.as_slice());
+        digest.update([password.len() as u8]);
+        digest.update(password.as_slice());
+        username.zeroize();
+        password.zeroize();
+        stream.write_all(&[1, 0]).await?;
+        Some(digest.finalize().into())
+    } else {
+        stream.write_all(&[5, 0]).await?;
+        None
+    };
 
     // 2. Connect request
     let mut req_header = [0u8; 4];
@@ -174,7 +224,7 @@ where
             "Zero destination port",
         ));
     }
-    Ok((host, port))
+    Ok((host, port, context))
 }
 
 /// Sends a SOCKS5 CONNECT reply to the client with the specified status code (RFC 1928).

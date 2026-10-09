@@ -54,3 +54,20 @@ fn authority_endpoints_require_matching_independent_pins() {
         "distinct signing keys",
     );
 }
+
+#[test]
+fn padded_profiles_refuse_legacy_customization_and_missing_onion() {
+    refuses(&["--padded-sessions"], "--onion");
+    for legacy in ["--jitter", "--chaos", "--rmt-morphing", "--chaffing"] {
+        refuses(&["--onion", "--padded-sessions", legacy], "cannot be used");
+    }
+    refuses(
+        &[
+            "--onion",
+            "--padded-sessions",
+            "--privacy-profile",
+            "custom",
+        ],
+        "invalid value",
+    );
+}

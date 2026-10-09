@@ -8,6 +8,7 @@ pub mod flow;
 pub mod link;
 pub mod multipath;
 pub mod padding;
+pub mod session;
 pub mod transport;
 pub use cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 pub use circuit::{

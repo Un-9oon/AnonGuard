@@ -1,6 +1,7 @@
 //! Tokio asynchronous local gateway server listening on 127.0.0.1:9050.
 
 use crate::core::state_machine::{ActiveGuarded, GuardedSocket};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
@@ -54,6 +55,17 @@ pub struct GatewayServer {
     relay_identity_key: Arc<Ed25519SigningKey>,
 }
 
+struct CachedSession {
+    handle: crate::onion::session::ClientHandle,
+    task: tokio::task::JoinHandle<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+}
+impl Drop for CachedSession {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+type SessionCache = Arc<tokio::sync::Mutex<HashMap<[u8; 32], CachedSession>>>;
+
 impl GatewayServer {
     pub fn new(
         config: GuardConfig,
@@ -98,6 +110,28 @@ impl GatewayServer {
 
     /// Starts the asynchronous listener loop with global and per-IP connection bounds.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.config.padded_sessions
+            && (!self.config.enable_onion_routing
+                || self.config.relay_mode
+                || !self
+                    .config
+                    .listen_addr
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|address| address.ip().is_loopback()))
+        {
+            return Err("Padded client sessions require an onion gateway on loopback".into());
+        }
+        if self.config.padded_sessions {
+            if self.config.enable_jitter
+                || self.config.enable_chaos
+                || self.config.enable_rmt_morphing
+                || self.config.enable_chaffing
+            {
+                return Err("Padded sessions require one common privacy profile, without legacy morphing/chaffing flags".into());
+            }
+            crate::onion::session::Profile::parse(&self.config.privacy_profile)?;
+        }
+        let sessions: SessionCache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
         let mut tasks = tokio::task::JoinSet::new();
         self.pool
             .init_guard_state(self.config.guard_state_path.clone())
@@ -315,6 +349,7 @@ impl GatewayServer {
                 *count += 1;
             }
 
+            let sessions = sessions.clone();
             let pool = self.pool.clone();
             let kill_switch = self.kill_switch.clone();
             let jitter = self.jitter.clone();
@@ -461,9 +496,9 @@ impl GatewayServer {
 
                     // 1. Intercept SOCKS5 from local client to find target
                     let timeout_duration = tokio::time::Duration::from_secs(10);
-                    let (target_host, target_port) = match tokio::time::timeout(
+                    let (target_host, target_port, context) = match tokio::time::timeout(
                         timeout_duration,
-                        crate::gateway::chain::read_socks5_request(&mut client),
+                        crate::gateway::chain::read_socks5_request_context(&mut client, config.padded_sessions),
                     )
                     .await
                     {
@@ -480,6 +515,36 @@ impl GatewayServer {
                             return;
                         }
                     };
+
+                    if config.padded_sessions {
+                        if config.disable_ipv6 && target_host.parse::<std::net::Ipv6Addr>().is_ok() {
+                            let _=crate::gateway::chain::send_socks5_reply(&mut client,1).await;
+                            return;
+                        }
+                        let mut replied=false;
+                        let operation=async {
+                            let key=context.unwrap_or([0;32]);
+                            let mut cache=tokio::time::timeout(std::time::Duration::from_secs(30),sessions.lock()).await?;
+                            cache.retain(|_,session| !session.task.is_finished());
+                            if !cache.contains_key(&key) {
+                                if cache.len()>=8 {return Err("Privacy context limit reached".into());}
+                                let profile=crate::onion::session::Profile::parse(&config.privacy_profile)?;
+                                let (stream,circuit)=tokio::time::timeout(std::time::Duration::from_secs(30), establish_session(&config,&pool,profile)).await??;
+                                let upstream=GuardedSocket::new(stream,kill_switch.atomic_handle()).begin_verification().mark_verified();
+                                let (handle,task)=crate::onion::session::start_client(upstream,circuit,profile);
+                                cache.insert(key,CachedSession{handle,task});
+                            }
+                            let handle=cache.get(&key).ok_or("Session missing")?.handle.clone();
+                            drop(cache);
+                            let mut application=handle.open(target_host,target_port).await?;
+                            crate::gateway::chain::send_socks5_reply(&mut client,0).await?;
+                            replied=true;
+                            tokio::io::copy_bidirectional(&mut client,&mut application).await?;
+                            Ok::<_,Box<dyn std::error::Error + Send + Sync>>(())
+                        }.await;
+                        if operation.is_err() && !replied { let _=crate::gateway::chain::send_socks5_reply(&mut client,1).await; }
+                        return;
+                    }
 
                     // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                     let chain = if config.private_bridges {
@@ -900,6 +965,93 @@ impl GatewayServer {
     }
 }
 
+async fn establish_session(
+    config: &GuardConfig,
+    pool: &ProxyPool,
+    profile: crate::onion::session::Profile,
+) -> Result<
+    (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let pins: Vec<_> = config
+        .bridge_transports
+        .iter()
+        .map(|binding| binding.identity)
+        .collect();
+    let chain = if config.private_bridges {
+        pool.get_private_bridge_chain_with_bounds(
+            &config.bridge_transports,
+            config.enforce_subnet_diversity,
+            config.min_chain_length.max(3),
+            config.max_chain_length.max(3),
+        )
+        .await
+    } else {
+        pool.get_onion_chain_with_entry_pins(
+            config.min_chain_length.max(3),
+            config.max_chain_length.max(3),
+            config.enforce_subnet_diversity,
+            true,
+            &pins,
+        )
+        .await
+    };
+    let entry = chain.first().ok_or("No eligible session circuit")?;
+    if entry.raw_url.starts_with("reverse://") {
+        return Err("Reverse onion transport unsupported".into());
+    }
+    let mut keys = pool.get_identity_keys(&chain).await;
+    if config.private_bridges {
+        keys[0] = config
+            .bridge_transports
+            .iter()
+            .find(|binding| {
+                binding.bridge.ip().to_string() == entry.host && binding.bridge.port() == entry.port
+            })
+            .ok_or("Private entry binding absent")?
+            .identity;
+    }
+    let connection = async {
+        if config.bridge_transports.is_empty() {
+            TcpStream::connect((entry.host.as_str(), entry.port)).await
+        } else {
+            let binding = config
+                .bridge_transports
+                .iter()
+                .find(|binding| binding.identity == keys[0])
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "Unprovisioned entry transport",
+                    )
+                })?;
+            crate::onion::transport::connect(binding.proxy, binding.bridge, &binding.arguments)
+                .await
+        }
+    };
+    let stream = match tokio::time::timeout(std::time::Duration::from_secs(10), connection).await {
+        Ok(Ok(stream)) => stream,
+        _ => {
+            pool.note_guard_link_failure(keys[0]).await;
+            return Err("Session entry connection failed".into());
+        }
+    };
+    let mut stream = match crate::onion::link::connect(stream, keys[0]).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            pool.note_guard_link_failure(keys[0]).await;
+            return Err(error.into());
+        }
+    };
+    let mut id = rand::random::<u32>();
+    if id == 0 || id >> 24 == 5 {
+        id ^= 0x10000000;
+    }
+    let mut circuit = negotiate_telescopic_hops(&mut stream, id, &chain, &keys).await?;
+    negotiate_padded_session(&mut stream, &mut circuit, profile).await?;
+    Ok((stream, circuit))
+}
+
 /// Writes an authenticated fixed-size cell through the shared circuit sequence state.
 /// The write deadline bounds backpressure from an unresponsive relay.
 async fn write_client_cell(
@@ -1072,6 +1224,46 @@ pub async fn build_telescopic_circuit(
     target_host: &str,
     target_port: u16,
 ) -> Result<OnionCircuit, Box<dyn std::error::Error + Send + Sync>> {
+    let mut circuit =
+        negotiate_telescopic_hops(stream, circuit_id, chain, pinned_identity_keys).await?;
+    // 3. Instruct the exit hop to connect in-band to target_host:target_port
+    let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
+        .map_err(|e| format!("Failed to encode RELAY target payload: {:?}", e))?;
+    let mut relay_cell = OnionCell::new(circuit_id, 1, CellCommand::Relay, 0, &relay_payload)
+        .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
+
+    let wire_buffer = circuit
+        .wrap_forward(&mut relay_cell)
+        .map_err(|e| format!("Failed to wrap forward relay cell: {:?}", e))?;
+    stream.write_all(&wire_buffer).await?;
+
+    let mut return_wire = [0u8; ONION_CELL_SIZE];
+    stream.read_exact(&mut return_wire).await?;
+    let (response_hop, resp_cell) = circuit
+        .unwrap_backward(&mut return_wire)
+        .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {:?}", e))?;
+
+    if response_hop != chain.len() - 1
+        || resp_cell.command != CellCommand::Relay
+        || &resp_cell.payload[..resp_cell.length as usize] != b"CONNECTED"
+    {
+        return Err(format!(
+            "Expected RELAY response from exit hop, got {:?}",
+            resp_cell.command
+        )
+        .into());
+    }
+
+    Ok(circuit)
+}
+
+/// Builds only the authenticated hop chain; destination/session control follows.
+pub async fn negotiate_telescopic_hops(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    circuit_id: u32,
+    chain: &[crate::mesh::node::ProxyNode],
+    pinned_identity_keys: &[[u8; 32]],
+) -> Result<OnionCircuit, Box<dyn std::error::Error + Send + Sync>> {
     // Bug #4: enforce minimum 3 hops (Guard → Middle → Exit)
     if chain.len() < 3 {
         return Err(format!(
@@ -1200,35 +1392,35 @@ pub async fn build_telescopic_circuit(
             .map_err(|e| format!("Failed to add hop {}: {:?}", hop_idx, e))?;
     }
 
-    // 3. Instruct the exit hop to connect in-band to target_host:target_port
-    let relay_payload = crate::onion::circuit::encode_relay_target(target_host, target_port)
-        .map_err(|e| format!("Failed to encode RELAY target payload: {:?}", e))?;
-    let mut relay_cell = OnionCell::new(circuit_id, 1, CellCommand::Relay, 0, &relay_payload)
-        .map_err(|e| format!("Failed to build RELAY cell: {}", e))?;
-
-    let wire_buffer = circuit
-        .wrap_forward(&mut relay_cell)
-        .map_err(|e| format!("Failed to wrap forward relay cell: {:?}", e))?;
-    stream.write_all(&wire_buffer).await?;
-
-    let mut return_wire = [0u8; ONION_CELL_SIZE];
-    stream.read_exact(&mut return_wire).await?;
-    let (response_hop, resp_cell) = circuit
-        .unwrap_backward(&mut return_wire)
-        .map_err(|e| format!("Failed to unwrap backward cell from Exit hop: {:?}", e))?;
-
-    if response_hop != chain.len() - 1
-        || resp_cell.command != CellCommand::Relay
-        || &resp_cell.payload[..resp_cell.length as usize] != b"CONNECTED"
-    {
-        return Err(format!(
-            "Expected RELAY response from exit hop, got {:?}",
-            resp_cell.command
-        )
-        .into());
-    }
-
     Ok(circuit)
+}
+
+pub async fn negotiate_padded_session(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    circuit: &mut OnionCircuit,
+    profile: crate::onion::session::Profile,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let proposal = profile.encode();
+    let mut request = OnionCell::new(circuit.circuit_id, 0, CellCommand::Session, 0, &proposal)?;
+    stream
+        .write_all(&circuit.wrap_forward(&mut request)?)
+        .await?;
+    let mut wire = [0; ONION_CELL_SIZE];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        stream.read_exact(&mut wire),
+    )
+    .await??;
+    let (hop, response) = circuit.unwrap_backward(&mut wire)?;
+    if hop + 1 != circuit.hop_count()
+        || response.command != CellCommand::SessionAccepted
+        || response.stream_id != 0
+        || response.payload[..response.length as usize] != proposal
+    {
+        return Err("Session profile downgrade or invalid acknowledgement".into());
+    }
+    Ok(())
 }
 
 /// Handles incoming Onion Cell connections on a relay node, completing the identity-bound
@@ -1625,6 +1817,38 @@ async fn handle_relay_inner(
                             break;
                         }
                     }
+                }
+                Ok(PeelOutcome::AddressedToThisRelay {
+                    command: CellCommand::Session,
+                    len,
+                }) => {
+                    if !is_exit_allowed || relay_hop.hop_index < 2 || client_buf[9..11] != [0, 0] {
+                        return Err("Padded sessions require an exit and stream zero".into());
+                    }
+                    let profile =
+                        crate::onion::session::Profile::decode(&client_buf[45..45 + len])?;
+                    let response = OnionCell::new(
+                        relay_hop.circuit_id,
+                        0,
+                        CellCommand::SessionAccepted,
+                        0,
+                        &profile.encode(),
+                    )?;
+                    let mut wire = response.serialize();
+                    relay_hop.wrap_backward_originate(&mut wire)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        client_write.write_all(&wire),
+                    )
+                    .await??;
+                    return crate::onion::session::run_exit(
+                        client_write,
+                        client_cell_rx,
+                        relay_hop,
+                        profile,
+                        policy,
+                    )
+                    .await;
                 }
                 Ok(PeelOutcome::AddressedToThisRelay {
                     command: CellCommand::Relay,

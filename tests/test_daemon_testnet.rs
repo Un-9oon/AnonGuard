@@ -144,12 +144,19 @@ async fn ready(address: SocketAddr) {
 
 #[tokio::test]
 async fn pinned_cli_testnet_bootstraps_transfers_and_closes_after_relay_loss() {
-    tokio::time::timeout(Duration::from_secs(90), exercise())
+    tokio::time::timeout(Duration::from_secs(90), exercise(false))
         .await
         .expect("CLI testnet exceeded its bounded lifetime");
 }
 
-async fn exercise() {
+#[tokio::test]
+async fn padded_cli_testnet_transfers_and_closes_after_relay_loss() {
+    tokio::time::timeout(Duration::from_secs(90), exercise(true))
+        .await
+        .expect("Padded CLI deadline");
+}
+
+async fn exercise(padded: bool) {
     let mut testnet = Testnet::new();
     let mut reserved = Vec::new();
     for ip in [
@@ -357,9 +364,26 @@ async fn exercise() {
                 .iter()
                 .any(|node| node.host == addresses[4].ip().to_string()));
         }
+        if padded {
+            gateway_extra.extend(["--padded-sessions", "--privacy-profile", "strict"]);
+        }
         testnet.start("gateway", addresses[7], &authority_args, &gateway_extra);
     } else {
-        testnet.start("gateway", addresses[7], &authority_args, &["--onion"]);
+        testnet.start(
+            "gateway",
+            addresses[7],
+            &authority_args,
+            if padded {
+                &[
+                    "--onion",
+                    "--padded-sessions",
+                    "--privacy-profile",
+                    "strict",
+                ]
+            } else {
+                &["--onion"]
+            },
+        );
     }
     ready(addresses[7]).await;
     // Every circuit participant must admit a directory, not just the gateway.

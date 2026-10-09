@@ -1,4 +1,4 @@
-//! TLS 1.3 links with directory-pinned Ed25519 identities and mandatory v4 ALPN.
+//! TLS 1.3 links with directory-pinned Ed25519 identities and mandatory v5 ALPN.
 use ed25519_dalek::SigningKey;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
@@ -6,7 +6,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{io, sync::Arc};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-pub const ALPN: &[u8] = b"anonguard/4";
+pub const ALPN: &[u8] = b"anonguard/5";
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

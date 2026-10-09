@@ -25,6 +25,10 @@ test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-pt)" = '755:0:0'
+test -x /usr/bin/anonguard-setup
+test -x /usr/bin/anonguard-native-adapter
+test -r /usr/lib/sysusers.d/anonguard-native.conf
+test -r /usr/share/doc/anonguard/docs/NATIVE_INSTALLATION.md
 test -r /lib/systemd/system/anonguard-pt@.service
 test -r /usr/share/doc/anonguard/docs/PLUGGABLE_TRANSPORT.md
 test "$(stat -c '%a:%u:%g' /usr/share/doc/anonguard/anonguard-bwrap.apparmor)" = '644:0:0'

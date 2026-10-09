@@ -20,6 +20,14 @@ pub enum CellCommand {
     Dummy = 9,
     /// End the upload direction while preserving downstream responses.
     End = 10,
+    Session = 11,
+    SessionAccepted = 12,
+    SessionOpen = 13,
+    SessionOpened = 14,
+    SessionRefused = 15,
+    SessionFinish = 16,
+    SessionFinished = 17,
+    SessionReset = 18,
 }
 
 impl CellCommand {
@@ -35,6 +43,14 @@ impl CellCommand {
             8 => Some(Self::DataAck),
             9 => Some(Self::Dummy),
             10 => Some(Self::End),
+            11 => Some(Self::Session),
+            12 => Some(Self::SessionAccepted),
+            13 => Some(Self::SessionOpen),
+            14 => Some(Self::SessionOpened),
+            15 => Some(Self::SessionRefused),
+            16 => Some(Self::SessionFinish),
+            17 => Some(Self::SessionFinished),
+            18 => Some(Self::SessionReset),
             _ => None,
         }
     }

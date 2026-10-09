@@ -59,7 +59,11 @@ pub struct GuardConfig {
     pub is_exit: bool,
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
-    /// Enable 3-hop layered onion encryption (authenticated cell peeling)
+    #[serde(default)]
+    pub padded_sessions: bool,
+    #[serde(default = "default_privacy_profile")]
+    pub privacy_profile: String,
+    /// Enable multi-hop layered onion encryption (authenticated cell peeling)
     pub enable_onion_routing: bool,
     /// Enforce BGP /16 subnet diversity across circuit hops (Sybil resistance)
     pub enforce_subnet_diversity: bool,
@@ -133,6 +137,8 @@ impl Default for GuardConfig {
             reverse_relay_mode: false,
             tracker_url: None,
             enable_onion_routing: false,
+            padded_sessions: false,
+            privacy_profile: default_privacy_profile(),
             enforce_subnet_diversity: true,
             authority_mode: false,
             authority_id: "authority-default".to_string(),
@@ -175,4 +181,8 @@ impl GuardConfig {
         }
         Ok(address)
     }
+}
+
+fn default_privacy_profile() -> String {
+    "balanced".into()
 }

@@ -1,6 +1,6 @@
 # Bounded multi-hop circuits and experimental scheduling
 
-AnonGuard v4 supports 3 through 8 onion hops. The CLI defaults to a randomly
+AnonGuard v5 supports 3 through 8 onion hops. The CLI defaults to a randomly
 chosen length in 3..=5; configure `--min-hops 3 --max-hops 8` to expand the range.
 Selection uses the authenticated directory, keeps a persistent entry guard,
 chooses non-exit middle relays and ends at an exit relay. A private bridge can be
@@ -17,10 +17,10 @@ one/two-hop path or bypass authentication. Greedy selection is bounded and may
 refuse a snapshot even when another guard/exit combination could form a path.
 Existing guard pins are preserved rather than rotating until a path works.
 
-This is a protocol migration: ALPN is `anonguard/4`, handshake transcript domains
-are v4, and backward sequence numbers have a three-bit origin hop plus a 29-bit
+This is a protocol migration: ALPN is `anonguard/5`, handshake transcript domains
+are v5, and backward sequence numbers have a three-bit origin hop plus a 29-bit
 counter. Sequence exhaustion fails closed. Upgrade clients and relays together;
-v3 clients/relays cannot share circuit links with v4. Directory authority
+v3 clients/relays cannot share circuit links with v5. Directory authority
 transport is otherwise unchanged. Preserve identities, guards and rollback state.
 
 ## Timing behavior
