@@ -31,6 +31,9 @@ running each case; an empty entry is not a pass. Follow [delivery procedures](FY
 | Direct DNS/UDP blocked | | | | NOT RUN |
 | Host IPC and inherited descriptors contained | | | | NOT RUN |
 | Helper crash containment | | | | NOT RUN |
+| Two-VM adapter topology and no direct application route | | | | NOT RUN |
+| Two-VM SOCKS flow, DNS/UDP/IPv6 and other-port refusal | | | | NOT RUN |
+| Two-VM daemon/proxy/firewall failure and reboot containment | | | | NOT RUN |
 | Package upgrade and recovery | | | | NOT RUN |
 | Resource limits and overload recovery | | | | NOT RUN |
 | Independent clean-machine reproduction | | | | NOT RUN |

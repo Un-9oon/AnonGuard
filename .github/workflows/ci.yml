@@ -29,6 +29,11 @@ jobs:
       - name: Verify signed-release admission boundaries
         run: python3 scripts/test_verify_release.py
 
+      - name: Verify offline two-VM deployment contracts and systemd units
+        run: |
+          sudo apt-get update && sudo apt-get install -y nftables
+          python3 scripts/test_vm_profile.py
+
       - name: Check Cargo.lock reproducibility
         run: cargo check --locked --all-targets
 

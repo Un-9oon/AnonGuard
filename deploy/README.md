@@ -1,5 +1,9 @@
 # Linux deployment
 
+For separate gateway/application VMs, the [two-VM SOCKS-only profile](../docs/VM_SEPARATION.md)
+provides an offline configuration generator and installation/acceptance procedure.
+It does not configure a hardened browser and has not passed live VM acceptance.
+
 AnonGuard remains experimental. Read [production readiness](../docs/PRODUCTION_READINESS.md) and [the relay operator guide](../docs/RELAY_OPERATOR_GUIDE.md) before deployment. Native installation does not establish fingerprint indistinguishability or anonymity.
 
 Prefer the Debian package for a local gateway service. It installs the daemon, headless launcher, DynamicUser service, and `/etc/anonguard/runtime.env`. Configure real authority endpoints, pinned keys and quorum before starting. Installation does not automatically start an unconfigured service. Preserve identity, vote, guard and accepted-directory state during upgrades; do not rotate identities merely to repair connectivity.

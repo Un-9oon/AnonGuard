@@ -20,6 +20,11 @@ raw traffic captures and private state outside Git and the presentation bundle.
 Synchronize clocks and allow only the required role ports. Keep the gateway's
 SOCKS listener local.
 
+For a separate application VM, use the [two-VM profile](VM_SEPARATION.md) instead
+of exposing the daemon listener: its private socket forwards to the loopback
+daemon. This additional profile still needs its own live acceptance and does not
+provide browser fingerprinting defenses.
+
 Before installing a published package, follow [release verification](RELEASE_VERIFICATION.md)
 using an independently trusted verifier and the selected tag's signed manifest.
 Install the verified staged Debian package built for the machine's architecture
