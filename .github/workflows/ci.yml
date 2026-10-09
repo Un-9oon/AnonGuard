@@ -34,6 +34,9 @@ jobs:
           sudo apt-get update && sudo apt-get install -y nftables
           python3 scripts/test_vm_profile.py
 
+      - name: Verify disposable browser policy and session contracts
+        run: python3 scripts/test_browser_session.py
+
       - name: Check Cargo.lock reproducibility
         run: cargo check --locked --all-targets
 

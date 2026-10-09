@@ -41,6 +41,8 @@ cp "${ROOT_DIR}/scripts/anonguard_run_app.py" "${STAGING_DIR}/usr/bin/anonguard-
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-run-app"
 cp "${ROOT_DIR}/scripts/pt_supervisor.py" "${STAGING_DIR}/usr/bin/anonguard-pt"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-pt"
+cp "${ROOT_DIR}/scripts/browser_session.py" "${STAGING_DIR}/usr/bin/anonguard-browser"
+chmod 755 "${STAGING_DIR}/usr/bin/anonguard-browser"
 
 # Derive minimum library versions from the actual packaged ELF, rather than
 # guessing a libc baseline or allowing installation without its dependencies.

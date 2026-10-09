@@ -34,6 +34,8 @@ running each case; an empty entry is not a pass. Follow [delivery procedures](FY
 | Two-VM adapter topology and no direct application route | | | | NOT RUN |
 | Two-VM SOCKS flow, DNS/UDP/IPv6 and other-port refusal | | | | NOT RUN |
 | Two-VM daemon/proxy/firewall failure and reboot containment | | | | NOT RUN |
+| Browser active/locked policies and no direct DNS/WebRTC/QUIC | | | | NOT RUN |
+| Browser session storage reset and fingerprint comparison | | | | NOT RUN |
 | Package upgrade and recovery | | | | NOT RUN |
 | Resource limits and overload recovery | | | | NOT RUN |
 | Independent clean-machine reproduction | | | | NOT RUN |

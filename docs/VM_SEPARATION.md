@@ -131,6 +131,9 @@ proxy configuration, storage/identity isolation, WebRTC controls and security
 updates. This profile does not implement those protections. Keep the browser's
 own sandbox enabled. Do not publish a browser-fingerprinting resistance claim.
 
+The separate [experimental Firefox ESR integration](BROWSER_SESSIONS.md) now
+provides policy/session setup, with its own remaining browser acceptance gates.
+
 ## Required live acceptance record
 
 - Record exact commit/artifact, host/hypervisor versions, both guest kernels,
