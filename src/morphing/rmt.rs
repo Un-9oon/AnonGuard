@@ -58,6 +58,12 @@ impl RmtTimingEngine {
         (delay_ms * 1000.0) as u64
     }
 
+    /// Continuous onion profile uses a 20 ms baseline independently of the
+    /// smaller forwarding jitter used by intermediate relays/research streams.
+    pub fn next_pacing_delay_us(&self) -> u64 {
+        Self::new(self.ensemble.clone(), 20.0, self.base_size_bytes).next_delay_us()
+    }
+
     /// Samples spacing `s` from the GOE Wigner Surmise:
     /// P(s) = (pi/2) * s * exp(-pi/4 * s^2)
     /// Using inverse transform sampling: s = sqrt(- (4/pi) * ln(U))
@@ -65,42 +71,23 @@ impl RmtTimingEngine {
         let mut rng = rand::thread_rng();
         // Prevent strictly 0.0 to avoid ln(0) infinity
         let u: f64 = rng.gen_range(1e-9..1.0);
-        let base_s = (-(4.0 / PI) * u.ln()).sqrt();
-
-        // Adversarial GAN Perturbation (A-Wade/Walkie-Talkie style)
-        // Dynamically shifts the parameter by up to +/- 15% to break static DL feature extraction
-        let adv_noise: f64 = rng.gen_range(0.85..1.15);
-        base_s * adv_noise
+        (-(4.0 / PI) * u.ln()).sqrt()
     }
 
     /// Samples spacing `s` from the GUE Wigner Surmise:
     /// P(s) = (32 / pi^2) * s^2 * exp(-4/pi * s^2)
-    /// Using Rejection Sampling with an exponential envelope.
+    /// Exact chi-distribution sampling; no rejection fallback or artificial noise.
     fn sample_gue(&self) -> f64 {
+        // A scaled chi distribution with three degrees of freedom has the
+        // GUE Wigner density (32/pi^2) s^2 exp(-4 s^2/pi).
+        use rand_distr::{Distribution, StandardNormal};
         let mut rng = rand::thread_rng();
-
-        let mut best_s = 0.886; // Default to peak if all iterations fail
-        let mut found = false;
-
-        // Bounded iteration (constant time) to prevent timing side-channels (V-002 fix).
-        // 16 iterations gives a very high probability of success while maintaining O(1) execution time.
-        for _ in 0..16 {
-            let s: f64 = rng.gen_range(0.0..3.0);
-            let p_s = (32.0 / (PI * PI)) * (s * s) * (-(4.0 / PI) * (s * s)).exp();
-            let y: f64 = rng.gen_range(0.0..1.0);
-
-            // If we found a valid sample and haven't already locked one in, keep it.
-            // We evaluate both sides fully to keep execution path uniform.
-            let valid = y <= p_s;
-            if valid && !found {
-                best_s = s;
-                found = true;
-            }
-        }
-
-        // Adversarial GAN Perturbation
-        let mut rng = rand::thread_rng();
-        let adv_noise: f64 = rng.gen_range(0.85..1.15);
-        best_s * adv_noise
+        let squared_radius: f64 = (0..3)
+            .map(|_| {
+                let x: f64 = StandardNormal.sample(&mut rng);
+                x * x
+            })
+            .sum();
+        (squared_radius * PI / 8.0).sqrt()
     }
 }

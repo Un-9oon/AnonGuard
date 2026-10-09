@@ -4,12 +4,12 @@ Experimental authenticated onion-routing software written in Rust. No superiorit
 
 ## Supported protocol
 
-- One destination TCP stream through an authenticated three-hop circuit.
-- TLS 1.3 between adjacent nodes, mandatory `anonguard/3` ALPN, and Ed25519 identity pins from a signed directory.
+- One destination TCP stream through an authenticated randomized 3–8-hop circuit (CLI default range 3–5).
+- TLS 1.3 between adjacent nodes, mandatory `anonguard/4` ALPN, and Ed25519 identity pins from a signed directory.
 - Per-link circuit identifiers, hybrid X25519/ML-KEM-768 circuit handshakes, transcript-bound keys, and layered encryption.
 - Exact-snapshot directory quorum verification with persistent rollback/equivocation rejection.
 - Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
-- A fixed 20 ms scheduler in both stream directions with bounded buffers and dummy cells. This is an experimental padding profile; traffic-analysis protection is unproven.
+- A continuous cell scheduler with bounded buffers and dummy cells: fixed 20 ms by default, or experimental RMT/Poisson/Lorenz timing when configured. See [multi-hop and scheduling contracts](docs/MULTIHOP_SCHEDULING.md). Traffic-analysis protection is unproven.
 - Linux application isolation in a loopback-only namespace, with a private Unix-socket bridge to the gateway outside it.
 - Optional obfs4 first-hop and authority-bootstrap transports, independently provisioned unlisted entry bridges, and supervised Linux PT services. See [deployment and limits](docs/design/PLUGGABLE_TRANSPORT.md). This does not establish resistance to any particular censor or traffic-correlation attack.
 
@@ -72,7 +72,7 @@ Windows and macOS support the application transport; they do not implement this 
 
 ## Migration and limits
 
-Protocol v3 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
+Protocol v4 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
 
 A directory snapshot must be current and quorum signed. New circuits fail after directory expiry. Existing circuits are bounded to one hour and are not silently migrated. Protect persistent authority votes, directory rollback state, guard state and identity keys from modification. Clock rollback, stale directories, unreachable guards and conflicting authority views may stop service rather than lower security requirements.
 

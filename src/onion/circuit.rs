@@ -23,8 +23,8 @@ use crate::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE, PAYLOAD_SIZE};
 use thiserror::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub const MAX_HOPS: usize = 3;
-const BWD_COUNTER_BITS: u32 = 30;
+pub const MAX_HOPS: usize = 8;
+const BWD_COUNTER_BITS: u32 = 29;
 const BWD_COUNTER_MASK: u32 = (1 << BWD_COUNTER_BITS) - 1;
 const MAX_SEQ_GAP: u32 = 1000;
 
@@ -172,7 +172,7 @@ impl HopCryptState {
 /// Key derivation function turning an X25519 + ML-KEM-768 hybrid secret into forward, backward, and MAC keys.
 /// Uses RFC 5869 HKDF-SHA256 with domain-separated info labels for key commitment.
 pub fn derive_hop_keys(shared_secret: &[u8]) -> Result<HopKeys, CircuitError> {
-    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v3")
+    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v4")
 }
 
 fn derive_hop_keys_with_context(
@@ -600,7 +600,7 @@ pub fn handle_create_cell(
 
     let identity_pub = relay_identity_key.verifying_key();
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v3");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v4");
     preimage.extend_from_slice(&context_id.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(identity_pub.as_bytes());
@@ -685,7 +685,7 @@ pub fn process_created_cell(
     let signature = Signature::from_bytes(&sig_bytes);
 
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v3");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v4");
     preimage.extend_from_slice(&cid.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(&relay_identity_pub_bytes);
@@ -1097,5 +1097,31 @@ mod hostile_forward_frame_tests {
             }
             assert_eq!(relay.expected_recv_seq, seq);
         }
+    }
+}
+
+#[cfg(test)]
+mod multihop_sequence_tests {
+    use super::*;
+
+    #[test]
+    fn all_eight_backward_origins_have_distinct_bounded_sequence_spaces() {
+        let mut sequences = std::collections::HashSet::new();
+        for hop in 0..MAX_HOPS {
+            for counter in [1, 1000, BWD_COUNTER_MASK] {
+                let sequence = pack_backward_seq(hop, counter).unwrap();
+                assert_eq!((sequence >> BWD_COUNTER_BITS) as usize, hop);
+                assert_eq!(sequence & BWD_COUNTER_MASK, counter);
+                assert!(sequences.insert(sequence));
+            }
+        }
+        assert!(matches!(
+            pack_backward_seq(MAX_HOPS, 1),
+            Err(CircuitError::HopIndexOutOfRange(_))
+        ));
+        assert!(matches!(
+            pack_backward_seq(0, BWD_COUNTER_MASK + 1),
+            Err(CircuitError::SequenceExhausted)
+        ));
     }
 }

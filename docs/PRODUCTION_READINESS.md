@@ -1,10 +1,12 @@
 # Production readiness
 
-Status: experimental v3. Completion of this engineering redesign is not approval for public anonymity deployment and does not establish superiority to Tor.
+Status: experimental v4. Completion of this engineering redesign is not approval for public anonymity deployment and does not establish superiority to Tor.
 
 ## Implemented redesign
 
-- Pinned TLS 1.3 relay links with mandatory v3 ALPN and no plaintext fallback.
+- Bounded randomized 3–8-hop circuits (CLI default 3–5), persistent entry guards, certified non-exit middles and an exit, with optional bounded traffic-independent RMT/Poisson/Lorenz cell scheduling. Protocol v4 changes the backward sequence layout and transcript domains; coordinated relay/client upgrade is mandatory. See [the routing and scheduling contract](MULTIHOP_SCHEDULING.md). Longer paths and statistical timing are not proven anonymity improvements.
+
+- Pinned TLS 1.3 relay links with mandatory v4 ALPN and no plaintext fallback.
 - Per-link circuit identifiers, signed hybrid handshake transcripts and context-bound key derivation.
 - Unambiguous signed relay descriptors, exact-snapshot quorum verification, durable authority votes and client rollback/equivocation rejection.
 - Identity-pinned persistent guards and entry-only cooldowns.
@@ -27,7 +29,7 @@ Status: experimental v3. Completion of this engineering redesign is not approval
 - Research CLI tools identify synthetic assumptions, group duplicate fingerprint descriptors, honor the modeled population and propagate buffered dataset write failures.
 - Explicitly retired unsupported multipath gateway behavior and unsupported anonymity claims.
 
-These changes require a coordinated v3 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.
+These changes require a coordinated v4 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.
 
 ## Verification and release gates
 

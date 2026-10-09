@@ -29,6 +29,10 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:9050")]
     listen: String,
 
+    /// Reachable relay IP:port in signed descriptors; does not configure NAT or bind this address
+    #[arg(long, requires = "relay", conflicts_with = "unlisted_bridge")]
+    advertise_address: Option<std::net::SocketAddr>,
+
     /// Path to a text file containing proxy endpoints (one per line)
     #[arg(short, long)]
     pool: Option<PathBuf>,
@@ -36,6 +40,14 @@ struct Args {
     /// Inline proxy to load immediately (e.g. socks5://127.0.0.1:1080)
     #[arg(long)]
     proxy: Option<String>,
+
+    /// Minimum onion circuit length (guard, middle relays, exit)
+    #[arg(long, requires = "onion", default_value_t = 3, value_parser = clap::value_parser!(u8).range(3..=8))]
+    min_hops: u8,
+
+    /// Maximum randomized onion circuit length; bounded by eligible relays
+    #[arg(long, requires = "onion", default_value_t = 5, value_parser = clap::value_parser!(u8).range(3..=8))]
+    max_hops: u8,
 
     /// Enable Poisson timing jitter (experimental traffic-analysis protection)
     #[arg(long, default_value_t = false)]
@@ -335,6 +347,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "A public gateway listener requires explicit --allow-open-socks5 authorization".into(),
         );
     }
+    if args.min_hops > args.max_hops {
+        return Err("--min-hops must not exceed --max-hops".into());
+    }
     if !args.jitter_lambda.is_finite() || args.jitter_lambda <= 0.0 {
         return Err("--jitter-lambda must be finite and positive".into());
     }
@@ -469,6 +484,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let config = GuardConfig {
+        min_chain_length: if args.onion {
+            usize::from(args.min_hops)
+        } else {
+            GuardConfig::default().min_chain_length
+        },
+        max_chain_length: if args.onion {
+            usize::from(args.max_hops)
+        } else {
+            GuardConfig::default().max_chain_length
+        },
         private_bridges: args.private_bridges,
         unlisted_bridge: args.unlisted_bridge,
         bridge_transports: args
@@ -478,6 +503,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .transpose()?
             .unwrap_or_default(),
         listen_addr: args.listen.clone(),
+        relay_advertise_address: args.advertise_address,
         enable_jitter: args.jitter,
         jitter_lambda: args.jitter_lambda,
         enable_chaos: args.chaos,

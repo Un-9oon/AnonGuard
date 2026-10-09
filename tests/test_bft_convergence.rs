@@ -74,21 +74,34 @@ async fn test_gossip_convergence_multi_round() {
 
     // Run 10 rounds of consensus generation (which triggers gossip reconciliation)
     for round in 1..=10 {
-        // A generates consensus (meaningless for A, but normal routine)
-        auth_a.generate_consensus().await.unwrap();
-        // B generates consensus, pulling gossip from A
-        let consensus_b = auth_b.generate_consensus().await;
-
-        // Assert B has the relay in every round
-        let b_has_relay = consensus_b
-            .unwrap()
-            .relays
-            .iter()
-            .any(|r| r.node_id == "relay-only-on-A");
+        // Wall-clock epochs can change between A's proposal and B's
+        // cross-check. Exact-snapshot verification correctly refuses that
+        // transient mismatch; evaluate convergence within one stable epoch.
+        // Retry only an observed boundary, never an arbitrary quorum failure.
+        let mut successful = false;
+        for _attempt in 0..3 {
+            let before = current_timestamp_secs() / 300;
+            let proposal_a = auth_a.generate_consensus().await;
+            let proposal_b = auth_b.generate_consensus().await;
+            if current_timestamp_secs() / 300 != before {
+                continue;
+            }
+            proposal_a.unwrap_or_else(|error| panic!("Round {round}, stable epoch: {error}"));
+            let consensus_b =
+                proposal_b.unwrap_or_else(|error| panic!("Round {round}, stable epoch: {error}"));
+            assert!(
+                consensus_b
+                    .relays
+                    .iter()
+                    .any(|relay| relay.node_id == "relay-only-on-A"),
+                "Round {round}: Authority B failed to retain/gossip relay from Authority A!"
+            );
+            successful = true;
+            break;
+        }
         assert!(
-            b_has_relay,
-            "Round {}: Authority B failed to retain/gossip relay from Authority A!",
-            round
+            successful,
+            "Clock repeatedly changed epochs during round {round}"
         );
 
         assert!(servers.try_join_next().is_none(), "Authority exited early");

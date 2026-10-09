@@ -485,6 +485,20 @@ impl ProxyPool {
         bindings: &[crate::onion::transport::BridgeTransport],
         enforce_diversity: bool,
     ) -> Vec<ProxyNode> {
+        self.get_private_bridge_chain_with_bounds(bindings, enforce_diversity, 3, 3)
+            .await
+    }
+
+    pub async fn get_private_bridge_chain_with_bounds(
+        &self,
+        bindings: &[crate::onion::transport::BridgeTransport],
+        enforce_diversity: bool,
+        min_hops: usize,
+        max_hops: usize,
+    ) -> Vec<ProxyNode> {
+        if min_hops < 3 || max_hops < min_hops || max_hops > crate::onion::circuit::MAX_HOPS {
+            return Vec::new();
+        }
         if bindings.is_empty()
             || bindings
                 .iter()
@@ -545,22 +559,39 @@ impl ProxyPool {
             .cloned()
             .collect();
         candidates.shuffle(&mut rand::thread_rng());
-        for middle in candidates.iter().filter(|node| !node.is_exit) {
-            for exit in candidates.iter().filter(|node| node.is_exit) {
-                if middle.host == exit.host && middle.port == exit.port {
-                    continue;
+        let ceiling = max_hops.min(candidates.iter().filter(|node| !node.is_exit).count() + 2);
+        if ceiling < min_hops {
+            return Vec::new();
+        }
+        let length = ceiling;
+        for exit in candidates.iter().filter(|node| node.is_exit) {
+            let mut selected = vec![entry.clone()];
+            if enforce_diversity
+                && crate::mesh::sybil::validate_circuit_diversity(&[
+                    entry.host.as_str(),
+                    exit.host.as_str(),
+                ])
+                .is_err()
+            {
+                continue;
+            }
+            for middle in candidates.iter().filter(|node| !node.is_exit) {
+                if selected.len() == length - 1 {
+                    break;
                 }
-                if enforce_diversity
-                    && crate::mesh::sybil::validate_circuit_diversity(&[
-                        entry.host.as_str(),
-                        middle.host.as_str(),
-                        exit.host.as_str(),
-                    ])
-                    .is_err()
+                let mut hosts: Vec<_> = selected.iter().map(|node| node.host.as_str()).collect();
+                hosts.extend([middle.host.as_str(), exit.host.as_str()]);
+                if !enforce_diversity
+                    || crate::mesh::sybil::validate_circuit_diversity(&hosts).is_ok()
                 {
-                    continue;
+                    selected.push(middle.clone());
                 }
-                return vec![entry, middle.clone(), exit.clone()];
+            }
+            if selected.len() + 1 >= min_hops {
+                let actual_length = rand::thread_rng().gen_range(min_hops..=selected.len() + 1);
+                selected.truncate(actual_length - 1);
+                selected.push(exit.clone());
+                return selected;
             }
         }
         Vec::new()
@@ -603,18 +634,6 @@ impl ProxyPool {
             return Vec::new();
         }
 
-        let path_len = {
-            let mut rng = rand::thread_rng();
-            let max_possible = all_healthy.len().min(max_hops);
-            let min_possible = min_hops.min(max_possible);
-
-            if min_possible < max_possible {
-                rng.gen_range(min_possible..=max_possible)
-            } else {
-                min_possible.max(1).min(all_healthy.len())
-            }
-        };
-
         // Separate exit-capable and non-exit relay pools
         let (exit_nodes, middle_nodes): (Vec<ProxyNode>, Vec<ProxyNode>) = if require_exit_at_last {
             all_healthy.into_iter().partition(|n| n.is_exit)
@@ -628,6 +647,17 @@ impl ProxyPool {
             );
             return Vec::new();
         }
+
+        let capacity = if require_exit_at_last {
+            middle_nodes.len() + usize::from(!exit_nodes.is_empty())
+        } else {
+            middle_nodes.len()
+        };
+        let ceiling = max_hops.min(capacity).min(crate::onion::circuit::MAX_HOPS);
+        if min_hops == 0 || min_hops > ceiling || max_hops > crate::onion::circuit::MAX_HOPS {
+            return Vec::new();
+        }
+        let path_len = ceiling;
 
         // Build the non-exit portion of the chain (path_len - 1 middle hops)
         let middle_count = if require_exit_at_last {
@@ -697,49 +727,45 @@ impl ProxyPool {
             selected.push(guard);
         }
 
-        // 2. Select remaining middle hops
-        if !enforce_diversity {
-            let remaining = middle_count.saturating_sub(selected.len());
-            selected.extend(pool_for_middles.into_iter().take(remaining));
+        // Reserve a compatible exit before filling middles, so greedy selection
+        // cannot consume its prefix. Count only the actually eligible path.
+        let exit = if require_exit_at_last {
+            let mut exits = exit_nodes;
+            exits.shuffle(&mut rand::thread_rng());
+            let candidate = exits.into_iter().find(|node| {
+                let mut hosts: Vec<_> = selected.iter().map(|hop| hop.host.as_str()).collect();
+                hosts.push(node.host.as_str());
+                !enforce_diversity || crate::mesh::sybil::validate_circuit_diversity(&hosts).is_ok()
+            });
+            let Some(candidate) = candidate else {
+                return Vec::new();
+            };
+            Some(candidate)
         } else {
-            for candidate in pool_for_middles {
-                if selected.len() >= middle_count {
-                    break;
-                }
-                let mut test_hosts: Vec<&str> = selected.iter().map(|n| n.host.as_str()).collect();
-                test_hosts.push(&candidate.host);
-                if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
-                    selected.push(candidate);
-                }
+            None
+        };
+        for candidate in pool_for_middles {
+            if selected.len() >= middle_count {
+                break;
             }
-        }
-
-        // Append the exit hop
-        if require_exit_at_last {
-            let mut exit_pool = exit_nodes;
+            let mut hosts: Vec<_> = selected.iter().map(|hop| hop.host.as_str()).collect();
+            hosts.push(candidate.host.as_str());
+            if let Some(exit) = &exit {
+                hosts.push(exit.host.as_str());
+            }
+            if !enforce_diversity || crate::mesh::sybil::validate_circuit_diversity(&hosts).is_ok()
             {
-                let mut rng = rand::thread_rng();
-                exit_pool.shuffle(&mut rng);
-            }
-            // Pick the first exit node that passes diversity (if enforced)
-            for exit_candidate in exit_pool {
-                if enforce_diversity {
-                    let mut test_hosts: Vec<&str> =
-                        selected.iter().map(|n| n.host.as_str()).collect();
-                    test_hosts.push(&exit_candidate.host);
-                    if crate::mesh::sybil::validate_circuit_diversity(&test_hosts).is_ok() {
-                        selected.push(exit_candidate);
-                        break;
-                    }
-                } else {
-                    selected.push(exit_candidate);
-                    break;
-                }
+                selected.push(candidate);
             }
         }
-
-        if selected.len() != path_len {
+        let available = selected.len() + usize::from(exit.is_some());
+        if available < min_hops {
             return Vec::new();
+        }
+        let length = rand::thread_rng().gen_range(min_hops..=available);
+        selected.truncate(length - usize::from(exit.is_some()));
+        if let Some(exit) = exit {
+            selected.push(exit);
         }
         selected
     }

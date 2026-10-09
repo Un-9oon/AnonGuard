@@ -87,6 +87,9 @@ pub struct GuardConfig {
     pub authority_identity_keys: Vec<[u8; 32]>,
     /// Gateway listen address
     pub listen_addr: String,
+    /// Reachable relay endpoint advertised in signed descriptors, e.g. NAT port mapping.
+    #[serde(default)]
+    pub relay_advertise_address: Option<std::net::SocketAddr>,
     /// Apply OS/kernel-level nftables firewall kill switch (Linux with root/CAP_NET_ADMIN)
     pub enable_firewall_killswitch: bool,
     /// Registration PoW difficulty in leading zero bits
@@ -140,11 +143,36 @@ impl Default for GuardConfig {
             // See docs/reports/hardening_findings.md for bootstrap threat model.
             authority_identity_keys: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),
+            relay_advertise_address: None,
             enable_firewall_killswitch: false,
             pow_difficulty: crate::mesh::sybil::DEFAULT_POW_DIFFICULTY,
             identity_key_path: std::path::PathBuf::from("/etc/anonguard/identity.key"),
             guard_state_path: std::path::PathBuf::from("/etc/anonguard/guards.json"),
             allow_unauthenticated_registration: false,
         }
+    }
+}
+
+impl GuardConfig {
+    pub fn advertised_relay_address(
+        &self,
+        bound: std::net::SocketAddr,
+    ) -> Result<std::net::SocketAddr, String> {
+        let Some(address) = self.relay_advertise_address else {
+            return Ok(bound);
+        };
+        if !self.relay_mode
+            || self.unlisted_bridge
+            || address.port() == 0
+            || address.ip().is_unspecified()
+            || address.ip().is_loopback()
+            || address.ip().is_multicast()
+        {
+            return Err(
+                "Advertised address requires a listed relay and a reachable non-loopback endpoint"
+                    .into(),
+            );
+        }
+        Ok(address)
     }
 }

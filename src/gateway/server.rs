@@ -111,10 +111,14 @@ impl GatewayServer {
                 "Relay registration requires bound authority identity/address/pin records".into(),
             );
         }
+        // Validate a supplied public/NAT endpoint before opening the listener.
+        let configured_bind: std::net::SocketAddr = self.config.listen_addr.parse()?;
+        self.config.advertised_relay_address(configured_bind)?;
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
-        let advertised_address = listener.local_addr()?;
+        let bound_address = listener.local_addr()?;
+        let advertised_address = self.config.advertised_relay_address(bound_address)?;
         info!(
-            listen_addr = %self.config.listen_addr,
+            listen_addr = %bound_address,
             "[AnonGuard Gateway] Active and guarded. Listening for client connections (DoS limits: max {} concurrent, max {}/IP)...",
             DEFAULT_MAX_CONCURRENT_CONNECTIONS,
             MAX_CONCURRENT_PER_IP
@@ -479,7 +483,7 @@ impl GatewayServer {
 
                     // Client Mode: Select dynamic proxy chain (enforcing subnet diversity if enabled)
                     let chain = if config.private_bridges {
-                        pool.get_private_bridge_chain(&config.bridge_transports, config.enforce_subnet_diversity).await
+                        pool.get_private_bridge_chain_with_bounds(&config.bridge_transports, config.enforce_subnet_diversity, config.min_chain_length.max(3), config.max_chain_length.max(3)).await
                     } else if config.enable_onion_routing || config.enforce_subnet_diversity {
                         let pins: Vec<_> = config.bridge_transports.iter().map(|entry| entry.identity).collect();
                         pool.get_onion_chain_with_entry_pins(
@@ -941,8 +945,14 @@ pub async fn stream_onion_circuit(
         let mut pending_ack = None;
         let mut prefer_data = false;
         // A persistent, shared profile. Application reads cannot restart its timer.
-        let mut clock = tokio::time::interval(std::time::Duration::from_millis(20));
-        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let next_interval = || {
+            jitter.as_ref().map_or(
+                std::time::Duration::from_millis(20),
+                JitterEngine::onion_interval,
+            )
+        };
+        let clock = tokio::time::sleep(next_interval());
+        tokio::pin!(clock);
         loop {
             tokio::select! {
                 biased;
@@ -950,7 +960,8 @@ pub async fn stream_onion_circuit(
                     let Some(ack) = ack else { return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(()); };
                     pending_ack = Some(ack);
                 }
-                _ = clock.tick() => {
+                _ = &mut clock => {
+                    clock.as_mut().reset(tokio::time::Instant::now() + next_interval());
                     prefer_data = !prefer_data;
                     let data_ready = !buffer.is_empty() && window_fwd.lock().await.available();
                     if pending_ack.is_some() && (!data_ready || !prefer_data) {
@@ -1022,10 +1033,25 @@ pub async fn stream_onion_circuit(
             }
         }
     };
-    // The interval profile replaces per-read jitter in this stream path.
-    let _ = jitter;
+
+    tokio::pin!(fwd, bwd);
     tokio::select! {
-        result = fwd => result, result = bwd => result,
+        result = &mut fwd => {
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    // A final authenticated response can already be queued when
+                    // sending cover cells discovers the downstream TLS closure.
+                    // Drain the backward direction briefly; EOF without DESTROY
+                    // remains an error, and no application data is replayed.
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut bwd).await {
+                        Ok(Ok(())) => Ok(()),
+                        _ => Err(error),
+                    }
+                }
+            }
+        },
+        result = &mut bwd => result,
         _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => Err("Circuit lifetime expired; reconnect without replaying application data".into()),
     }
 }
@@ -1049,10 +1075,29 @@ pub async fn build_telescopic_circuit(
     // Bug #4: enforce minimum 3 hops (Guard → Middle → Exit)
     if chain.len() < 3 {
         return Err(format!(
-            "Circuit chain too short: {} hops (minimum is 3 for anonymity)",
+            "Circuit chain too short: {} hops (minimum is 3)",
             chain.len()
         )
         .into());
+    }
+    if chain.len() > crate::onion::circuit::MAX_HOPS || pinned_identity_keys.len() != chain.len() {
+        return Err(format!(
+            "Invalid circuit: {} hops (allowed 3..=8), with one pin per hop",
+            chain.len()
+        )
+        .into());
+    }
+
+    let identities: std::collections::HashSet<_> = pinned_identity_keys.iter().collect();
+    let endpoints: std::collections::HashSet<_> =
+        chain.iter().map(|hop| (&hop.host, hop.port)).collect();
+    if identities.len() != chain.len()
+        || endpoints.len() != chain.len()
+        || pinned_identity_keys.contains(&[0; 32])
+    {
+        return Err(
+            "Circuit requires distinct endpoints and nonzero independent identity pins".into(),
+        );
     }
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1349,8 +1394,14 @@ async fn handle_relay_inner(
     let mut pending_exit_ack = None;
     let mut prefer_exit_data = false;
     let mut last_progress = tokio::time::Instant::now();
-    let mut exit_clock = tokio::time::interval(std::time::Duration::from_millis(20));
-    exit_clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let next_exit_interval = || {
+        jitter.as_ref().map_or(
+            std::time::Duration::from_millis(20),
+            JitterEngine::onion_interval,
+        )
+    };
+    let exit_clock = tokio::time::sleep(next_exit_interval());
+    tokio::pin!(exit_clock);
     let mut ds_write: Option<tokio::io::WriteHalf<GuardedSocket<ActiveGuarded>>> = None;
     let mut ds_cell_rx: Option<tokio::sync::mpsc::Receiver<[u8; ONION_CELL_SIZE]>> = None;
     let mut ds_data_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>> = None;
@@ -1411,7 +1462,8 @@ async fn handle_relay_inner(
                     data = ds_rx.recv(), if pending_exit_data.is_none() && !destination_eof => {
                         match data { Some(bytes) => { last_progress = tokio::time::Instant::now(); pending_exit_data = Some(bytes); }, None => destination_eof = true }
                     }
-                    _ = exit_clock.tick() => {
+                    _ = &mut exit_clock => {
+                        exit_clock.as_mut().reset(tokio::time::Instant::now() + next_exit_interval());
                         if last_progress.elapsed() >= std::time::Duration::from_secs(60) { return Err("Exit stream idle deadline exceeded".into()); }
                         prefer_exit_data = !prefer_exit_data;
                         let data_ready = pending_exit_data.is_some() && exit_window.available();

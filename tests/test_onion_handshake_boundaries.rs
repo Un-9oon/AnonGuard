@@ -88,7 +88,7 @@ fn even_a_valid_relay_signature_cannot_authorize_zero_dh() {
     let (_, mut response) = handle_create_cell(&create, &identity).unwrap();
     response.payload[..32].fill(0);
     // The malicious pinned relay owns this identity and can sign its zero point.
-    let mut transcript = b"AnonGuard-handshake-v3".to_vec();
+    let mut transcript = b"AnonGuard-handshake-v4".to_vec();
     transcript.extend_from_slice(&79u32.to_be_bytes());
     transcript.push(0);
     transcript.extend_from_slice(&pin);

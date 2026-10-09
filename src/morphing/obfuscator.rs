@@ -14,6 +14,22 @@ pub enum JitterEngine {
 }
 
 impl JitterEngine {
+    /// Experimental onion scheduling interval, independent of DATA/ACK/DUMMY.
+    /// Bounded to prevent unbounded stalls or high-rate cover traffic.
+    pub fn onion_interval(&self) -> std::time::Duration {
+        let sampled = match self {
+            Self::Rmt(engine) => std::time::Duration::from_micros(engine.next_pacing_delay_us()),
+            Self::Poisson(engine) => engine.sample_delay(),
+            Self::Chaos(engine) => engine.sample_delay(),
+            // This research engine has no traffic-independent sampling contract.
+            Self::Adversarial(_) => std::time::Duration::from_millis(20),
+        };
+        sampled.clamp(
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(100),
+        )
+    }
+
     pub async fn apply_delay(&self) {
         match self {
             JitterEngine::Poisson(p) => p.apply().await,
