@@ -4,6 +4,7 @@ import json
 import hashlib
 import io
 import zipfile
+from urllib.parse import urlencode
 import os
 from pathlib import Path
 import subprocess
@@ -15,6 +16,11 @@ from unittest.mock import Mock, patch
 spec = importlib.util.spec_from_file_location('browser_session', Path(__file__).with_name('browser_session.py'))
 browser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(browser)
+
+
+acceptance_spec = importlib.util.spec_from_file_location('acceptance', Path(__file__).with_name('check_installed_browser.py'))
+acceptance = importlib.util.module_from_spec(acceptance_spec)
+acceptance_spec.loader.exec_module(acceptance)
 
 
 class BrowserSessionTests(unittest.TestCase):
@@ -146,6 +152,29 @@ class BrowserSessionTests(unittest.TestCase):
                 browser.emit_bundle(bad, '8.8.8.8', 9050, True, True)
             self.assertFalse(bad.exists())
 
+    def test_bundle_validator_refuses_rehashed_tampering_symlinks_and_extra_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'bundle'
+            browser.emit_bundle(root, '127.0.0.1', 9050, True, True)
+            browser.validate_bundle(root, '127.0.0.1', 9050, True, True)
+            policy = root / 'policies.json'
+            original = policy.read_bytes()
+            changed = original.replace(b'127.0.0.1:9', b'127.0.0.1:9050')
+            policy.write_bytes(changed)
+            inventory = json.loads((root / 'bundle.json').read_text())
+            inventory['sha256']['policies.json'] = hashlib.sha256(changed).hexdigest()
+            (root / 'bundle.json').write_text(json.dumps(inventory))
+            with self.assertRaises(ValueError):
+                browser.validate_bundle(root, '127.0.0.1', 9050, True, True)
+            policy.unlink()
+            policy.symlink_to(root / 'anonguard.cfg')
+            with self.assertRaises(OSError):
+                browser.validate_bundle(root, '127.0.0.1', 9050, True, True)
+            policy.unlink(); policy.write_bytes(original)
+            (root / 'extra').touch()
+            with self.assertRaises(ValueError):
+                browser.validate_bundle(root, '127.0.0.1', 9050, True, True)
+
     def test_extension_preflight_rejects_unsigned_wrong_identity_and_extra_code(self):
         source = Path(__file__).resolve().parents[1] / 'browser/isolation'
         manifest = json.loads((source / 'manifest.json').read_text())
@@ -169,6 +198,27 @@ class BrowserSessionTests(unittest.TestCase):
                         package(manifest, extra='../escape'), package(manifest, extra='extra.js'), b'bad'):
             with self.subTest(content=content[:20]), self.assertRaises(ValueError):
                 browser.validate_extension(content)
+
+    def test_installed_acceptance_refuses_vacuous_locks_and_disabled_signature_checks(self):
+        observed = {'policy': browser.policy('127.0.0.1', 9050, True, True)['policies'],
+                    'locks': {name: True for name in browser.LOCKED_PREFERENCES},
+                    'proxy': 1, 'host': '127.0.0.1', 'port': 9, 'direct': False,
+                    'signature_required': True}
+        acceptance.validate_observation(observed)
+        for weakened in (dict(observed, locks={}), dict(observed, signature_required=False),
+                         dict(observed, direct=True), dict(observed, port=9050)):
+            with self.assertRaises(ValueError):
+                acceptance.validate_observation(weakened)
+
+    def test_installed_acceptance_requires_target_matched_proxy_error(self):
+        target = 'http://127.0.0.1:54321/offline-canary-unique'
+        valid = 'about:neterror?' + urlencode({'e': 'proxyConnectFailure', 'u': target})
+        acceptance.validate_refusal(valid, target)
+        for uri in ('about:blank', 'about:httpsonlyerror?' + urlencode({'u': target}),
+                    'about:neterror?' + urlencode({'e': 'connectionFailure', 'u': target}),
+                    valid + '&u=' + target, valid.replace('unique', 'stale')):
+            with self.subTest(uri=uri), self.assertRaises(ValueError):
+                acceptance.validate_refusal(uri, target)
 
     def test_invalid_endpoint_never_creates_policy(self):
         for host in ('127.0.0.1', '8.8.8.8', '::1', '10.77.0.1;exec'):

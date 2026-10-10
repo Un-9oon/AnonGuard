@@ -53,7 +53,7 @@ mod transport_tests {
             pool.nodes.write().await.get_mut(&endpoint).unwrap().is_exit = exit;
         }
         let binding = crate::onion::transport::BridgeTransport {
-            identity: ed25519_dalek::SigningKey::from_bytes(&[41; 32])
+            identity: crate::crypto::identity::SigningKey::from_bytes(&[41; 32])
                 .verifying_key()
                 .to_bytes(),
             proxy: "127.0.0.1:31000".parse().unwrap(),
@@ -105,6 +105,7 @@ use crate::mesh::node::ProxyNode;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct AcceptedSnapshot {
+    protocol_version: u32,
     epoch: u64,
     digest: [u8; 32],
 }
@@ -120,7 +121,7 @@ pub struct ProxyPool {
     consensus_deadline: Arc<AtomicU64>,
     accepted_snapshot: Arc<RwLock<Option<AcceptedSnapshot>>>,
     snapshot_path: Arc<RwLock<Option<std::path::PathBuf>>>,
-    /// Maps "host:port" -> Ed25519 identity key from the directory consensus.
+    /// Maps "host:port" -> composite identity key from the directory consensus.
     /// Only populated when nodes are loaded via `load_from_consensus`.
     identity_keys: Arc<RwLock<IndexMap<String, [u8; 32]>>>,
     /// Persistent entry guard state for the client.
@@ -168,8 +169,11 @@ impl ProxyPool {
         let snapshot_path = path.with_extension("consensus.json");
         let accepted = match crate::core::storage::read_bounded_file(&snapshot_path, 4096) {
             Ok(bytes) => {
-                let state = serde_json::from_slice(&bytes)
+                let state: AcceptedSnapshot = serde_json::from_slice(&bytes)
                     .map_err(|e| format!("Invalid directory rollback state: {e}"))?;
+                if state.protocol_version != 6 {
+                    return Err("Directory rollback state needs explicit v6 migration".into());
+                }
                 Some(state)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -225,7 +229,7 @@ impl ProxyPool {
     pub async fn load_from_multi_consensus(
         &self,
         docs: &[crate::mesh::consensus::ConsensusDocument],
-        authorities: &std::collections::HashMap<String, ed25519_dalek::VerifyingKey>,
+        authorities: &std::collections::HashMap<String, crate::crypto::identity::VerifyingKey>,
         quorum_threshold: usize,
         current_time: u64,
     ) -> Result<usize, String> {
@@ -290,8 +294,8 @@ impl ProxyPool {
         let mut endpoints = std::collections::HashMap::new();
         for relay in &final_relays {
             let endpoint = (relay.host.clone(), relay.port);
-            if let Some(previous) = endpoints.insert(endpoint, relay.identity_key_ed25519) {
-                if previous != relay.identity_key_ed25519 {
+            if let Some(previous) = endpoints.insert(endpoint, relay.identity_pin) {
+                if previous != relay.identity_pin {
                     return Err("Conflicting relay identities at the same endpoint".into());
                 }
             }
@@ -302,13 +306,22 @@ impl ProxyPool {
         let mut replacement_keys = IndexMap::new();
         let mut identities = std::collections::HashSet::new();
         let mut signing_keys = std::collections::HashSet::new();
+        let mut classical_keys = std::collections::HashSet::new();
+        let mut pq_keys = std::collections::HashSet::new();
         for relay in final_relays {
-            if !identities.insert(relay.node_id.clone())
-                || !signing_keys.insert(relay.identity_key_ed25519)
+            let proof = crate::crypto::identity::Signature::from_slice(&relay.signature)
+                .map_err(|_| "Invalid relay identity proof")?;
+            let (classical, pq) = proof
+                .component_pins()
+                .map_err(|_| "Invalid relay identity components")?;
+            if !classical_keys.insert(classical) || !pq_keys.insert(pq) {
+                return Err("Relay directory aliases an identity component".into());
+            }
+            if !identities.insert(relay.node_id.clone()) || !signing_keys.insert(relay.identity_pin)
             {
                 return Err("Duplicate relay identifier in directory snapshot".into());
             }
-            if self.revoked.contains(&relay.identity_key_ed25519) {
+            if self.revoked.contains(&relay.identity_pin) {
                 continue;
             }
             let endpoint = if relay.host.starts_with("reverse://") {
@@ -325,10 +338,11 @@ impl ProxyPool {
             if replacement.contains_key(&key) {
                 return Err("Duplicate endpoint in directory snapshot".into());
             }
-            replacement_keys.insert(key.clone(), relay.identity_key_ed25519);
+            replacement_keys.insert(key.clone(), relay.identity_pin);
             replacement.insert(key, node);
         }
         let next = AcceptedSnapshot {
+            protocol_version: 6,
             epoch: selected.valid_after,
             digest,
         };
@@ -359,7 +373,7 @@ impl ProxyPool {
         id_keys.contains_key(&format!("{}:{}", host, port))
     }
 
-    /// Returns the pinned Ed25519 identity keys for each node in a chain, in order.
+    /// Returns the pinned composite identity keys for each node in a chain, in order.
     /// Nodes loaded from text files (not consensus) will return `[0u8; 32]` (zeroed),
     /// which `build_telescopic_circuit` will reject — enforcing consensus-sourced routing.
     pub async fn get_identity_keys(&self, chain: &[ProxyNode]) -> Vec<[u8; 32]> {
@@ -830,6 +844,7 @@ mod initialization_tests {
         let directory = Directory::new();
         let path = directory.0.join("guards.json");
         let state = AcceptedSnapshot {
+            protocol_version: 6,
             epoch: 99,
             digest: [7; 32],
         };

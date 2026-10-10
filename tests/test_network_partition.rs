@@ -31,7 +31,7 @@ async fn test_network_partition_no_split_brain() {
     }
 
     // Give all authorities the full peer list so N=4, f=1, quorum=3
-    let all_peers: Vec<(String, Option<ed25519_dalek::VerifyingKey>)> = addrs
+    let all_peers: Vec<(String, Option<anonguard::crypto::identity::VerifyingKey>)> = addrs
         .iter()
         .map(|addr| (addr.clone(), Some(*pinned_keys.get(addr).unwrap())))
         .collect();

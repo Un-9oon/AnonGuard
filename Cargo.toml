@@ -38,7 +38,7 @@ harness = false
 [dependencies]
 # Async Runtime & Networking
 tokio = { version = "1.38", features = ["full"] }
-rustls = { version = "0.23.40", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "ring"] }
 x509-parser = "0.18"
@@ -58,7 +58,7 @@ chacha20poly1305 = "=0.10.1"
 subtle = "2.6"
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 zeroize = { version = "1.8", features = ["derive"] }
-ml-kem = "0.2"
+ml-kem = { version = "0.2", features = ["zeroize"] }
 
 # Error handling
 thiserror = "1.0"
@@ -80,6 +80,8 @@ indexmap = "2"
 
 hex = "0.4.3"
 futures = "0.3.34"
+ml-dsa = { version = "=0.1.1", default-features = false, features = ["alloc", "zeroize"] }
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

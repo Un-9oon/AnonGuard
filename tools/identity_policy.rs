@@ -3,8 +3,8 @@ use anonguard::core::{
     revocation::{RevocationPolicy, MAX_POLICY_BYTES},
     storage,
 };
+use anonguard::crypto::identity::VerifyingKey;
 use clap::{Parser, Subcommand};
-use ed25519_dalek::VerifyingKey;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},

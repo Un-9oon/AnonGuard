@@ -26,8 +26,8 @@ async fn test_proxy_pool_add_and_rotate() {
 
 #[tokio::test]
 async fn test_proxy_pool_load_from_consensus_quorum() {
+    use anonguard::crypto::identity::SigningKey;
     use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
-    use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     use std::collections::HashMap;
 
@@ -131,8 +131,8 @@ async fn subnet_constraints_must_not_shorten_circuits() {
 
 #[tokio::test]
 async fn expired_loaded_directory_blocks_new_onion_paths() {
+    use anonguard::crypto::identity::SigningKey;
     use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
-    use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     let auth = SigningKey::generate(&mut OsRng);
     let relay_key = SigningKey::generate(&mut OsRng);
@@ -172,8 +172,8 @@ async fn expired_loaded_directory_blocks_new_onion_paths() {
 
 #[tokio::test]
 async fn canonical_snapshot_rejects_mixed_views_and_survives_restart() {
+    use anonguard::crypto::identity::SigningKey;
     use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
-    use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
     let auth1 = SigningKey::generate(&mut OsRng);
     let auth2 = SigningKey::generate(&mut OsRng);
@@ -248,8 +248,8 @@ async fn canonical_snapshot_rejects_mixed_views_and_survives_restart() {
 
 #[tokio::test]
 async fn entry_failure_cooldown_does_not_revive_an_unavailable_guard() {
+    use anonguard::crypto::identity::SigningKey;
     use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
-    use ed25519_dalek::SigningKey;
     let authority = SigningKey::from_bytes(&[21; 32]);
     let identity = SigningKey::from_bytes(&[22; 32]);
     let now = anonguard::mesh::current_timestamp_secs();
@@ -287,8 +287,8 @@ async fn entry_failure_cooldown_does_not_revive_an_unavailable_guard() {
 
 #[tokio::test]
 async fn ipv6_directory_endpoint_retains_its_identity_pin() {
+    use anonguard::crypto::identity::SigningKey;
     use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
-    use ed25519_dalek::SigningKey;
     let authority = SigningKey::from_bytes(&[31; 32]);
     let identity = SigningKey::from_bytes(&[32; 32]);
     let now = anonguard::mesh::current_timestamp_secs();

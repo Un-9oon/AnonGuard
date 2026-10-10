@@ -1,5 +1,5 @@
 //! Invalid authority configuration must fail before any role listens or writes keys.
-use ed25519_dalek::SigningKey;
+use anonguard::crypto::identity::SigningKey;
 use std::{path::PathBuf, time::Duration};
 use tokio::process::Command;
 

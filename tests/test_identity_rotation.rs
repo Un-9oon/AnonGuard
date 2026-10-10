@@ -1,7 +1,7 @@
 //! Administrative authority replacement must preserve quorum and rollback state.
 //! These cases rehearse existing pin replacement, not an in-band revocation protocol.
+use anonguard::crypto::identity::SigningKey;
 use anonguard::mesh::{ConsensusDocument, ProxyPool, RelayDescriptor};
-use ed25519_dalek::SigningKey;
 use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 struct Workspace(PathBuf);
@@ -40,7 +40,7 @@ fn sign(mut doc: ConsensusDocument, keys: &[SigningKey], indices: &[usize]) -> C
     }
     doc
 }
-fn pins(keys: &[SigningKey]) -> HashMap<String, ed25519_dalek::VerifyingKey> {
+fn pins(keys: &[SigningKey]) -> HashMap<String, anonguard::crypto::identity::VerifyingKey> {
     keys.iter()
         .enumerate()
         .map(|(i, key)| (format!("a{i}"), key.verifying_key()))
@@ -131,7 +131,10 @@ async fn replacement_key_cannot_reuse_old_authority_vote_journal() {
     );
     assert!(logs.contains("vote state failed authentication"), "{logs}");
     assert_eq!(std::fs::read(&journal).unwrap(), original);
-    assert_eq!(std::fs::read(&key_path).unwrap(), replacement.to_bytes());
+    assert_eq!(
+        std::fs::read(&key_path).unwrap(),
+        replacement.to_bytes().as_slice()
+    );
 }
 
 #[tokio::test]

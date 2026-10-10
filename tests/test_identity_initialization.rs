@@ -27,15 +27,16 @@ fn initialization_prints_matching_pin_and_preserves_existing_identity() {
     };
     let first = invoke();
     assert!(first.status.success(), "{:?}", first);
-    let bytes: [u8; 32] = fs::read(&path).unwrap().try_into().unwrap();
+    let bytes = fs::read(&path).unwrap();
     let public = hex::encode(
-        ed25519_dalek::SigningKey::from_bytes(&bytes)
+        anonguard::core::storage::read_identity_key(&path)
+            .unwrap()
             .verifying_key()
             .to_bytes(),
     );
     let doc: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
-    assert_eq!(doc["public_key_ed25519"], public);
-    assert_eq!(doc.as_object().unwrap().len(), 1);
+    assert_eq!(doc["public_key_hybrid_pin"], public);
+    assert_eq!(doc.as_object().unwrap().len(), 4);
     let second = invoke();
     assert!(second.status.success());
     assert_eq!(second.stdout, first.stdout);

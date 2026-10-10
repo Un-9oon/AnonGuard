@@ -172,6 +172,37 @@ def emit_bundle(destination, host, port, native=False, isolated=False):
     return manifest
 
 
+def validate_bundle(destination, host, port, native=False, isolated=False):
+    """Validate contents against the generator, not just attacker-editable hashes."""
+    expected_files = {'policies.json': json.dumps(policy(host, port, native, isolated), indent=2) + '\n',
+                      'anonguard.cfg': autoconfig(), 'anonguard.js': AUTOCONFIG_LOADER}
+    if destination.is_symlink() or not destination.is_dir():
+        raise ValueError('Bundle must be a real directory')
+    if {item.name for item in destination.iterdir()} != {*expected_files, 'bundle.json'}:
+        raise ValueError('Unexpected or missing bundle members')
+    observed = {}
+    for name in (*expected_files, 'bundle.json'):
+        target = destination / name
+        descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError('Bundle members must be regular files')
+            content = stream.read(65537)
+        if len(content) > 65536:
+            raise ValueError('Bundle member exceeds size bound')
+        observed[name] = content
+    for name, content in expected_files.items():
+        if observed[name] != content.encode():
+            raise ValueError('Bundle configuration differs from supported generator')
+    expected_manifest = {'version': 1, 'native_client': native, 'circuit_isolation': isolated,
+                         'sha256': {name: hashlib.sha256(content.encode()).hexdigest()
+                                    for name, content in expected_files.items()},
+                         'signed_extension_required': isolated, 'browser_accepted': False}
+    if json.loads(observed['bundle.json']) != expected_manifest:
+        raise ValueError('Bundle inventory differs from supported contract')
+    return expected_manifest
+
+
 def trusted_file(path, maximum=65536):
     path = Path(path)
     if not path.is_absolute():
@@ -316,6 +347,7 @@ def main():
     action.add_argument('--emit-policy', type=Path)
     action.add_argument('--emit-autoconfig', type=Path)
     action.add_argument('--emit-bundle', type=Path)
+    action.add_argument('--validate-bundle', type=Path)
     action.add_argument('--check', action='store_true')
     action.add_argument('--launch', action='store_true')
     parser.add_argument('--proxy-host')
@@ -330,6 +362,9 @@ def main():
     args = parser.parse_args()
     try:
         host, port = endpoint(args.proxy_host or ('127.0.0.1' if args.native_client else '10.77.0.1'), args.proxy_port, args.native_client)
+        if args.validate_bundle:
+            print(json.dumps(validate_bundle(args.validate_bundle, host, port, args.native_client, args.circuit_isolation)))
+            return 0
         if args.emit_bundle:
             print(json.dumps(emit_bundle(args.emit_bundle, host, port, args.native_client, args.circuit_isolation)))
             return 0

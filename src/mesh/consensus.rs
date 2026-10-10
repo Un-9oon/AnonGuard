@@ -3,7 +3,7 @@
 //! Replaces single-point-of-failure trackers with a cryptographically signed,
 //! M-of-N quorum consensus protocol modeled after Tor Directory Authorities.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use crate::crypto::identity::{Signature, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -17,10 +17,11 @@ pub struct RelayDescriptor {
     pub host: String,
     pub port: u16,
     pub onion_key_x25519: [u8; 32],
-    pub identity_key_ed25519: [u8; 32],
+    pub identity_pin: [u8; 32],
     pub is_exit: bool,
     pub pow_nonce: u64,
     pub registered_at: u64,
+    #[serde(with = "crate::crypto::identity::proof_encoding")]
     pub signature: Vec<u8>,
 }
 
@@ -31,7 +32,7 @@ impl RelayDescriptor {
         host: String,
         port: u16,
         onion_key_x25519: [u8; 32],
-        identity_key_ed25519: [u8; 32],
+        identity_pin: [u8; 32],
         is_exit: bool,
         pow_nonce: u64,
         registered_at: u64,
@@ -41,7 +42,7 @@ impl RelayDescriptor {
             host,
             port,
             onion_key_x25519,
-            identity_key_ed25519,
+            identity_pin,
             is_exit,
             pow_nonce,
             registered_at,
@@ -52,29 +53,29 @@ impl RelayDescriptor {
     /// Computes canonical bytes to sign for this descriptor.
     pub fn compute_signing_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"AnonGuard-RelayDescriptor-v3");
+        bytes.extend_from_slice(b"AnonGuard-RelayDescriptor-v6");
         bytes.extend_from_slice(&(self.node_id.len() as u32).to_be_bytes());
         bytes.extend_from_slice(self.node_id.as_bytes());
         bytes.extend_from_slice(&(self.host.len() as u32).to_be_bytes());
         bytes.extend_from_slice(self.host.as_bytes());
         bytes.extend_from_slice(&self.port.to_be_bytes());
         bytes.extend_from_slice(&self.onion_key_x25519);
-        bytes.extend_from_slice(&self.identity_key_ed25519);
+        bytes.extend_from_slice(&self.identity_pin);
         bytes.push(if self.is_exit { 1 } else { 0 });
         bytes.extend_from_slice(&self.pow_nonce.to_be_bytes());
         bytes.extend_from_slice(&self.registered_at.to_be_bytes());
         bytes
     }
 
-    /// Signs this descriptor using the relay's private Ed25519 signing key.
+    /// Signs this descriptor using the relay's private hybrid signing key.
     pub fn sign_with_key(&mut self, key: &SigningKey) {
-        self.identity_key_ed25519 = key.verifying_key().to_bytes();
+        self.identity_pin = key.verifying_key().to_bytes();
         let signing_bytes = self.compute_signing_bytes();
         let sig = key.sign(&signing_bytes);
         self.signature = sig.to_bytes().to_vec();
     }
 
-    /// Verifies the cryptographic Ed25519 signature binding this descriptor to its identity key.
+    /// Verifies the cryptographic hybrid signature binding this descriptor to its identity key.
     pub fn verify_identity(&self) -> bool {
         // Canonical numeric IPs or lowercase ASCII DNS names only: no URL credentials,
         // path/query syntax or ambiguous host spellings may enter a signed directory.
@@ -102,17 +103,14 @@ impl RelayDescriptor {
             || self.host.is_empty()
             || self.host.len() > 253
             || self.port == 0
-            || self.signature.len() != 64
+            || self.signature.len() != crate::crypto::identity::PROOF_SIZE
         {
             return false;
         }
-        let Ok(verifying_key) = VerifyingKey::from_bytes(&self.identity_key_ed25519) else {
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&self.identity_pin) else {
             return false;
         };
-        let Ok(sig_bytes): Result<&[u8; 64], _> = self.signature.as_slice().try_into() else {
-            return false;
-        };
-        let signature = Signature::from_bytes(sig_bytes);
+        let signature = Signature::from_bytes(&self.signature);
         let signing_bytes = self.compute_signing_bytes();
         verifying_key
             .verify_strict(&signing_bytes, &signature)
@@ -124,6 +122,7 @@ impl RelayDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthoritySignature {
     pub authority_id: String,
+    #[serde(with = "crate::crypto::identity::proof_encoding")]
     pub signature_bytes: Vec<u8>,
 }
 
@@ -154,7 +153,7 @@ impl ConsensusDocument {
     /// signatures and cannot be altered after signing.
     pub fn compute_digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"AnonGuard-Consensus-v1");
+        hasher.update(b"AnonGuard-Consensus-v6");
         hasher.update(self.valid_after.to_be_bytes());
         hasher.update(self.valid_until.to_be_bytes());
 
@@ -175,7 +174,7 @@ impl ConsensusDocument {
 
             hasher.update(r.port.to_be_bytes());
             hasher.update(r.onion_key_x25519);
-            hasher.update(r.identity_key_ed25519);
+            hasher.update(r.identity_pin);
             hasher.update([if r.is_exit { 1 } else { 0 }]);
             // Include pow_nonce and registered_at so they are covered by the authority signature
             hasher.update(r.pow_nonce.to_be_bytes());
@@ -222,6 +221,8 @@ impl ConsensusDocument {
         let mut valid_auth_count = 0;
         let mut verified_authorities = Vec::new();
         let mut verified_keys = std::collections::HashSet::new();
+        let mut classical_keys = std::collections::HashSet::new();
+        let mut pq_keys = std::collections::HashSet::new();
 
         for sig in &self.signatures {
             if verified_authorities.contains(&sig.authority_id) {
@@ -229,11 +230,17 @@ impl ConsensusDocument {
             }
 
             if let Some(pubkey) = trusted_authorities.get(&sig.authority_id) {
-                if let Ok(sig_bytes) = sig.signature_bytes.as_slice().try_into() {
-                    let ed_sig = Signature::from_bytes(sig_bytes);
+                if let Ok(signature) = Signature::from_slice(&sig.signature_bytes) {
+                    let ed_sig = signature;
                     if pubkey.verify_strict(&digest, &ed_sig).is_ok()
                         && verified_keys.insert(pubkey.to_bytes())
                     {
+                        let Ok((classical, pq)) = ed_sig.component_pins() else {
+                            return false;
+                        };
+                        if !classical_keys.insert(classical) || !pq_keys.insert(pq) {
+                            return false;
+                        }
                         valid_auth_count += 1;
                         verified_authorities.push(sig.authority_id.clone());
                     }

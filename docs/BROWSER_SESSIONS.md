@@ -172,3 +172,51 @@ not been verified. Acceptance must include actual policy locks, managed addon
 loading, distinct SOCKS origin credentials, and failure refusal in the installed
 browser. The automation tests use temporary addon installation and are not a
 substitute for the signed distribution acceptance test.
+
+Validate a saved bundle before privileged provisioning:
+
+```bash
+python3 scripts/browser_session.py --native-client --circuit-isolation \
+  --validate-bundle ./browser-provisioning
+```
+
+Validation compares bounded regular-file contents against the supported generator,
+not merely the editable hash inventory. It rejects missing/extra members, symlinked
+members and rehashed weakening of the default refusal endpoint.
+
+### Installed signed-browser offline acceptance
+
+After the operator installs the protected policy, AutoConfig and genuinely signed
+addon, an ordinary user can run the following with Firefox ESR, Selenium and
+geckodriver available, **and the SOCKS client already stopped**:
+
+```bash
+python3 scripts/check_installed_browser.py
+```
+
+This helper changes no host configuration and does not install a temporary addon.
+It uses a fresh automation profile of the actual installed browser to inspect
+loaded policies/locks and Firefox's signed, active managed-addon state. It then
+tries an owned loopback canary with SOCKS unavailable and refuses acceptance if
+any direct connection arrives. Automation system access is enabled only for
+observing policy/addon state; signature checks and privacy policies remain intact.
+A force-installed addon may need up to 30 seconds to load; absent signing artifacts
+or incorrect protected configuration produce failure rather than a skipped pass.
+
+This is a negative integration acceptance check, not a general leak audit. Host
+firewall restrictions can independently prevent the canary connection, and native
+firewalls may also block WebDriver's ephemeral local control ports. Report such
+failures rather than weakening production rules to obtain a pass. A later positive
+installed-browser test must exercise the live client, signed extension, origin
+credentials and actual relay destination; packet captures, IPv6/DNS leak tests,
+and cross-device fingerprint measurements remain separate requirements.
+
+The installed offline checker now requires the exact complete preference-lock
+set and enabled Firefox signature enforcement. Its canary observer must first
+pass an owned-loopback positive readiness probe, remain alive, and encounter no
+observer errors. A successful negative result additionally requires Firefox's
+`proxyConnectFailure` error page to identify the exact unique requested canary
+URL. HTTPS-only interstitials, generic connection errors, stale error pages,
+missing locks and WebDriver failures are refused rather than counted as passes.
+The browser diagnostic establishing that refusal format used a disposable profile,
+not an installed signed-browser acceptance run.

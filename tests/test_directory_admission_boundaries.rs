@@ -1,6 +1,6 @@
 //! Certified but malformed directories must not partially replace admitted state.
+use anonguard::crypto::identity::{SigningKey, VerifyingKey};
 use anonguard::mesh::{ConsensusDocument, ProxyNode, ProxyPool, RelayDescriptor};
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::collections::HashMap;
 
 fn relay(id: &str, host: &str, seed: u8, registered: u64) -> RelayDescriptor {
@@ -37,7 +37,7 @@ async fn malformed_certified_snapshots_preserve_existing_nodes_and_pins() {
     let now = anonguard::mesh::current_timestamp_secs();
     let epoch = now / 300 * 300;
     let baseline = relay("baseline", "8.8.8.8", 41, epoch - 300);
-    let pin = baseline.identity_key_ed25519;
+    let pin = baseline.identity_pin;
     let pool = ProxyPool::new();
     let (document, authorities) = certificate(vec![baseline], epoch - 300, epoch + 600);
     assert_eq!(

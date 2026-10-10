@@ -6,6 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, warn};
 
 use crate::core::GuardConfig;
+use crate::crypto::identity::SigningKey as Ed25519SigningKey;
 use crate::kernel::KillSwitchController;
 use crate::mesh::ProxyPool;
 use crate::morphing::{
@@ -17,7 +18,6 @@ use crate::onion::circuit::{
     build_create_cell, decode_extend_payload, encode_extend_payload, handle_create_cell,
     process_created_cell, OnionCircuit, PeelOutcome,
 };
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
 use rand::rngs::OsRng;
 use x25519_dalek::EphemeralSecret;
@@ -42,8 +42,8 @@ fn normalize_ip_for_cap(ip: IpAddr) -> IpAddr {
     }
 }
 
-pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 1024;
-pub const MAX_CONCURRENT_PER_IP: u32 = 64;
+pub const DEFAULT_MAX_CONCURRENT_CONNECTIONS: usize = 32;
+pub const MAX_CONCURRENT_PER_IP: u32 = 8;
 
 pub struct GatewayServer {
     config: GuardConfig,
@@ -238,7 +238,7 @@ impl GatewayServer {
                         // pre-populate it from their authority's published Ed25519 key. An empty list
                         // produces a startup warning — see docs/reports/hardening_findings.md.
                         let pinned_vk =
-                            ed25519_dalek::VerifyingKey::from_bytes(&authority.public_key).ok();
+                            crate::crypto::identity::VerifyingKey::from_bytes(&authority.public_key).ok();
 
                         if pinned_vk.is_none() {
                             if !config.allow_unauthenticated_registration {
@@ -272,10 +272,10 @@ impl GatewayServer {
                         {
                             if let Ok(Ok(mut session)) = tokio::time::timeout(
                                 std::time::Duration::from_secs(10),
-                                crate::mesh::transport::SecureTransportSession::client_handshake(
+                                Box::pin(crate::mesh::transport::SecureTransportSession::client_handshake(
                                     stream,
                                     pinned_vk.as_ref(),
-                                ),
+                                )),
                             )
                             .await
                             {
@@ -532,7 +532,7 @@ impl GatewayServer {
                             if !cache.contains_key(&key) {
                                 if cache.len()>=8 {return Err("Privacy context limit reached".into());}
                                 let profile=crate::onion::session::Profile::parse(&config.privacy_profile)?;
-                                let (stream,circuit)=tokio::time::timeout(std::time::Duration::from_secs(30), establish_session(&config,&pool,profile)).await??;
+                                let (stream,circuit)=tokio::time::timeout(std::time::Duration::from_secs(30), establish_session(&config,&pool,profile,kill_switch.atomic_handle())).await??;
                                 let upstream=GuardedSocket::new(stream,kill_switch.atomic_handle()).begin_verification().mark_verified();
                                 let (handle,task)=crate::onion::session::start_client(upstream,circuit,profile);
                                 cache.insert(key,CachedSession{handle,task});
@@ -609,8 +609,10 @@ impl GatewayServer {
                                     return Err("Entry relay connection failed".into());
                                 }
                             };
+                            stream.set_nodelay(true)?;
                             let mut stream =
-                                match crate::onion::link::connect(stream, keys[0]).await {
+                                match crate::onion::link::connect_guarded(
+                                    GuardedSocket::new(stream, kill_switch.atomic_handle()).begin_verification().mark_verified(), keys[0]).await {
                                     Ok(stream) => stream,
                                     Err(error) => {
                                         pool.note_guard_link_failure(keys[0]).await;
@@ -972,8 +974,9 @@ async fn establish_session(
     config: &GuardConfig,
     pool: &ProxyPool,
     profile: crate::onion::session::Profile,
+    kill_flag: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<
-    (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit),
+    (crate::onion::link_cover::CoveredStream, OnionCircuit),
     Box<dyn std::error::Error + Send + Sync>,
 > {
     let pins: Vec<_> = config
@@ -1039,7 +1042,15 @@ async fn establish_session(
             return Err("Session entry connection failed".into());
         }
     };
-    let mut stream = match crate::onion::link::connect(stream, keys[0]).await {
+    stream.set_nodelay(true)?;
+    let mut stream = match crate::onion::link::connect_guarded(
+        GuardedSocket::new(stream, kill_flag)
+            .begin_verification()
+            .mark_verified(),
+        keys[0],
+    )
+    .await
+    {
         Ok(stream) => stream,
         Err(error) => {
             pool.note_guard_link_failure(keys[0]).await;
@@ -1216,7 +1227,7 @@ pub async fn stream_onion_circuit(
 /// and sequentially extends the circuit through in-band encrypted EXTEND cells.
 ///
 /// # Security
-/// `pinned_identity_keys[i]` MUST be the `identity_key_ed25519` from the consensus-verified
+/// `pinned_identity_keys[i]` MUST be the `identity_pin` from the consensus-verified
 /// `RelayDescriptor` for `chain[i]`. The handshake is rejected unless the relay proves it holds
 /// the corresponding private key via Ed25519 signature (MITM protection).
 pub async fn build_telescopic_circuit(
@@ -1765,7 +1776,8 @@ async fn handle_relay_inner(
                             let next_pin: [u8; 32] = payload[pin_offset..].try_into().map_err(|_| "Bad relay pin")?;
                             let next_s = policy.resolve_and_connect(&next_h, next_p).await
                                 .map_err(|_| "Next-hop connection failed".to_string())?;
-                            let mut next_s = crate::onion::link::connect(next_s, next_pin).await
+                            next_s.set_nodelay(true).map_err(|_| "Next-hop socket setup failed".to_string())?;
+                            let mut next_s = crate::onion::link::connect_guarded(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified(), next_pin).await
                                 .map_err(|_| "Next-hop TLS authentication failed".to_string())?;
                             let mut next_id: u32 = rand::random();
                             while next_id == 0 || next_id == relay_hop.circuit_id { next_id = rand::random(); }
@@ -1954,8 +1966,8 @@ mod tests {
     // is already correctly implemented in SecureTransportSession; this was a wiring bug.
     #[tokio::test]
     async fn test_b3_mitm_wrong_pinned_key_rejected() {
+        use crate::crypto::identity::SigningKey;
         use crate::mesh::transport::SecureTransportSession;
-        use ed25519_dalek::SigningKey;
         use rand::rngs::OsRng;
         use tokio::net::{TcpListener, TcpStream};
 
@@ -1965,8 +1977,7 @@ mod tests {
         let mitm_auth_key = SigningKey::generate(&mut OsRng);
 
         // ── Scenario 1: relay connects to MITM server, pinned_key = None (old, broken code) ──
-        // Expect: handshake SUCCEEDS even though the server is using the MITM key.
-        // This is the "repro" — demonstrates the vulnerability before the fix.
+        // Missing pins must refuse before the handshake; v6 has no unpinned fallback.
         let listener1 = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr1 = listener1.local_addr().unwrap();
         let mitm_key_clone = mitm_auth_key.clone();
@@ -1977,8 +1988,8 @@ mod tests {
         let client1 = TcpStream::connect(addr1).await.unwrap();
         let result1 = SecureTransportSession::client_handshake(client1, None).await;
         assert!(
-            result1.is_ok(),
-            "Unpinned handshake should succeed (demonstrates pre-fix vulnerability)"
+            result1.is_err(),
+            "Missing composite identity pin must refuse"
         );
 
         // ── Scenario 2: relay connects to real authority, pinned_key = correct (post-fix, happy path) ──

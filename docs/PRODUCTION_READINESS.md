@@ -1,84 +1,157 @@
 # Production readiness
 
-Status: experimental v5. Completion of this engineering redesign is not approval for public anonymity deployment and does not establish superiority to Tor.
+Status: **experimental v6; not approved for public anonymity deployment**.
+The coordinated post-quantum authentication and link-cover migration changes
+wire formats, keys, cells and resource costs. Source implementation is not
+independent security review, measured anonymity or release acceptance. No claim
+of superiority to Tor or complete quantum protection is supported.
 
-Latest follow-up: [parallel engineering and owned-VM validation](ENHANCEMENT_VALIDATION_2026-10-10.md)
-records session backpressure/Nagle fixes, evidence-integrity controls, fixed-window
-evaluation, browser provisioning and Ubuntu prerequisites. Fresh pilot results
-still expose duration/volume information and link correlation; these changes do
-not close the production-anonymity release gates.
+## Current engineering checkpoint
 
-## Implemented redesign
+The current [v6 protocol specification](PROTOCOL_V3.md) describes the mandatory
+network path. Its historical filename is retained; it supersedes v3/v5 details.
 
-- Bounded randomized 3–8-hop circuits (CLI default 3–5), persistent entry guards, certified non-exit middles and an exit, with optional bounded traffic-independent RMT/Poisson/Lorenz cell scheduling. Protocol v5 changes the backward sequence layout and transcript domains; coordinated relay/client upgrade is mandatory. See [the routing and scheduling contract](MULTIHOP_SCHEDULING.md). Longer paths and statistical timing are not proven anonymity improvements.
+- Network identities require **both Ed25519 and ML-DSA-65** signatures. Composite
+  pins bind both public components and encoding version. Descriptor admission,
+  authority consensus/cross-checks, circuit handshakes, guards, private bindings
+  and offline retirement use this composite identity meaning. Duplicate-component
+  checks supplement composite-key uniqueness; different operators remain an
+  external assumption.
+- Directory transport `AGDIR004` combines ephemeral X25519 and ML-KEM-768,
+  mandatory dual server authentication, transcript-bound directional HKDF and
+  bidirectional encrypted confirmation. Missing pins and older transport versions
+  are refused. Documents use authenticated bounded segmentation: six MiB maximum,
+  at most six one-MiB chunks. Errors or cancelled partial operations poison sessions.
+- Relay links require TLS 1.3 with `X25519MLKEM768` and `anonguard/6` ALPN.
+  A certificate-carried composite identity is pinned while its classical Ed25519
+  TLS signature remains verified. A mandatory challenge/TLS-exporter-bound dual
+  identity proof authenticates the channel before onion traffic is exposed.
+  This supplemental construction is custom and needs independent review.
+- Onion cells are now **8192 bytes**, with enlarged authenticated handshake proofs.
+  Mandatory hop-local 20-ms covered envelopes conceal idle-versus-data slots while
+  links remain alive. Connection setup/lifetime, congestion and correlation remain
+  observable. The calculated scheduling cost is about **409.8 kB/s per direction
+  per link**, before TLS/TCP overhead; this is not measured performance.
+- Bounded randomized 3..8-hop circuits (CLI default 3..5), persisted guards,
+  non-exit middles, exit policy, bounded credit/ACK handling, half-close and failure
+  refusal remain the routing contract. Multiplexed session profiles and tails are
+  distinct from adjacent-link cover. RMT/Poisson/Lorenz are classical statistical
+  research options, not quantum protection or proven anonymity improvement.
+- Identity storage uses a protected, exclusive, durable **72-byte paired-seed
+  bundle**. Existing Ed-only keys are rejected rather than overwritten. Guard,
+  transport and accepted-snapshot versions prevent silently reinterpreting old
+  pins. Offline retirement policy version 2 retains cumulative generation and
+  quorum constraints; it requires authenticated operator distribution and restart.
+- Exact-snapshot quorum, persistent authority votes, client rollback/equivocation
+  rejection, bounded concurrent reconciliation, expiry and PoW replay protection
+  remain fail-closed. Limits remain 512 relays and 16 authorities. Divergent frozen
+  views/partitions can still stall service until a later epoch; this is not a
+  complete Byzantine liveness protocol.
+- Linux native Client/Volunteer tooling, transparent adapter and managed firewall
+  remain experimental administrative profiles. VMs are test fixtures, not an
+  installation requirement. Optional obfs4 bridges and protected authority
+  bootstrap have no independently demonstrated censorship resistance.
+- Firefox ESR privacy-policy/AutoConfig enforcement, temporary-addon circuit
+  attribution and launcher packaging have local regression coverage. Normal
+  distribution still needs a signed addon and actual installed-system acceptance;
+  this is not an audited Tor Browser-equivalent distribution.
+- `anonguard-setup --check-app-containment` provides an ordinary-user read-only
+  Bubblewrap prerequisite probe and actionable Ubuntu AppArmor refusal. It never
+  disables protections or installs host policy automatically. Headless rootfs,
+  syscall, descriptor and namespace containment remain a separate narrow profile.
 
-- Pinned TLS 1.3 relay links with mandatory v5 ALPN and no plaintext fallback.
-- Per-link circuit identifiers, signed hybrid handshake transcripts and context-bound key derivation.
-- Unambiguous signed relay descriptors, exact-snapshot quorum verification, durable authority votes and client rollback/equivocation rejection.
-- Identity-pinned persistent guards and entry-only cooldowns.
-- Optional mandatory obfs4 entry and authority-bootstrap bindings, unlisted non-exit loopback bridge backends excluded from registration, locally pinned private guards with certified downstream hops, and supervised Linux PT service/credential lifecycle. Provisioning and operational limits are documented in `docs/design/PLUGGABLE_TRANSPORT.md`; this is not independently evaluated censorship resistance.
-- PoW replay records retained through the inclusive acceptance boundary; registry exhaustion refuses new admissions instead of forgetting live proofs, with bounded identity sizes. Clock rollback behind a replay-cache purge refuses admission until time catches up.
-- Shared private signing-key storage with exclusive publication under concurrent startup, bounded reads and Unix permission checks.
-- Quorum-signed offline cumulative identity retirement, exact authority-set binding, persistent generation/equivocation/resurrection rejection, authority registration/gossip filtering, certified pool exclusion and configured-pin/local-identity refusal. This requires coordinated restart and authenticated operator distribution; see [the operational contract](IDENTITY_RETIREMENT.md).
-- Bounded regular-file reads for keys, guards, votes, directory rollback state, proxy files and transport profiles; Unix final-symlink/FIFO refusal. Serialized guard initialization validates all input before publishing paths or rollback state.
-- Offline two-VM Linux deployment-profile generator with SOCKS-only application rules, no routed forwarding, loopback daemon/private bounded socket proxy and early firewall/service dependencies. Unit parsing and offline contracts are tested; [live VM acceptance](VM_SEPARATION.md) and browser hardening remain outstanding.
-- Experimental [Firefox ESR session integration](BROWSER_SESSIONS.md) supplies locked-policy generation, protected-config/topology checks and disposable-profile launch/cleanup. Private-layout policy loading/locking and opt-in circuit isolation are now exercised by actual Firefox fixtures; operator-installed browser leak/fingerprint acceptance remains outstanding. This is not a hardened browser distribution.
-- Experimental [browser circuit-isolation source and opt-in policy](BROWSER_CIRCUIT_ISOLATION.md) now bind local labels to document contexts and block default-proxy fallback. Real Firefox ESR local fixtures now verify nested-resource attribution, site/tab labels and missing-addon/proxy-failure refusal. Actual private-layout Firefox now also verifies enterprise-policy loading and AutoConfig privacy locks, and browser pages traverse the real local CLI onion testnet. These do not establish addon signing, operator-installed policy acceptance or packet-capture leak protection; the ordinary browser profile still shares its default circuit.
-- Generated native firewall now uses the valid `nat_output` chain; isolated user/network-namespace execution and tcpdump checks cover the real adapter's transparent TCP, DNS fail-closed behavior, UDP/IPv6 denial, backend crash closure and table persistence. This uses a fixture backend and is not an operator-installed browser/client acceptance record.
-- Strict SOCKS5 method negotiation and destination parsing; bounded optional decoy operations.
-- Explicit proxy files are read and validated completely before distinct endpoints are published; read and parse errors preserve the existing pool. Bad file or inline proxy configuration stops gateway startup without printing URL credentials.
-- Bounded directional flow control, ACK validation, fair paced DATA/ACK scheduling, upload half-close and acknowledged response teardown.
-- Exit DNS/address validation, shared connect deadlines and bounded connection/circuit lifetimes. Expired certified directories are excluded from every pool selection API.
-- Fresh Linux application namespaces, DROP rules installed before exposure, private bridge, helper identity checks and crash isolation.
-- Bounded concurrent pinned directory retrieval, admission reconciliation against concurrent registrations, and deferred production votes until three relays including an exit are present.
-- Gateway, authority, tracker and namespace bridge workers scoped to their listeners; aborting a listener cancels its existing connections and queued reverse streams.
-- Serialized kill-switch reset/trip state and cancellation notifications; raw tracker requests containing authentication tokens are not logged.
-- Bounded research reassembly with progress at capacity, first-payload preservation and checked slicing/sequence exhaustion; this does not enable a multipath gateway.
-- Research CLI tools identify synthetic assumptions, group duplicate fingerprint descriptors, honor the modeled population and propagate buffered dataset write failures.
-- Explicitly retired unsupported multipath gateway behavior and unsupported anonymity claims.
+Upgrading all participants and operator artifacts together is mandatory. Preserve
+keys, votes, guards, accepted snapshots and retirement journals; do not reset or
+reinterpret security state to bypass migration refusal. There is no automatic
+legacy trust-continuity ceremony, in-place stream replay or seamless TCP recovery.
 
-These changes require a coordinated v5 migration. No in-place replay or transparent reconnection of arbitrary TCP transactions is provided. Optional onion services and reviewed multipath sessions remain separate projects, not partially enabled production features.
+## What existing evidence does and does not establish
 
-## Verification and release gates
+Earlier local and Ubuntu 24.04.3 VM sessions exercised real authorities/relays,
+browser-through-onion transfer, malformed handshake refusal, private-namespace
+packet capture, native adapter crash/leak boundaries, documented AppArmor
+prerequisites and Debian package lifecycle. See
+[the original VM record](VM_VALIDATION_2026-10-10.md) and
+[follow-up engineering/evaluation record](ENHANCEMENT_VALIDATION_2026-10-10.md).
+Those records identify their tested revisions and laboratory assumptions.
+They **do not validate the new v6 release**, its larger cells or new cover layer.
+Do not carry old numerical performance or anonymity results forward as v6 results.
 
-Locked tests and strict lint checks cover implemented contracts, including pinned identity rejection, three-hop telescoping, credit errors, directory conflicts/restart rollback and a 128 KiB half-closed request/response. A local CLI testnet also starts four authorities, three relays and a gateway, verifies a 128 KiB half-closed transfer, and checks connection closure after relay loss. This single-host test uses zero-cost PoW and explicitly permitted private exits; neither setting is a production recommendation. CI separately exercises privileged namespace isolation and cross-platform compilation. Coverage aggregates the normal and privileged namespace runs without dropping uncovered source lines or counting duplicate classes twice. Passing normal tests alone is insufficient for deployment approval.
+The prior owned-workload pilot identified strict-padded workloads at 66.7% 1-NN
+and 50–83.3% small-MLP accuracy versus 33.3% balanced chance (three labels, twelve
+held-out traces). It did not establish improved encrypted-link correlation
+resistance. Later evaluation engineering improves evidence integrity, backpressure
+and fixed-window analysis, but does not establish real-world undetectability.
+Fresh defense-aware testing must measure v6 rather than relabel old captures.
 
-A real Ubuntu 24.04.3 VM session now records browser-through-relay integration, private-namespace native packet captures, documented AppArmor-prerequisite application containment, and Debian lifecycle checks. The same session's owned-workload packet pilot still achieved 66.7% 1-NN and 50–83.3% small-MLP identification against strict padding (three labels, 12 held-out traces; balanced chance 33.3%). Exploratory encrypted-link window matching did not establish improved correlation resistance. These findings are unresolved anonymity evidence, not production acceptance; see [the complete VM report, failures and experimental limits](VM_VALIDATION_2026-10-10.md).
+Focused v6 transport regressions cover wrong composite pins, missing identity,
+old versions, altered proofs, cross-handshake replay, low-order X25519,
+noncanonical ML-KEM inputs, AEAD replay/tampering, cancelled partial streams and
+segmented-document limits. The exact release-commit full suite, privileged tests,
+CI and browser/VM acceptance must be recorded separately; this checkpoint makes
+no unverified claim that every check has passed.
 
-Required before a production release:
+## Required release gates
 
-1. Independent cryptographic protocol and implementation review, with attention to layered cell framing, malicious relay behavior, transcript binding and secret lifetime.
-2. Passing CI on the exact release commit, sustained fuzz campaigns and enforced coverage thresholds. Do not lower thresholds to hide failures.
-3. Privileged Linux IPv4/IPv6/DNS leak and crash tests; install/upgrade/removal, state persistence, Windows key ACLs and recovery tests. Platform compilation does not prove kernel protection.
-4. A multi-region testnet with independent operators, recorded circuit success, partitions, authority convergence, clock changes, load, guard outages and churn. Frozen divergent authority views can currently stall service until another epoch.
-5. Resource-budget and scheduling evaluation. The current directory admits 512 relays and at most 16 authorities; scaling needs a reviewed paginated design. Fixed pacing has substantial bandwidth/throughput cost.
-6. Authenticated bootstrap distribution, key rotation/revocation, signed reproducible releases, incident response, abuse management and explicit operator ownership.
-7. Reproducible held-out traffic-analysis experiments with realistic passive/active adversaries and equivalent Tor configurations. Simulations and timing entropy do not establish anonymity.
+1. **Independent protocol and implementation audit:** mandatory dual-auth composition,
+   TLS exporter binding, malicious relays/authorities, canonical encodings,
+   downgrade prevention, nonce/sequence use, secret lifetime and coordinated
+   migration. External ACVP/KAT vectors and independent backend interoperability
+   are needed alongside implementation tests; algorithm names are not validation.
+2. **Exact-commit engineering verification:** full locked suite, strict lint, passing
+   CI, privileged isolation regressions, sustained fuzzing of KEX/proofs/cells/
+   documents/controls and honest coverage. Do not weaken gates to hide failures.
+3. **Installed-system Linux acceptance:** boot ordering, IPv4/IPv6/DNS/UDP leaks,
+   pre-existing sockets, IPC boundaries, crash/restart, suspend/resume, reload,
+   network changes, install/upgrade/removal and persistent-state recovery.
+   A fixture backend or packet-only probe does not certify the composed product.
+4. **Real multi-network operation:** independent operators, public egress IP hiding,
+   authority partitions/convergence, clock changes, guard outages/churn, prolonged
+   load and recovery. Single-host tests with zero PoW/private exits are lab-only.
+5. **Resource and anonymity measurements:** real v6 packet captures, adaptive
+   held-out fingerprinting, open-world false positives, flow correlation and
+   realistic protocol detection, with repeat runs/confidence intervals and fair
+   Tor baselines. Measure latency, CPU/RAM, bandwidth and scaling simultaneously;
+   mandatory cover and larger signatures/cells materially increase costs.
+6. **Distribution and operations:** authenticated bootstrap/migration ceremonies,
+   key rotation/retirement, signed reproducible releases and browser addon,
+   persistent release rollback/revocation policy, incident response, abuse
+   handling and explicit operator ownership.
+7. **Browser delivery:** signed addon activation, combined installed client/browser
+   packet acceptance, fingerprint consistency across supported devices and
+   maintained vendor security updates. Login/cookies, compromised endpoints and
+   external HTTPS/DNS PKI remain independent risks.
 
-## Packaging and operation
+## Supported scope and operational boundaries
 
-The Linux [release verifier](RELEASE_VERIFICATION.md) authenticates the signed
-checksum manifest against an exact release workflow/tag identity and stages a
-verified artifact copy before installation. Tagged publication now runs this gate
-against the actual signature bundles. Passing the gate establishes artifact
-origin and integrity, not independent protocol review or anonymity. It does not
-yet enforce a persistent release revocation/rollback policy. Unsigned local lab
-builds are explicitly outside the signed-release gate.
+The FYP target is **Linux, initially Ubuntu 24.04 LTS**. Strict kernel isolation
+on macOS/Windows is unimplemented and refused; cross-platform compilation is not
+leak protection. Onion services, universal endpoint protection, a public anonymity
+population and protection against a global observer are not established features.
 
-Release packaging now depends on the full reusable verification workflow and dependency audit at the release commit. Tagged releases remain explicitly marked as experimental prereleases. Distribution archives include a runtime argument example rather than an unsupported config.toml; the checksum manifest and binaries are signed by the release workflow. Passing these engineering gates does not substitute for independent review.
+The [release verifier](RELEASE_VERIFICATION.md) authenticates the release manifest
+against its workflow/tag identity and stages verified artifacts. That establishes
+origin/integrity, not anonymity or crypto certification. Tagged artifacts remain
+experimental prereleases. Local unsigned lab builds are outside this release gate.
 
-The Debian service uses a dynamic user and private persistent state. Configure `/etc/anonguard/runtime.env` with real endpoint-bound pins and a valid quorum; the daemon does not parse the former sample config.toml. Kernel isolation needs administrative namespace privileges and is a separate operational mode, not a privilege automatically granted by the packaged service.
+Packaged service roles do not automatically grant privileged namespace access.
+Configure real authenticated authority pins and quorum. Key storage needs durable
+administrator-controlled storage supporting its exclusive publication mechanism.
+Unix permissions are checked; Windows ACL acceptance remains unresolved.
 
-Empty, expired, conflicting or insufficient directories fail new circuit construction. Preserve and protect identity keys, authority vote journals, guard state and accepted-directory state. Corrupt state fails startup. Existing Unix signing keys must deny group/other access (`chmod 600`). Key storage requires a filesystem supporting hard links; unsupported storage fails startup rather than replacing a concurrent identity. Windows ACL verification remains a release gate. Test migrations in an isolated testnet before upgrading all participants together.
+Network namespaces isolate IP networking and abstract UNIX sockets, not host
+pathname sockets or inherited privileged descriptors. The
+[restricted headless launcher](LINUX_APP_CONTAINMENT.md) adds an immutable rootfs,
+private process/IPC/user namespaces, identity drop, descriptor sanitation and
+seccomp. Native whole-device routing trusts the administrator, kernel, transport
+UID and installed privileged services; it is not a compromised-root defense.
+Neither mode automatically provides browser identity anonymity.
 
-The current FYP delivery target is Linux (Ubuntu 24.04 LTS), with the restricted headless application profile. This narrows the deliverable; it does not satisfy the earlier universal-platform ambition. Native macOS and Windows providers are not implemented; strict isolation refuses these platforms. Full support for those platforms requires implementation and live IPv5/IPv6/DNS/UDP/crash validation. No deployed multi-region testnet or independent reviewer arrangement is recorded in this repository.
+Post-quantum network identity/KEX improves a specified cryptographic boundary.
+It does not upgrade destination web certificates, DoT PKI, Mozilla signing,
+operating-system trust, traffic-analysis resistance or endpoint security. No
+percentage of production readiness or complete quantum safety is inferred.
 
-Linux network namespaces isolate IP networking and abstract UNIX sockets, not pathname UNIX sockets in a shared filesystem. The namespace-only backend does not contain host brokers or inherited descriptors. The experimental [headless launcher](LINUX_APP_CONTAINMENT.md) adds a dedicated rootfs, private process/IPC/user namespaces, host identity drop, descriptor sanitation and a native syscall policy. This restricted profile is not universal GUI/IPC containment or production certification. Require its privileged acceptance results on the release commit and live validation on the deployment kernel. Direct packet probes alone do not establish IPC containment. See [network_namespaces(7)](https://man7.org/linux/man-pages/man7/network_namespaces.7.html).
+### In-progress v6 checkpoint (2026-10-10)
 
-Windows and macOS currently support application transport only. Public network readiness, Tor compatibility, onion services and protection against global traffic correlation are not certified or implemented by this work.
-
-## Opt-in padded sessions and native installation
-
-Protocol v5 adds authenticated privacy-profile negotiation, bounded multiplexed streams, independent bidirectional cover scheduling, a one-second DATA warm-up and bounded duration/volume tails. Native Linux Client/Volunteer tooling is packaged; VMs are optional. See [PADDED_SESSIONS.md](PADDED_SESSIONS.md) and [NATIVE_INSTALLATION.md](NATIVE_INSTALLATION.md). The whole-device firewall has not been activated or leak-tested on the user device. It is a distinct administrative profile with broader host trust than application/VM containment.
-
-The new offline trace evaluator performs defense-aware, group-held-out 1-NN evaluation. No collected dataset, deep-learning attack result, flow-correlation result or Tor benchmark is supplied. RMT and Poisson modes remain research options. New engineering coverage does not close independent crypto review, sustained fuzzing, deployed multi-region testing or traffic-analysis evidence gates.
+This checkpoint is published at the project owner’s request before remaining fixes. The real CLI daemon testnet currently fails: relay Tokio workers overflow their stacks during startup. The full regression run also found authority-error-message and legacy cell-size test failures; those two were edited but the complete suite has not been rerun after all changes. Do not deploy this checkpoint for production anonymity. Focused dual-signature, external ML-DSA vectors, guarded-link cancellation and session tests provide partial evidence only. Resume with the startup failure, then rerun formatting, strict Clippy, all targets and deployment-path checks before release.

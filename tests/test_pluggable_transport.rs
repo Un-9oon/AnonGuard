@@ -35,7 +35,7 @@ async fn real_obfs4_preserves_pinned_anonguard_tls() {
     std::fs::create_dir(&server_state).unwrap();
     std::fs::create_dir(&client_state).unwrap();
     let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let key = anonguard::crypto::identity::SigningKey::generate(&mut rand::rngs::OsRng);
     let pin = key.verifying_key().to_bytes();
     let (mut server, binding) = pt::server_binding(
         &binary,

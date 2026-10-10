@@ -5,7 +5,7 @@ Experimental authenticated onion-routing software written in Rust. No superiorit
 ## Supported protocol
 
 - One destination TCP stream through an authenticated randomized 3–8-hop circuit (CLI default range 3–5).
-- TLS 1.3 between adjacent nodes, mandatory `anonguard/5` ALPN, and Ed25519 identity pins from a signed directory.
+- TLS 1.3 between adjacent nodes, mandatory `anonguard/6` ALPN, hybrid X25519/ML-KEM-768 TLS key exchange, exporter-bound Ed25519 + ML-DSA-65 authentication, and composite identity pins from a signed directory.
 - Per-link circuit identifiers, hybrid X25519/ML-KEM-768 circuit handshakes, transcript-bound keys, and layered encryption.
 - Exact-snapshot directory quorum verification with persistent rollback/equivocation rejection.
 - Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
@@ -13,7 +13,7 @@ Experimental authenticated onion-routing software written in Rust. No superiorit
 - Linux application isolation in a loopback-only namespace, with a private Unix-socket bridge to the gateway outside it.
 - Optional obfs4 first-hop and authority-bootstrap transports, independently provisioned unlisted entry bridges, and supervised Linux PT services. See [deployment and limits](docs/design/PLUGGABLE_TRANSPORT.md). This does not establish resistance to any particular censor or traffic-correlation attack.
 
-The former multipath transport is retired. It lacked exit-side association and symmetric framing. This release provides single-path reliability; it does not transparently reconnect or replay application transactions after a failed exit. Onion services and browser fingerprint protection are outside the implemented protocol.
+The former multipath transport is retired. It lacked exit-side association and symmetric framing. This release provides single-path reliability; it does not transparently reconnect or replay application transactions after a failed exit. Onion services are outside the implemented protocol. The Firefox policy/extension workflow has separate acceptance gates and has not established Tor Browser equivalence.
 
 ## Build and verify
 
@@ -30,7 +30,7 @@ Privileged namespace checks run separately in Linux CI. Ordinary tests do not es
 
 ## Directory bootstrap
 
-Operators publish Ed25519 authority keys through an authenticated channel. Clients must pin each endpoint explicitly. Example shape (replace placeholders):
+Operators publish composite authority identity pins through an authenticated channel. Clients must pin each endpoint explicitly. Example shape (replace placeholders):
 
 ```sh
 anonguard-daemon --onion --listen 127.0.0.1:9050 \
@@ -41,7 +41,7 @@ anonguard-daemon --onion --listen 127.0.0.1:9050 \
 
 Authorities use `--authority --authority-id ID --listen ADDRESS --identity-key-path FILE` and the same pinned peer configuration. Relays use `--relay`, a persistent identity key, and pinned authorities; exit relays additionally use `--is-exit`. Relay listen addresses must be reachable and advertised accurately. No unauthenticated bootstrap is provided for anonymity use.
 
-The directory currently admits at most 512 relays; larger networks need a reviewed paginated directory design.
+The directory currently admits at most 512 relays; larger networks need a reviewed paginated directory design. Current v6 snapshots use compact signatures and authenticated bounded segmented documents.
 
 The CLI requires a quorum greater than two thirds of configured authorities. A single-authority test network provides no authority-compromise tolerance. Authorities freeze one snapshot per five-minute epoch; a conflicting view cannot be co-signed in that epoch. This is quorum-signed directory distribution, not a claim of a complete Byzantine consensus algorithm.
 
@@ -72,7 +72,7 @@ Windows and macOS support the application transport; they do not implement this 
 
 ## Migration and limits
 
-Protocol v5 is incompatible with earlier plaintext relay links and directory transport. Upgrade clients, relays and authorities together. The TLS version boundary prevents fallback to the old protocol. Legacy address-only guard state must be deliberately reset when moving to identity-pinned guards; corrupt state fails startup.
+Protocol v6 requires coordinated client, relay and authority migration. Classical 32-byte key files and previous guard/rollback formats are rejected; there is no automatic identity replacement or old-protocol fallback. Preserve legacy files and use the explicit [migration procedure](docs/POST_QUANTUM_MIGRATION.md).
 
 A directory snapshot must be current and quorum signed. New circuits fail after directory expiry. Existing circuits are bounded to one hour and are not silently migrated. Protect persistent authority votes, directory rollback state, guard state and identity keys from modification. Clock rollback, stale directories, unreachable guards and conflicting authority views may stop service rather than lower security requirements.
 

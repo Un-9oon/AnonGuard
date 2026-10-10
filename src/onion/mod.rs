@@ -6,6 +6,7 @@ pub mod cell;
 pub mod circuit;
 pub mod flow;
 pub mod link;
+pub mod link_cover;
 pub mod multipath;
 pub mod padding;
 pub mod session;
@@ -20,8 +21,8 @@ pub use circuit::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::identity::SigningKey as Ed25519SigningKey;
     use crate::onion::circuit::HopKeys;
-    use ed25519_dalek::SigningKey as Ed25519SigningKey;
     use ml_kem::{EncodedSizeUser, KemCore, MlKem768};
     use rand::rngs::OsRng;
     use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};

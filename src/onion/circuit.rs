@@ -1,7 +1,7 @@
 use subtle::ConstantTimeEq;
 // Layered Onion Circuit Routing, Multi-hop Key Agreement, and AEAD Peeling.
 //
-// Security: Every hop handshake is identity-bound via Ed25519 signature over the ephemeral
+// Security: Every hop handshake is identity-bound via hybrid signature over the ephemeral
 // X25519 public keys, linking DH to the relay's long-term identity key pinned in the consensus.
 // Data is protected by ChaCha20-Poly1305 AEAD for the addressed hop, and ChaCha20 stream cipher
 // for routing layers, using an explicit stateless nonce derived from the cell's sequence number.
@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use crate::crypto::identity::{Signature, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
@@ -172,7 +172,7 @@ impl HopCryptState {
 /// Key derivation function turning an X25519 + ML-KEM-768 hybrid secret into forward, backward, and MAC keys.
 /// Uses RFC 5869 HKDF-SHA256 with domain-separated info labels for key commitment.
 pub fn derive_hop_keys(shared_secret: &[u8]) -> Result<HopKeys, CircuitError> {
-    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v5")
+    derive_hop_keys_with_context(shared_secret, b"AnonGuard-offline-key-derivation-v6")
 }
 
 fn derive_hop_keys_with_context(
@@ -192,22 +192,22 @@ fn derive_hop_keys_with_context(
         backward_aead_key: [0u8; 32],
     };
 
-    hk.expand(b"AnonGuard-Forward-Key-v5", &mut keys.forward_key)
+    hk.expand(b"AnonGuard-Forward-Key-v6", &mut keys.forward_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Backward-Key-v5", &mut keys.backward_key)
+    hk.expand(b"AnonGuard-Backward-Key-v6", &mut keys.backward_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Forward-MAC-v5", &mut keys.forward_mac)
+    hk.expand(b"AnonGuard-Forward-MAC-v6", &mut keys.forward_mac)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
-    hk.expand(b"AnonGuard-Backward-MAC-v5", &mut keys.backward_mac)
+    hk.expand(b"AnonGuard-Backward-MAC-v6", &mut keys.backward_mac)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
     // Dedicated, full-entropy, single-purpose AEAD keys (v5). Previously the AEAD
     // path reused the first 16 bytes each of forward_key and forward_mac spliced
     // together, which halved effective entropy per source and reused MAC-domain
     // key material inside the cipher. These are independently HKDF-derived instead.
-    hk.expand(b"AnonGuard-Forward-AEAD-Key-v5", &mut keys.forward_aead_key)
+    hk.expand(b"AnonGuard-Forward-AEAD-Key-v6", &mut keys.forward_aead_key)
         .map_err(|_| CircuitError::KeyDerivationFailed)?;
     hk.expand(
-        b"AnonGuard-Backward-AEAD-Key-v5",
+        b"AnonGuard-Backward-AEAD-Key-v6",
         &mut keys.backward_aead_key,
     )
     .map_err(|_| CircuitError::KeyDerivationFailed)?;
@@ -535,12 +535,15 @@ pub fn build_create_cell(
     client_mlkem_pub: &EncapsulationKey<MlKem768Params>,
     hop_index: usize,
 ) -> Result<OnionCell, CircuitError> {
+    if hop_index >= MAX_HOPS {
+        return Err(CircuitError::HopIndexOutOfRange(hop_index));
+    }
     let mut payload = [0u8; 1 + 32 + 1184 + 4 + 1];
     payload[0] = hop_index as u8;
     payload[1..33].copy_from_slice(client_pub.as_bytes());
     payload[33..1217].copy_from_slice(client_mlkem_pub.as_bytes().as_slice());
     payload[1217..1221].copy_from_slice(&circuit_id.to_be_bytes());
-    payload[1221] = 3;
+    payload[1221] = 6;
     OnionCell::new(circuit_id, 0, CellCommand::Create, 0, &payload).map_err(CircuitError::General)
 }
 
@@ -554,7 +557,7 @@ pub fn handle_create_cell(
             create_cell.command
         )));
     }
-    if create_cell.length != 1222 || create_cell.payload[1221] != 3 {
+    if create_cell.length != 1222 || create_cell.payload[1221] != 6 {
         return Err(CircuitError::PayloadTooShort);
     }
     let context_id = u32::from_be_bytes(
@@ -578,6 +581,11 @@ pub fn handle_create_cell(
         })?;
     let client_mlkem_pub =
         EncapsulationKey::<MlKem768Params>::from_bytes((&client_mlkem_pub_bytes).into());
+    if !crate::crypto::hybrid_identity::mlkem768_public_is_canonical(&client_mlkem_pub_bytes) {
+        return Err(CircuitError::ParseError(
+            "Non-canonical ML-KEM public key".into(),
+        ));
+    }
 
     let relay_secret = EphemeralSecret::random_from_rng(OsRng);
     let relay_pub = X25519PublicKey::from(&relay_secret);
@@ -600,7 +608,7 @@ pub fn handle_create_cell(
 
     let identity_pub = relay_identity_key.verifying_key();
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v5");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v6");
     preimage.extend_from_slice(&context_id.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(identity_pub.as_bytes());
@@ -611,11 +619,13 @@ pub fn handle_create_cell(
     let handshake_sig: Signature = relay_identity_key.sign(&preimage);
     let keys = derive_hop_keys_with_context(&hybrid_secret[..], &preimage)?;
 
-    let mut created_payload = [0u8; 32 + 32 + 64 + 1088];
+    let mut created_payload = vec![0u8; 64 + crate::crypto::identity::PROOF_SIZE + 1088];
     created_payload[0..32].copy_from_slice(relay_pub.as_bytes());
     created_payload[32..64].copy_from_slice(identity_pub.as_bytes());
-    created_payload[64..128].copy_from_slice(&handshake_sig.to_bytes());
-    created_payload[128..1216].copy_from_slice(mlkem_ct.as_slice());
+    created_payload[64..64 + crate::crypto::identity::PROOF_SIZE]
+        .copy_from_slice(&handshake_sig.to_bytes());
+    created_payload[64 + crate::crypto::identity::PROOF_SIZE..]
+        .copy_from_slice(mlkem_ct.as_slice());
 
     let created_cell = OnionCell::new(
         create_cell.circuit_id,
@@ -642,6 +652,9 @@ pub fn process_created_cell(
     cid: u32,
     hop_index: usize,
 ) -> Result<HopKeys, CircuitError> {
+    if hop_index >= MAX_HOPS {
+        return Err(CircuitError::HopIndexOutOfRange(hop_index));
+    }
     if created_cell.command != CellCommand::Created && created_cell.command != CellCommand::Extended
     {
         return Err(CircuitError::ParseError(format!(
@@ -649,7 +662,7 @@ pub fn process_created_cell(
             created_cell.command
         )));
     }
-    if created_cell.length < 1216 {
+    if usize::from(created_cell.length) != 64 + crate::crypto::identity::PROOF_SIZE + 1088 {
         return Err(CircuitError::PayloadTooShort);
     }
 
@@ -660,10 +673,9 @@ pub fn process_created_cell(
         created_cell.payload[32..64].try_into().map_err(|_| {
             CircuitError::ParseError("Failed to extract relay identity public key".to_string())
         })?;
-    let sig_bytes: [u8; 64] = created_cell.payload[64..128].try_into().map_err(|_| {
-        CircuitError::ParseError("Failed to extract handshake signature".to_string())
-    })?;
-    let mlkem_ct_bytes: [u8; 1088] = created_cell.payload[128..1216]
+    let sig_bytes = &created_cell.payload[64..64 + crate::crypto::identity::PROOF_SIZE];
+    let mlkem_ct_bytes: [u8; 1088] = created_cell.payload
+        [64 + crate::crypto::identity::PROOF_SIZE..64 + crate::crypto::identity::PROOF_SIZE + 1088]
         .try_into()
         .map_err(|_| CircuitError::ParseError("Failed to extract ML-KEM ciphertext".to_string()))?;
 
@@ -680,12 +692,12 @@ pub fn process_created_cell(
     }
 
     let verifying_key = VerifyingKey::from_bytes(&relay_identity_pub_bytes).map_err(|e| {
-        CircuitError::ParseError(format!("Invalid relay Ed25519 identity key: {e}"))
+        CircuitError::ParseError(format!("Invalid relay composite identity key: {e}"))
     })?;
-    let signature = Signature::from_bytes(&sig_bytes);
+    let signature = Signature::from_bytes(sig_bytes);
 
     let mut preimage = Vec::with_capacity(22 + 32 + 32 + 1184 + 1088);
-    preimage.extend_from_slice(b"AnonGuard-handshake-v5");
+    preimage.extend_from_slice(b"AnonGuard-handshake-v6");
     preimage.extend_from_slice(&cid.to_be_bytes());
     preimage.push(hop_index as u8);
     preimage.extend_from_slice(&relay_identity_pub_bytes);
@@ -697,7 +709,7 @@ pub fn process_created_cell(
     verifying_key
         .verify_strict(&preimage, &signature)
         .map_err(|_| {
-            CircuitError::General("Handshake Ed25519 signature verification failed".to_string())
+            CircuitError::General("Handshake hybrid signature verification failed".to_string())
         })?;
 
     let relay_eph_pub = X25519PublicKey::from(relay_eph_pub_bytes);
@@ -728,6 +740,9 @@ pub fn encode_extend_payload(
     client_mlkem_pub: &EncapsulationKey<MlKem768Params>,
     hop_index: usize,
 ) -> Result<Vec<u8>, CircuitError> {
+    if hop_index >= MAX_HOPS {
+        return Err(CircuitError::HopIndexOutOfRange(hop_index));
+    }
     let host_bytes = next_host.as_bytes();
     if host_bytes.len() > 255 {
         return Err(CircuitError::General(
@@ -761,9 +776,18 @@ pub fn decode_extend_payload(
         return Err(CircuitError::PayloadTooShort);
     }
     let hop_index = payload[0] as usize;
+    if hop_index >= MAX_HOPS {
+        return Err(CircuitError::HopIndexOutOfRange(hop_index));
+    }
     let host_len = payload[1] as usize;
     if payload.len() < 1 + 1 + host_len + 2 + 32 + 1184 {
         return Err(CircuitError::PayloadTooShort);
+    }
+
+    if payload.len() != 1 + 1 + host_len + 2 + 32 + 1184 {
+        return Err(CircuitError::ParseError(
+            "Trailing EXTEND payload bytes".into(),
+        ));
     }
 
     let host = String::from_utf8(payload[2..2 + host_len].to_vec())
@@ -782,6 +806,11 @@ pub fn decode_extend_payload(
         .try_into()
         .map_err(|_| CircuitError::ParseError("Failed to read ML-KEM public key".to_string()))?;
     let client_mlkem_pub = EncapsulationKey::<MlKem768Params>::from_bytes((&mlkem_bytes).into());
+    if !crate::crypto::hybrid_identity::mlkem768_public_is_canonical(&mlkem_bytes) {
+        return Err(CircuitError::ParseError(
+            "Non-canonical ML-KEM public key".into(),
+        ));
+    }
 
     Ok((host, port, client_pub, client_mlkem_pub, hop_index))
 }
@@ -1010,7 +1039,7 @@ mod aead_key_derivation_tests {
         );
         assert!(
             tampered_result.is_err(),
-            "Tampered ML-KEM ciphertext must be rejected by Ed25519 signature verification"
+            "Tampered ML-KEM ciphertext must be rejected by hybrid signature verification"
         );
 
         // 3. Client and Relay derive matching keys in perform_client_relay_handshake

@@ -1,4 +1,4 @@
-use ed25519_dalek::SigningKey;
+use anonguard::crypto::identity::SigningKey;
 use rand::rngs::OsRng;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -102,18 +102,18 @@ async fn test_gossip_impersonation_rejection() {
         .unwrap();
     session.write_frame(b"GET_RELAY_LIST").await.unwrap();
     let relays: Vec<RelayDescriptor> =
-        serde_json::from_slice(&session.read_frame().await.unwrap()).unwrap();
+        serde_json::from_slice(&session.read_document().await.unwrap()).unwrap();
     let final_desc = relays
         .iter()
         .find(|r| r.node_id == "relay-target")
         .expect("A should still have the relay");
 
     assert_eq!(
-        final_desc.identity_key_ed25519, desc_k1.identity_key_ed25519,
+        final_desc.identity_pin, desc_k1.identity_pin,
         "A should have retained K1"
     );
     assert_ne!(
-        final_desc.identity_key_ed25519, desc_k2.identity_key_ed25519,
+        final_desc.identity_pin, desc_k2.identity_pin,
         "A should NOT have updated to K2"
     );
 }

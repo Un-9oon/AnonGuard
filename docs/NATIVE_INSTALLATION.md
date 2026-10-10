@@ -12,12 +12,12 @@ change; local helper tests do not certify a host's effective firewall.
 
 ## Provision a trusted network
 
-An independent operator must supply authority endpoints, public-key pins and a
+An independent operator must supply authority endpoints, composite identity pins and a
 quorum exceeding two thirds. Do not trust an unauthenticated downloaded relay
 list. The bootstrap is JSON:
 
 ```json
-{"version":1,"quorum":3,"authorities":[
+{"version":6,"quorum":3,"authorities":[
   {"id":"a1","address":"192.168.1.10:9100","public_key":"REPLACE_WITH_64_HEX_DIGITS"},
   {"id":"a2","address":"192.168.1.11:9100","public_key":"REPLACE_WITH_64_HEX_DIGITS"},
   {"id":"a3","address":"192.168.1.12:9100","public_key":"REPLACE_WITH_64_HEX_DIGITS"},

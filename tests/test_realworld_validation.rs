@@ -13,9 +13,9 @@
 //! Run with:
 //!   cargo test --test test_realworld_validation -- --nocapture
 
+use anonguard::crypto::identity::SigningKey;
 use anonguard::kernel::exit_policy::ExitPolicy;
 use anonguard::mesh::transport::SecureTransportSession;
-use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::net::IpAddr;
 use std::time::Duration;
@@ -450,8 +450,9 @@ async fn rw_b3_config_authority_key_wiring() {
     assert_eq!(cfg.directory_authorities.len(), 1);
 
     // Reconstruct a VerifyingKey from the stored bytes → must match original
-    let reconstructed = ed25519_dalek::VerifyingKey::from_bytes(&cfg.authority_identity_keys[0])
-        .expect("Stored bytes must deserialize to valid VerifyingKey");
+    let reconstructed =
+        anonguard::crypto::identity::VerifyingKey::from_bytes(&cfg.authority_identity_keys[0])
+            .expect("Stored bytes must deserialize to valid VerifyingKey");
     assert_eq!(
         reconstructed.to_bytes(),
         sk.verifying_key().to_bytes(),
@@ -462,7 +463,7 @@ async fn rw_b3_config_authority_key_wiring() {
     let pinned = cfg
         .authority_identity_keys
         .first() // auth_idx = 0
-        .and_then(|b| ed25519_dalek::VerifyingKey::from_bytes(b).ok());
+        .and_then(|b| anonguard::crypto::identity::VerifyingKey::from_bytes(b).ok());
     assert!(
         pinned.is_some(),
         "Index-aligned access must return Some for populated config"

@@ -1,10 +1,10 @@
-//! Fixed-size 2048-byte protocol cells carried inside authenticated TLS links.
+//! Version 6 fixed-size 8192-byte protocol cells carried inside authenticated TLS links.
 
 use rand::Rng;
 
-pub const ONION_CELL_SIZE: usize = 2048;
+pub const ONION_CELL_SIZE: usize = 8192;
 pub const HEADER_SIZE: usize = 61; // Includes 32 random padding bytes; not a Sphinx header.
-pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 1987 bytes
+pub const PAYLOAD_SIZE: usize = ONION_CELL_SIZE - HEADER_SIZE; // 8131 bytes
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

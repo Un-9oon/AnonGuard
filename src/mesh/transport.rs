@@ -1,7 +1,9 @@
 //! Authenticated Cryptographic Framing for Secure Node & Directory Transport.
 //!
-//! Replaces raw plaintext HTTP with Ephemeral X25519 Key Agreement and
-//! ChaCha20-Poly1305 AEAD streaming frames.
+//! AGDIR004 requires ephemeral X25519 + ML-KEM-768 key agreement, pinned
+//! Ed25519 AND ML-DSA-65 server authentication and bidirectional key confirmation.
+//! There is no unauthenticated or classical-only fallback. Application frames
+//! use ChaCha20-Poly1305 with direction-separated keys and monotonic counters.
 //!
 //! # Security (#8 fix)
 //! `write_frame` and `read_frame` previously used raw ChaCha20 with no authentication,
@@ -23,16 +25,19 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 
 /// Maximum allowed plaintext frame size (1 MiB).
 const MAX_FRAME_LEN: usize = 1024 * 1024;
-const VERSION: &[u8; 8] = b"AGDIR003";
+const VERSION: &[u8; 8] = b"AGDIR004";
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const PURPOSE: &[u8] = b"directory-transport-v4";
 
-fn transcript(client: &[u8; 32], server: &[u8; 32], identity: &[u8; 32], flag: u8) -> Vec<u8> {
-    let mut bytes = b"AnonGuard-directory-transport-v3/initiator/responder".to_vec();
-    bytes.extend_from_slice(VERSION);
+fn hybrid_transcript(client: &[u8], response: &[u8]) -> Vec<u8> {
+    let mut bytes = b"AnonGuard-directory-transport-v4/initiator/responder".to_vec();
     bytes.extend_from_slice(client);
-    bytes.extend_from_slice(server);
-    bytes.push(flag);
-    bytes.extend_from_slice(identity);
+    bytes.extend_from_slice(response);
     bytes
+}
+
+fn rejected(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
 }
 
 fn make_nonce(counter: u64) -> Nonce {
@@ -49,214 +54,222 @@ pub struct SecureTransportSession {
     send_counter: u64,
     /// Monotonic recv counter — encoded in nonce, wraps to Err on overflow.
     recv_counter: u64,
-    peer_verifying_key: Option<ed25519_dalek::VerifyingKey>,
+    peer_verifying_key: Option<crate::crypto::identity::VerifyingKey>,
+    peer_hybrid_key: Option<crate::crypto::hybrid_identity::HybridPublicKey>,
+    poisoned: bool,
 }
 
 impl SecureTransportSession {
-    /// Performs a client-side (initiator) ephemeral Diffie-Hellman handshake,
-    /// optionally verifying and enforcing a pinned Ed25519 server identity public key.
+    /// Mandatory hybrid directory handshake. Missing pins never enable fallback.
     pub async fn client_handshake(
-        mut stream: TcpStream,
-        pinned_key: Option<&ed25519_dalek::VerifyingKey>,
+        stream: TcpStream,
+        pinned: Option<&crate::crypto::identity::VerifyingKey>,
     ) -> io::Result<Self> {
-        use ed25519_dalek::{Signature, VerifyingKey};
+        let pinned = pinned.ok_or_else(|| rejected("Directory hybrid identity pin required"))?;
+        Self::client_handshake_hybrid_pin(stream, pinned.to_bytes()).await
+    }
 
-        let client_secret = EphemeralSecret::random_from_rng(OsRng);
-        let client_public = PublicKey::from(&client_secret);
+    pub async fn server_handshake(
+        stream: TcpStream,
+        key: Option<&crate::crypto::identity::SigningKey>,
+    ) -> io::Result<Self> {
+        let key = key.ok_or_else(|| rejected("Directory hybrid signing identity required"))?;
+        Self::server_handshake_hybrid(stream, key.hybrid()).await
+    }
 
-        stream.write_all(VERSION).await?;
-        // Send client ephemeral public key (32 bytes)
-        stream.write_all(client_public.as_bytes()).await?;
+    pub fn peer_verifying_key(&self) -> Option<crate::crypto::identity::VerifyingKey> {
+        self.peer_verifying_key
+    }
+    pub fn peer_hybrid_key(&self) -> Option<&crate::crypto::hybrid_identity::HybridPublicKey> {
+        self.peer_hybrid_key.as_ref()
+    }
 
-        // Read server ephemeral public key (32 bytes)
-        let mut server_pub_bytes = [0u8; 32];
-        stream.read_exact(&mut server_pub_bytes).await?;
-        let server_public = PublicKey::from(server_pub_bytes);
+    pub async fn client_handshake_hybrid(
+        stream: TcpStream,
+        pinned: &crate::crypto::hybrid_identity::HybridPublicKey,
+    ) -> io::Result<Self> {
+        Self::client_handshake_hybrid_pin(stream, pinned.fingerprint()).await
+    }
 
-        // Read authentication header byte
-        let mut auth_flag = [0u8; 1];
-        stream.read_exact(&mut auth_flag).await?;
-
-        let mut peer_verifying_key = None;
-
-        if auth_flag[0] == 1 {
-            // Server provided Ed25519 cryptographic identity proof
-            let mut server_id_bytes = [0u8; 32];
-            stream.read_exact(&mut server_id_bytes).await?;
-            let server_verifying_key =
-                VerifyingKey::from_bytes(&server_id_bytes).map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Invalid server Ed25519 public key in transport handshake",
-                    )
-                })?;
-
-            let mut sig_bytes = [0u8; 64];
-            stream.read_exact(&mut sig_bytes).await?;
-            let signature = Signature::from_bytes(&sig_bytes);
-
-            // Verify signature over client_ephemeral_pub || server_ephemeral_pub
-            let signed_data = transcript(
-                client_public.as_bytes(),
-                server_public.as_bytes(),
-                &server_id_bytes,
-                1,
-            );
-
-            server_verifying_key
-                .verify_strict(&signed_data, &signature)
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Server Ed25519 handshake signature verification failed (MITM detected)",
-                    )
-                })?;
-
-            if let Some(pinned) = pinned_key {
-                if &server_verifying_key != pinned {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "Server Ed25519 key does not match pinned Directory Authority identity",
-                    ));
-                }
+    pub async fn client_handshake_hybrid_pin(
+        mut stream: TcpStream,
+        pinned: [u8; 32],
+    ) -> io::Result<Self> {
+        use crate::crypto::hybrid_identity::{HybridPublicKey, PUBLIC_KEY_SIZE, SIGNATURE_SIZE};
+        use ml_kem::{kem::Decapsulate, EncodedSizeUser, KemCore, MlKem768};
+        if pinned == [0; 32] {
+            return Err(rejected("Zero hybrid identity pin"));
+        }
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            let secret = EphemeralSecret::random_from_rng(OsRng);
+            let public = PublicKey::from(&secret);
+            let (kem_secret, kem_public) = MlKem768::generate(&mut OsRng);
+            let mut hello = VERSION.to_vec();
+            hello.extend_from_slice(public.as_bytes());
+            hello.extend_from_slice(kem_public.as_bytes().as_slice());
+            stream.write_all(&hello).await?;
+            let mut response = vec![0u8; 8 + 32 + 1088 + PUBLIC_KEY_SIZE];
+            stream.read_exact(&mut response).await?;
+            if &response[..8] != VERSION {
+                return Err(rejected("Directory protocol downgrade/version mismatch"));
             }
+            let identity = HybridPublicKey::decode(&response[1128..])?;
+            if identity.fingerprint() != pinned {
+                return Err(rejected("Directory composite identity pin mismatch"));
+            }
+            let mut proof = vec![0u8; SIGNATURE_SIZE];
+            stream.read_exact(&mut proof).await?;
+            let mut context = hybrid_transcript(&hello, &response);
+            identity.verify(PURPOSE, &context, &proof)?;
+            context.extend_from_slice(&proof);
+            let server_public = PublicKey::from(
+                <[u8; 32]>::try_from(&response[8..40]).map_err(|_| rejected("Malformed KEX"))?,
+            );
+            let dh = secret.diffie_hellman(&server_public);
+            if !dh.was_contributory() {
+                return Err(rejected("Non-contributory directory KEX"));
+            }
+            let ciphertext: [u8; 1088] = response[40..1128]
+                .try_into()
+                .map_err(|_| rejected("Malformed KEM"))?;
+            let mut kem = kem_secret
+                .decapsulate(&ml_kem::Ciphertext::<MlKem768>::from(ciphertext))
+                .map_err(|_| rejected("Directory KEM failed"))?;
+            let mut kem_bytes = zeroize::Zeroizing::new([0u8; 32]);
+            kem_bytes.copy_from_slice(kem.as_slice());
+            zeroize::Zeroize::zeroize(kem.as_mut_slice());
+            let mut shared = zeroize::Zeroizing::new([0u8; 64]);
+            shared[..32].copy_from_slice(dh.as_bytes());
+            shared[32..].copy_from_slice(kem_bytes.as_ref());
+            let mut session =
+                Self::from_hybrid_keys(stream, &shared[..], true, &context, Some(identity))?;
+            session.write_frame(b"AGDIR004/client-confirm").await?;
+            if session.read_frame().await? != b"AGDIR004/server-confirm" {
+                return Err(rejected("Directory server confirmation failed"));
+            }
+            Ok(session)
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Hybrid directory handshake timed out",
+            )
+        })?
+    }
 
-            peer_verifying_key = Some(server_verifying_key);
-        } else if auth_flag[0] != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid transport authentication flag",
-            ));
-        } else if pinned_key.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Server is unauthenticated, but pinned Directory Authority identity is required",
-            ));
-        }
+    pub async fn server_handshake_hybrid(
+        mut stream: TcpStream,
+        key: &crate::crypto::hybrid_identity::HybridSigningKey,
+    ) -> io::Result<Self> {
+        use ml_kem::{
+            kem::{Encapsulate, EncapsulationKey},
+            EncodedSizeUser, MlKem768Params,
+        };
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+            let mut version = [0u8; 8];
+            stream.read_exact(&mut version).await?;
+            if &version != VERSION {
+                return Err(rejected("Directory protocol downgrade/version mismatch"));
+            }
+            let mut hello = vec![0u8; 8 + 32 + 1184];
+            hello[..8].copy_from_slice(&version);
+            stream.read_exact(&mut hello[8..]).await?;
+            let client_public = PublicKey::from(
+                <[u8; 32]>::try_from(&hello[8..40]).map_err(|_| rejected("Malformed KEX"))?,
+            );
+            let secret = EphemeralSecret::random_from_rng(OsRng);
+            let public = PublicKey::from(&secret);
+            let dh = secret.diffie_hellman(&client_public);
+            if !dh.was_contributory() {
+                return Err(rejected("Non-contributory directory KEX"));
+            }
+            let encoded: [u8; 1184] = hello[40..]
+                .try_into()
+                .map_err(|_| rejected("Malformed KEM"))?;
+            if !crate::crypto::hybrid_identity::mlkem768_public_is_canonical(&encoded) {
+                return Err(rejected("Noncanonical ML-KEM encapsulation key"));
+            }
+            let kem_public = EncapsulationKey::<MlKem768Params>::from_bytes((&encoded).into());
+            let (ciphertext, mut kem) = kem_public
+                .encapsulate(&mut OsRng)
+                .map_err(|_| rejected("Directory KEM failed"))?;
+            let mut kem_bytes = zeroize::Zeroizing::new([0u8; 32]);
+            kem_bytes.copy_from_slice(kem.as_slice());
+            zeroize::Zeroize::zeroize(kem.as_mut_slice());
+            let identity = key.public_key();
+            let mut response = VERSION.to_vec();
+            response.extend_from_slice(public.as_bytes());
+            response.extend_from_slice(ciphertext.as_slice());
+            response.extend_from_slice(identity.encode());
+            let mut context = hybrid_transcript(&hello, &response);
+            let proof = key.sign(PURPOSE, &context)?;
+            stream.write_all(&response).await?;
+            stream.write_all(&proof).await?;
+            context.extend_from_slice(&proof);
+            let mut shared = zeroize::Zeroizing::new([0u8; 64]);
+            shared[..32].copy_from_slice(dh.as_bytes());
+            shared[32..].copy_from_slice(kem_bytes.as_ref());
+            let mut session = Self::from_hybrid_keys(stream, &shared[..], false, &context, None)?;
+            if session.read_frame().await? != b"AGDIR004/client-confirm" {
+                return Err(rejected("Directory client confirmation failed"));
+            }
+            session.write_frame(b"AGDIR004/server-confirm").await?;
+            Ok(session)
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Hybrid directory handshake timed out",
+            )
+        })?
+    }
 
-        let shared_secret = client_secret.diffie_hellman(&server_public);
-        if !shared_secret.was_contributory() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Non-contributory transport key",
-            ));
-        }
-        let identity = peer_verifying_key.map(|k| k.to_bytes()).unwrap_or([0; 32]);
-        let context = transcript(
-            client_public.as_bytes(),
-            server_public.as_bytes(),
-            &identity,
-            auth_flag[0],
-        );
-
-        // Derive client_send and client_recv AEAD keys
-        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), true, &context);
-
-        let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
-            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
-        let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
-            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
-
+    fn from_hybrid_keys(
+        stream: TcpStream,
+        shared: &[u8],
+        client: bool,
+        context: &[u8],
+        peer: Option<crate::crypto::hybrid_identity::HybridPublicKey>,
+    ) -> io::Result<Self> {
+        let (send, recv) = derive_transport_keys(shared, client, context);
+        let send = zeroize::Zeroizing::new(send);
+        let recv = zeroize::Zeroizing::new(recv);
+        let peer_verifying_key = peer
+            .as_ref()
+            .map(|key| crate::crypto::identity::VerifyingKey::from_bytes(&key.fingerprint()))
+            .transpose()?;
         Ok(Self {
             stream,
-            send_cipher,
-            recv_cipher,
+            send_cipher: ChaCha20Poly1305::new_from_slice(send.as_ref())
+                .map_err(|_| rejected("AEAD key failed"))?,
+            recv_cipher: ChaCha20Poly1305::new_from_slice(recv.as_ref())
+                .map_err(|_| rejected("AEAD key failed"))?,
             send_counter: 0,
             recv_counter: 0,
             peer_verifying_key,
+            peer_hybrid_key: peer,
+            poisoned: false,
         })
-    }
-
-    /// Performs a server-side (listener) ephemeral Diffie-Hellman handshake,
-    /// optionally signing the exchange using the server's long-term Ed25519 signing key.
-    pub async fn server_handshake(
-        mut stream: TcpStream,
-        signing_key: Option<&ed25519_dalek::SigningKey>,
-    ) -> io::Result<Self> {
-        use ed25519_dalek::Signer;
-
-        let mut version = [0u8; 8];
-        stream.read_exact(&mut version).await?;
-        if &version != VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Directory protocol version mismatch",
-            ));
-        }
-        // Read client ephemeral public key (32 bytes)
-        let mut client_pub_bytes = [0u8; 32];
-        stream.read_exact(&mut client_pub_bytes).await?;
-        let client_public = PublicKey::from(client_pub_bytes);
-
-        let server_secret = EphemeralSecret::random_from_rng(OsRng);
-        let server_public = PublicKey::from(&server_secret);
-
-        // Send server ephemeral public key (32 bytes)
-        stream.write_all(server_public.as_bytes()).await?;
-
-        if let Some(key) = signing_key {
-            // Send auth_flag = 1, verifying key (32 bytes), signature (64 bytes)
-            stream.write_all(&[1u8]).await?;
-            let vk = key.verifying_key();
-            stream.write_all(vk.as_bytes()).await?;
-
-            let signed_data = transcript(
-                client_public.as_bytes(),
-                server_public.as_bytes(),
-                vk.as_bytes(),
-                1,
-            );
-            let sig = key.sign(&signed_data);
-            stream.write_all(&sig.to_bytes()).await?;
-        } else {
-            // Unauthenticated mode
-            stream.write_all(&[0u8]).await?;
-        }
-
-        let shared_secret = server_secret.diffie_hellman(&client_public);
-        if !shared_secret.was_contributory() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Non-contributory transport key",
-            ));
-        }
-        let identity = signing_key
-            .map(|k| k.verifying_key().to_bytes())
-            .unwrap_or([0; 32]);
-        let context = transcript(
-            client_public.as_bytes(),
-            server_public.as_bytes(),
-            &identity,
-            u8::from(signing_key.is_some()),
-        );
-
-        // Derive server_send and server_recv AEAD keys (inverted roles)
-        let (send_key, recv_key) = derive_transport_keys(shared_secret.as_bytes(), false, &context);
-
-        let send_cipher = ChaCha20Poly1305::new_from_slice(&send_key)
-            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
-        let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
-            .map_err(|e| io::Error::other(format!("AEAD key error: {e}")))?;
-
-        Ok(Self {
-            stream,
-            send_cipher,
-            recv_cipher,
-            send_counter: 0,
-            recv_counter: 0,
-            peer_verifying_key: None,
-        })
-    }
-
-    /// Returns the verified Ed25519 public key of the remote peer (if authenticated).
-    pub fn peer_verifying_key(&self) -> Option<ed25519_dalek::VerifyingKey> {
-        self.peer_verifying_key
     }
 
     /// Encrypts and writes a length-prefixed AEAD-authenticated frame.
     ///
     /// Wire format: 4-byte BE length of (ciphertext || 16-byte tag) || ciphertext || tag.
     pub async fn write_frame(&mut self, payload: &[u8]) -> io::Result<()> {
+        if self.poisoned {
+            return Err(rejected("Directory session is poisoned; reconnect"));
+        }
+        self.poisoned = true;
+        let result = self.write_frame_inner(payload).await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    async fn write_frame_inner(&mut self, payload: &[u8]) -> io::Result<()> {
         if payload.len() > MAX_FRAME_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -291,6 +304,18 @@ impl SecureTransportSession {
     ///
     /// Returns `InvalidData` if authentication fails — the caller must close the connection.
     pub async fn read_frame(&mut self) -> io::Result<Vec<u8>> {
+        if self.poisoned {
+            return Err(rejected("Directory session is poisoned; reconnect"));
+        }
+        self.poisoned = true;
+        let result = self.read_frame_inner().await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    async fn read_frame_inner(&mut self) -> io::Result<Vec<u8>> {
         let mut len_bytes = [0u8; 4];
         tokio::time::timeout(
             tokio::time::Duration::from_secs(15),
@@ -345,13 +370,91 @@ impl SecureTransportSession {
         Ok(plaintext)
     }
 
+    /// Authenticated bounded document envelope; ordinary control RPCs use frames.
+    pub async fn write_document(&mut self, document: &[u8]) -> io::Result<()> {
+        if self.poisoned {
+            return Err(rejected("Directory session is poisoned; reconnect"));
+        }
+        self.poisoned = true;
+        let result = self.write_document_inner(document).await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    async fn write_document_inner(&mut self, document: &[u8]) -> io::Result<()> {
+        if document.is_empty() || document.len() > 6 * MAX_FRAME_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Directory document size out of bounds",
+            ));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut header = b"AGDOC006".to_vec();
+            header.extend_from_slice(&(document.len() as u32).to_be_bytes());
+            self.write_frame_inner(&header).await?;
+            for chunk in document.chunks(MAX_FRAME_LEN) {
+                self.write_frame_inner(chunk).await?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Directory document write timed out",
+            )
+        })?
+    }
+
+    pub async fn read_document(&mut self) -> io::Result<Vec<u8>> {
+        if self.poisoned {
+            return Err(rejected("Directory session is poisoned; reconnect"));
+        }
+        self.poisoned = true;
+        let result = self.read_document_inner().await;
+        if result.is_ok() {
+            self.poisoned = false;
+        }
+        result
+    }
+
+    async fn read_document_inner(&mut self) -> io::Result<Vec<u8>> {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let header = self.read_frame_inner().await?;
+            if header.len() != 12 || &header[..8] != b"AGDOC006" {
+                return Err(rejected("Directory document envelope required"));
+            }
+            let total = u32::from_be_bytes(
+                header[8..]
+                    .try_into()
+                    .map_err(|_| rejected("Malformed document header"))?,
+            ) as usize;
+            if total == 0 || total > 6 * MAX_FRAME_LEN {
+                return Err(rejected("Directory document size out of bounds"));
+            }
+            let mut document = Vec::with_capacity(total);
+            while document.len() < total {
+                let chunk = self.read_frame_inner().await?;
+                if chunk.len() != MAX_FRAME_LEN.min(total - document.len()) {
+                    return Err(rejected("Directory document chunk length mismatch"));
+                }
+                document.extend_from_slice(&chunk);
+            }
+            Ok(document)
+        })
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Directory document read timed out"))?
+    }
+
     pub fn into_inner(self) -> TcpStream {
         self.stream
     }
 }
 
 fn derive_transport_keys(
-    shared_secret: &[u8; 32],
+    shared_secret: &[u8],
     is_client: bool,
     context: &[u8],
 ) -> ([u8; 32], [u8; 32]) {
@@ -363,12 +466,12 @@ fn derive_transport_keys(
 
     let mut k_c2s = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
-    hk.expand(b"AnonGuard-Client-To-Server-v3-HKDF", &mut k_c2s)
+    hk.expand(b"AnonGuard-Client-To-Server-v4-HKDF", &mut k_c2s)
         .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     let mut k_s2c = [0u8; 32];
     // SAFETY: HKDF-Expand into a 32-byte buffer using Sha256 cannot fail because 32 bytes is well within the 8160-byte maximum output limit (255 * 32).
-    hk.expand(b"AnonGuard-Server-To-Client-v3-HKDF", &mut k_s2c)
+    hk.expand(b"AnonGuard-Server-To-Client-v4-HKDF", &mut k_s2c)
         .expect("safe: HKDF-Expand only fails above 8160 bytes output for SHA-256; requesting 32-byte symmetric key");
 
     if is_client {
@@ -379,305 +482,117 @@ fn derive_transport_keys(
 }
 
 #[cfg(test)]
-mod tests {
+mod hybrid_transport_tests {
     use super::*;
-    use tokio::net::TcpListener;
-
-    #[tokio::test]
-    async fn test_secure_transport_e2e_encryption() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server_handle = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut session = SecureTransportSession::server_handshake(stream, None)
-                .await
-                .unwrap();
-            let incoming = session.read_frame().await.unwrap();
-            assert_eq!(incoming.as_slice(), b"SECRET_REGISTRATION_PACKET");
-
-            session
-                .write_frame(b"REGISTRATION_CONFIRMED_OK")
-                .await
-                .unwrap();
-        });
-
-        let client_stream = TcpStream::connect(addr).await.unwrap();
-        let mut client_session = SecureTransportSession::client_handshake(client_stream, None)
-            .await
-            .unwrap();
-
-        client_session
-            .write_frame(b"SECRET_REGISTRATION_PACKET")
-            .await
-            .unwrap();
-        let reply = client_session.read_frame().await.unwrap();
-        assert_eq!(reply.as_slice(), b"REGISTRATION_CONFIRMED_OK");
-
-        server_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_secure_transport_authenticated_key_pinning() {
-        use ed25519_dalek::SigningKey;
-        use rand::rngs::OsRng;
-
-        let auth_signing_key = SigningKey::generate(&mut OsRng);
-        let auth_verifying_key = auth_signing_key.verifying_key();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server_key_clone = auth_signing_key.clone();
-        let server_handle = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut session =
-                SecureTransportSession::server_handshake(stream, Some(&server_key_clone))
-                    .await
-                    .unwrap();
-            let incoming = session.read_frame().await.unwrap();
-            assert_eq!(incoming.as_slice(), b"GET_CONSENSUS");
-            session.write_frame(b"SIGNED_CONSENSUS_DATA").await.unwrap();
-        });
-
-        let client_stream = TcpStream::connect(addr).await.unwrap();
-        // Client connects with pinned authority key
-        let mut client_session =
-            SecureTransportSession::client_handshake(client_stream, Some(&auth_verifying_key))
-                .await
-                .unwrap();
-
-        client_session.write_frame(b"GET_CONSENSUS").await.unwrap();
-        let reply = client_session.read_frame().await.unwrap();
-        assert_eq!(reply.as_slice(), b"SIGNED_CONSENSUS_DATA");
-
-        server_handle.await.unwrap();
-
-        // Test MITM rejection: client expects a different pinned key
-        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr2 = listener2.local_addr().unwrap();
-
-        let server_handle2 = tokio::spawn(async move {
-            let (stream, _) = listener2.accept().await.unwrap();
-            let _ = SecureTransportSession::server_handshake(stream, Some(&auth_signing_key)).await;
-        });
-
-        let wrong_key = SigningKey::generate(&mut OsRng).verifying_key();
-        let client_stream2 = TcpStream::connect(addr2).await.unwrap();
-        let client_res =
-            SecureTransportSession::client_handshake(client_stream2, Some(&wrong_key)).await;
-        assert!(client_res.is_err());
-        server_handle2.await.unwrap();
-    }
-
-    /// Verify that bit-flipping a ciphertext frame is rejected by AEAD authentication.
-    #[tokio::test]
-    async fn test_aead_rejects_tampered_frame() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Server: complete the handshake, then send a valid-length frame with corrupted ciphertext
-        let server_handle = tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt;
-            let (stream, _) = listener.accept().await.unwrap();
-            // Complete real handshake so client_handshake() succeeds
-            let mut session = SecureTransportSession::server_handshake(stream, None)
-                .await
-                .unwrap();
-
-            // Encrypt a normal frame to get a valid-length ciphertext...
-            let msg = b"hello";
-            session.write_frame(msg).await.unwrap();
-
-            // ...then extract the underlying stream and send a second frame that is
-            // identical-length but completely corrupted bytes, bypassing the AEAD layer
-            let mut raw_stream = session.into_inner();
-            // Frame 2: same length as a 5-byte plaintext (5 + 16 = 21 bytes ciphertext)
-            let ct_len: u32 = 21;
-            raw_stream.write_all(&ct_len.to_be_bytes()).await.unwrap();
-            raw_stream.write_all(&[0xDE; 21]).await.unwrap();
-            raw_stream.flush().await.unwrap();
-        });
-
-        let client_stream = TcpStream::connect(addr).await.unwrap();
-        let mut client_session = SecureTransportSession::client_handshake(client_stream, None)
-            .await
-            .unwrap();
-
-        // First frame should decrypt correctly
-        let first = client_session.read_frame().await.unwrap();
-        assert_eq!(first.as_slice(), b"hello");
-
-        // Second frame has corrupted ciphertext — must be rejected with InvalidData
-        let result = client_session.read_frame().await;
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-
-        server_handle.await.unwrap();
-    }
-}
-
-#[cfg(test)]
-mod transport_boundary_tests {
-    use super::*;
-    use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+    use crate::crypto::hybrid_identity::HybridSigningKey;
     use tokio::net::TcpListener;
 
     async fn pair() -> (SecureTransportSession, SecureTransportSession) {
+        let key = HybridSigningKey::generate();
+        let pin = key.public_key();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
-        let client = tokio::spawn(async move {
-            SecureTransportSession::client_handshake(
-                TcpStream::connect(endpoint).await.unwrap(),
-                None,
+        let server = tokio::spawn(async move {
+            SecureTransportSession::server_handshake_hybrid(
+                listener.accept().await.unwrap().0,
+                &key,
             )
             .await
             .unwrap()
         });
-        let (socket, _) = listener.accept().await.unwrap();
-        let server = SecureTransportSession::server_handshake(socket, None)
-            .await
-            .unwrap();
-        (client.await.unwrap(), server)
+        let client = SecureTransportSession::client_handshake_hybrid(
+            TcpStream::connect(endpoint).await.unwrap(),
+            &pin,
+        )
+        .await
+        .unwrap();
+        (client, server.await.unwrap())
     }
 
     #[tokio::test]
-    async fn peer_handshake_corruption_and_non_contributory_keys_are_rejected() {
-        for case in 0..6 {
-            let identity = SigningKey::from_bytes(&[73; 32]);
-            let pin = identity.verifying_key();
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let endpoint = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut hello = [0; 40];
-                socket.read_exact(&mut hello).await.unwrap();
-                assert_eq!(&hello[..8], VERSION);
-                let ephemeral = if case >= 4 { [0; 32] } else { [9; 32] };
-                socket.write_all(&ephemeral).await.unwrap();
-                let flag = match case {
-                    0 => 2,
-                    1 | 4 => 0,
-                    _ => 1,
-                };
-                socket.write_all(&[flag]).await.unwrap();
-                if flag == 1 {
-                    let public = if case == 2 {
-                        (0..=255)
-                            .map(|byte| [byte; 32])
-                            .find(|bytes| VerifyingKey::from_bytes(bytes).is_err())
-                            .unwrap()
-                    } else {
-                        identity.verifying_key().to_bytes()
-                    };
-                    socket.write_all(&public).await.unwrap();
-                    let signature = if case == 5 {
-                        let client: [u8; 32] = hello[8..].try_into().unwrap();
-                        identity
-                            .sign(&transcript(&client, &ephemeral, &public, 1))
-                            .to_bytes()
-                    } else {
-                        [0; 64]
-                    };
-                    socket.write_all(&signature).await.unwrap();
-                }
-            });
-            let socket = TcpStream::connect(endpoint).await.unwrap();
-            let pinned = if case == 1 || case == 5 {
-                Some(&pin)
-            } else {
-                None
-            };
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                SecureTransportSession::client_handshake(socket, pinned),
+    async fn hybrid_authenticated_confirmed_frames() {
+        let (mut client, mut server) = pair().await;
+        assert!(client.peer_hybrid_key().is_some());
+        assert!(client.peer_verifying_key().is_some());
+        assert_eq!(client.send_counter, 1);
+        assert_eq!(server.recv_counter, 1);
+        client.write_frame(b"GET_CONSENSUS").await.unwrap();
+        assert_eq!(server.read_frame().await.unwrap(), b"GET_CONSENSUS");
+        server.write_frame(b"SIGNED_CONSENSUS").await.unwrap();
+        assert_eq!(client.read_frame().await.unwrap(), b"SIGNED_CONSENSUS");
+    }
+
+    #[tokio::test]
+    async fn hybrid_wrong_composite_pin_refused() {
+        let key = HybridSigningKey::generate();
+        let wrong = HybridSigningKey::generate().public_key();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            SecureTransportSession::server_handshake_hybrid(
+                listener.accept().await.unwrap().0,
+                &key,
             )
             .await
-            .unwrap();
-            let error = result.err().expect("Malformed handshake was accepted");
-            assert_eq!(
-                error.kind(),
-                if case == 0 || case == 2 {
-                    io::ErrorKind::InvalidData
-                } else {
-                    io::ErrorKind::PermissionDenied
-                }
-            );
-            server.await.unwrap();
-        }
+            .is_err()
+        });
+        assert!(SecureTransportSession::client_handshake_hybrid(
+            TcpStream::connect(endpoint).await.unwrap(),
+            &wrong
+        )
+        .await
+        .is_err());
+        assert!(server.await.unwrap());
     }
 
     #[tokio::test]
-    async fn server_rejects_old_protocol_and_zero_client_public_key() {
-        for old_version in [true, false] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut client = TcpStream::connect(listener.local_addr().unwrap())
-                .await
-                .unwrap();
-            let (socket, _) = listener.accept().await.unwrap();
-            client
-                .write_all(if old_version { b"AGDIR002" } else { VERSION })
-                .await
-                .unwrap();
-            if !old_version {
-                client.write_all(&[0; 32]).await.unwrap();
-            }
-            let error = SecureTransportSession::server_handshake(socket, None)
-                .await
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.kind(),
-                if old_version {
-                    io::ErrorKind::InvalidData
-                } else {
-                    io::ErrorKind::PermissionDenied
-                }
-            );
-        }
+    async fn legacy_version_and_unpinned_mode_refused() {
+        let key = HybridSigningKey::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            SecureTransportSession::server_handshake_hybrid(
+                listener.accept().await.unwrap().0,
+                &key,
+            )
+            .await
+            .is_err()
+        });
+        let mut socket = TcpStream::connect(endpoint).await.unwrap();
+        socket.write_all(b"AGDIR003").await.unwrap();
+        assert!(server.await.unwrap());
+        assert!(SecureTransportSession::client_handshake(socket, None)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
-    async fn frame_size_rejection_preserves_fresh_session_and_empty_frames_work() {
+    async fn hybrid_low_order_client_kex_refused() {
+        let key = HybridSigningKey::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            SecureTransportSession::server_handshake_hybrid(
+                listener.accept().await.unwrap().0,
+                &key,
+            )
+            .await
+            .is_err()
+        });
+        let mut socket = TcpStream::connect(endpoint).await.unwrap();
+        let mut hello = vec![0; 8 + 32 + 1184];
+        hello[..8].copy_from_slice(VERSION);
+        socket.write_all(&hello).await.unwrap();
+        assert!(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn ciphertext_tampering_and_replay_refused() {
         let (mut client, mut server) = pair().await;
-        assert_eq!(
-            server
-                .write_frame(&vec![0; MAX_FRAME_LEN + 1])
-                .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert_eq!(server.send_counter, 0);
-        server.write_frame(b"").await.unwrap();
-        assert!(client.read_frame().await.unwrap().is_empty());
-        client.write_frame(b"still synchronized").await.unwrap();
-        assert_eq!(server.read_frame().await.unwrap(), b"still synchronized");
-        for length in [0, 15, (MAX_FRAME_LEN + 17) as u32, u32::MAX] {
-            let (mut client, server) = pair().await;
-            let mut raw = server.into_inner();
-            raw.write_all(&length.to_be_bytes()).await.unwrap();
-            assert_eq!(
-                client.read_frame().await.unwrap_err().kind(),
-                io::ErrorKind::InvalidData
-            );
-            assert_eq!(client.recv_counter, 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn authenticated_frames_cannot_wrap_either_nonce_counter() {
-        let (mut client, mut server) = pair().await;
-        server.send_counter = u64::MAX - 1;
-        client.recv_counter = u64::MAX - 1;
-        server.write_frame(b"last usable nonce").await.unwrap();
-        assert_eq!(client.read_frame().await.unwrap(), b"last usable nonce");
-        assert!(server.write_frame(b"must not wrap").await.is_err());
-        assert_eq!(server.send_counter, u64::MAX);
+        let counter = server.send_counter;
         let ciphertext = server
             .send_cipher
-            .encrypt(&make_nonce(u64::MAX), b"authenticated overflow".as_ref())
+            .encrypt(&make_nonce(counter), b"owned".as_slice())
             .unwrap();
         server
             .stream
@@ -685,28 +600,172 @@ mod transport_boundary_tests {
             .await
             .unwrap();
         server.stream.write_all(&ciphertext).await.unwrap();
-        assert!(client.read_frame().await.is_err());
-        assert_eq!(client.recv_counter, u64::MAX);
+        assert_eq!(client.read_frame().await.unwrap(), b"owned");
+        server
+            .stream
+            .write_all(&(ciphertext.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        server.stream.write_all(&ciphertext).await.unwrap();
+        assert_eq!(
+            client.read_frame().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let (mut client, mut server) = pair().await;
+        server.stream.write_all(&21u32.to_be_bytes()).await.unwrap();
+        server.stream.write_all(&[0xde; 21]).await.unwrap();
+        assert_eq!(
+            client.read_frame().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[tokio::test]
-    async fn stalled_frame_headers_and_payloads_hit_read_deadlines() {
-        let waits = [false, true].map(|send_header| async move {
-            let (mut client, server) = pair().await;
-            let mut peer = server.into_inner();
-            if send_header {
-                peer.write_all(&16u32.to_be_bytes()).await.unwrap();
-            }
-            let result = client.read_frame().await;
-            drop(peer);
-            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
-            assert_eq!(client.recv_counter, 0);
+    async fn dual_proof_tampering_and_cross_handshake_replay_refused() {
+        use ml_kem::{
+            kem::{Encapsulate, EncapsulationKey},
+            EncodedSizeUser, MlKem768Params,
+        };
+        for replay in [false, true] {
+            let key = HybridSigningKey::generate();
+            let identity = key.public_key();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let attacker = tokio::spawn(async move {
+                let mut stream = listener.accept().await.unwrap().0;
+                let mut hello = vec![0; 8 + 32 + 1184];
+                stream.read_exact(&mut hello).await.unwrap();
+                let secret = EphemeralSecret::random_from_rng(OsRng);
+                let public = PublicKey::from(&secret);
+                let encoded: [u8; 1184] = hello[40..].try_into().unwrap();
+                let kem = EncapsulationKey::<MlKem768Params>::from_bytes((&encoded).into());
+                let (ciphertext, _) = kem.encapsulate(&mut OsRng).unwrap();
+                let mut response = VERSION.to_vec();
+                response.extend_from_slice(public.as_bytes());
+                response.extend_from_slice(ciphertext.as_slice());
+                response.extend_from_slice(key.public_key().encode());
+                // A proof from a different hello must not authorize this connection.
+                if replay {
+                    hello[8] ^= 1;
+                }
+                let mut proof = key
+                    .sign(PURPOSE, &hybrid_transcript(&hello, &response))
+                    .unwrap();
+                if !replay {
+                    let last = proof.len() - 1;
+                    proof[last] ^= 1;
+                }
+                stream.write_all(&response).await.unwrap();
+                stream.write_all(&proof).await.unwrap();
+            });
+            assert!(SecureTransportSession::client_handshake_hybrid(
+                TcpStream::connect(endpoint).await.unwrap(),
+                &identity
+            )
+            .await
+            .is_err());
+            attacker.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_segmented_documents_and_malformed_envelopes() {
+        let (mut client, mut server) = pair().await;
+        let document = vec![42; MAX_FRAME_LEN + 7];
+        let expected = document.clone();
+        let sender = tokio::spawn(async move {
+            server.write_document(&document).await.unwrap();
         });
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            futures::future::join_all(waits),
-        )
-        .await
-        .expect("Stalled directory frames exceeded their bounded lifetime");
+        assert_eq!(client.read_document().await.unwrap(), expected);
+        sender.await.unwrap();
+        for declared in [0u32, (6 * MAX_FRAME_LEN + 1) as u32, MAX_FRAME_LEN as u32] {
+            let (mut client, mut server) = pair().await;
+            let mut header = b"AGDOC006".to_vec();
+            header.extend_from_slice(&declared.to_be_bytes());
+            server.write_frame(&header).await.unwrap();
+            if declared == MAX_FRAME_LEN as u32 {
+                server.write_frame(b"short-chunk").await.unwrap();
+            }
+            assert!(client.read_document().await.is_err());
+        }
+        let (mut client, mut server) = pair().await;
+        server.write_frame(b"raw document fallback").await.unwrap();
+        assert!(client.read_document().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_frames_and_documents_poison_session() {
+        let (mut client, mut server) = pair().await;
+        server.stream.write_all(&[0, 0]).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), client.read_frame())
+                .await
+                .is_err()
+        );
+        assert!(client.poisoned);
+        assert_eq!(
+            client.read_frame().await.unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(client.write_frame(b"must not resume").await.is_err());
+        let (mut client, mut server) = pair().await;
+        let mut header = b"AGDOC006".to_vec();
+        header.extend_from_slice(&100u32.to_be_bytes());
+        server.write_frame(&header).await.unwrap();
+        // Valid envelope followed by an incomplete encrypted chunk header.
+        server.stream.write_all(&[0]).await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), client.read_document())
+                .await
+                .is_err()
+        );
+        assert!(client.poisoned);
+        assert!(client.read_document().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn noncanonical_mlkem_public_key_refused_before_signature() {
+        let key = HybridSigningKey::generate();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            SecureTransportSession::server_handshake_hybrid(
+                listener.accept().await.unwrap().0,
+                &key,
+            )
+            .await
+            .is_err()
+        });
+        let mut socket = TcpStream::connect(endpoint).await.unwrap();
+        let secret = EphemeralSecret::random_from_rng(OsRng);
+        let public = PublicKey::from(&secret);
+        let mut hello = VERSION.to_vec();
+        hello.extend_from_slice(public.as_bytes());
+        hello.extend_from_slice(&[0xff; 1184]);
+        socket.write_all(&hello).await.unwrap();
+        assert!(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn oversized_frames_and_nonce_exhaustion_refused() {
+        let (mut client, _server) = pair().await;
+        assert!(client
+            .write_frame(&vec![0; MAX_FRAME_LEN + 1])
+            .await
+            .is_err());
+        assert!(client.poisoned);
+        let (mut client, mut server) = pair().await;
+        server
+            .stream
+            .write_all(&((MAX_FRAME_LEN + 17) as u32).to_be_bytes())
+            .await
+            .unwrap();
+        assert_eq!(
+            client.read_frame().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let (mut client, _server) = pair().await;
+        client.send_counter = u64::MAX;
+        assert!(client.write_frame(b"x").await.is_err());
     }
 }

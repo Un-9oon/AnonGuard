@@ -1,8 +1,8 @@
 //! Review PoC: does the daemon's fetch->merge-by-digest->verify_quorum flow reach 2-of-2 in practice?
+use anonguard::crypto::identity::{SigningKey, VerifyingKey};
 use anonguard::mesh::consensus::{ConsensusDocument, RelayDescriptor};
 use anonguard::mesh::sybil::{current_timestamp_secs, solve_pow_bounded};
 use anonguard::mesh::{DirectoryAuthority, SecureTransportSession};
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ async fn fetch(addr: &str, vk: &VerifyingKey) -> ConsensusDocument {
         .await
         .unwrap();
     sess.write_frame(b"GET_CONSENSUS").await.unwrap();
-    serde_json::from_slice(&sess.read_frame().await.unwrap()).unwrap()
+    serde_json::from_slice(&sess.read_document().await.unwrap()).unwrap()
 }
 
 #[tokio::test]

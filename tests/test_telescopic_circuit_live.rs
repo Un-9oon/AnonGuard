@@ -1,8 +1,8 @@
 use anonguard::core::state_machine::GuardedSocket;
+use anonguard::crypto::identity::SigningKey as Ed25519SigningKey;
 use anonguard::gateway::server::{build_telescopic_circuit, handle_onion_relay_connection};
 use anonguard::mesh::ProxyNode;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
-use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use rand::rngs::OsRng;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

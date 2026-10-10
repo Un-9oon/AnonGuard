@@ -1,3 +1,4 @@
+use anonguard::crypto::identity::SigningKey;
 use anonguard::{
     core::state_machine::GuardedSocket,
     gateway::server::{
@@ -6,7 +7,6 @@ use anonguard::{
     mesh::{ProxyNode, ProxyPool},
     onion::session::{start_client, Profile},
 };
-use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::{
     sync::{atomic::AtomicBool, Arc},

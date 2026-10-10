@@ -25,7 +25,7 @@ def ipv4_endpoint(value, wildcard=False):
 
 def bootstrap(data):
     document = json.loads(data)
-    if (not isinstance(document, dict) or set(document) != {'version', 'authorities', 'quorum'} or type(document['version']) is not int or document['version'] != 1
+    if (not isinstance(document, dict) or set(document) != {'version', 'authorities', 'quorum'} or type(document['version']) is not int or document['version'] != 6
             or not isinstance(document['authorities'], list)
             or not 1 <= len(document['authorities']) <= 16):
         raise ValueError('Unsupported bootstrap format')
@@ -42,7 +42,7 @@ def bootstrap(data):
         address = ipv4_endpoint(authority['address'])
         public = authority['public_key']
         if not isinstance(public, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', public) or int(public, 16) == 0:
-            raise ValueError('Authority pin must be a nonzero 32-byte hex key')
+            raise ValueError('Authority pin must be a nonzero 32-byte composite hex pin')
         public = public.lower()
         if identity in identities or address in addresses or public in keys:
             raise ValueError('Duplicate authority identity, endpoint or key')

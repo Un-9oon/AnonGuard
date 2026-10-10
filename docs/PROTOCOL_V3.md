@@ -1,53 +1,191 @@
-# AnonGuard protocol v3
+# AnonGuard protocol v6
 
-Status: implemented experimental protocol, requiring independent review. This document describes the standard onion gateway, not historical multipath or tracker experiments. All integer wire fields are big endian.
+Status: implemented experimental coordinated protocol migration, requiring
+independent review and fresh release-commit validation. The historical filename
+is retained for existing links; this document describes **v6**, not v3 or v5.
+Integer wire fields are big endian unless an enclosing standard says otherwise.
 
-## Bootstrap and directory
+## Composite identities and trust bootstrap
 
-Every authority endpoint is bound to an operator-provided Ed25519 public key. The daemon requires distinct identities, endpoints and keys, at most 16 authorities, and a quorum strictly greater than two thirds of the configured authorities. Operator independence is an external trust assumption, not something different keys prove.
+A network identity comprises independent Ed25519 and ML-DSA-65 key components.
+Both signatures are mandatory; verification is an AND operation. The public-key
+encoding is `AGID0001` (8 bytes), Ed25519 public key (32), and ML-DSA-65 public key
+(1952): 1992 bytes total. Its 32-byte pin is SHA-256 over domain
+`AnonGuard-HybridIdentity-Pin-v1` followed by that exact encoding. Pins are not raw
+Ed25519 keys despite having the same length.
 
-Directory transport starts with `AGDIR003`. The initiator and responder exchange ephemeral X25519 public keys. The responder signs a domain-separated transcript containing the version, both ephemeral keys, authentication flag and its Ed25519 identity. Pinned clients reject missing or incorrect authentication and non-contributory DH. HKDF incorporates the transcript and derives separate directional ChaCha20-Poly1305 keys. Frames carry a four-byte ciphertext length and ciphertext including a 16-byte tag; plaintext is bounded to 1 MiB. Monotonic 64-bit counters produce directional nonces; exhaustion closes the session. Frame reads and writes have deadlines. Unauthenticated test transport is not an anonymity bootstrap.
+A signature encoding is `AGID0001` (8), Ed25519 signature (64), ML-DSA-65 signature
+(3309): 3381 bytes. A self-contained network proof carries the full public-key
+encoding followed by this signature encoding: 5373 bytes. The common primitive
+signs `AnonGuard-HybridIdentity-Proof-v1`, the composite pin, a one-byte purpose
+length and purpose, then an eight-byte message length and message. Network
+identity proofs use purpose `network-identity-v6`; directory transport uses its
+separate `directory-transport-v4` purpose. Proof JSON uses bounded base64 encoding.
+Legacy 64-byte signatures are rejected.
 
-Relay descriptors use domain `AnonGuard-RelayDescriptor-v3`, length-prefixed relay ID and host, followed by port, X25519 key, Ed25519 identity, exit flag, PoW nonce and registration timestamp. Relay IDs contain ASCII letters, digits, dots, underscores or hyphens and are at most 128 bytes. Hosts are canonical IP literals or lowercase ASCII DNS names, at most 253 bytes, ports nonzero and signatures exactly 64 bytes. Descriptors require strict Ed25519 verification and fresh registration PoW. Authorities reject duplicate signing identities/endpoints during registration and gossip, and bound their directory to 512 relays. The current PoW difficulty is 26 bits; admission is probabilistic and does not prove independent operators.
+Private storage is an explicit 72-byte paired-seed bundle: `AGID0001`, Ed25519
+seed (32), ML-DSA seed (32). Production generation uses independent OS randomness.
+Publication is exclusive and durable; corrupt or legacy 32-byte identity files
+are refused rather than silently overwritten. Unix keys deny group/other access.
+Deterministic fixture constructors are test facilities, not production key setup.
 
-A snapshot digest binds the validity interval and deterministically sorted relay fields. Only signatures over the identical snapshot combine; descriptor intersection is not consensus. Authorities freeze one signed view per 300-second epoch, valid for 600 seconds, and persist their votes before publication. Client acceptance persists the highest epoch and digest before replacing the entire directory. Same-epoch conflicts, rollback, duplicate relay identities/endpoints and invalid descriptors fail acceptance. Expiry is exclusive and prevents new circuits and directory-authorized mesh connections. Existing circuits have a separate lifetime bound.
+The operator authenticates authority identity/address/composite-pin bindings
+out of band. Native bootstrap JSON requires version 6, at most 16 distinct
+bound authorities and quorum strictly greater than two thirds. Different keys
+are not evidence of independent operators. Private transport bindings, guards,
+revocation and accepted snapshots bind the new identity meaning explicitly.
 
-Peer reconciliation runs concurrently with a two-second per-peer deadline; cross-check requests run concurrently with six-second deadlines, allowing the peer to reconcile first. Slow peers do not multiply the round duration by the number of authorities.
+## Directory transport and consensus
 
-This is quorum-signed snapshot distribution. Inconsistent initial views, partitions or failed reconciliation can prevent quorum until another epoch. It is not a complete Byzantine agreement or liveness protocol.
+The initiator sends `AGDIR004`, ephemeral X25519 public key (32), and ephemeral
+ML-KEM-768 encapsulation key (1184): 1224 bytes total. The responder returns
+`AGDIR004`, fresh X25519 public key (32), ML-KEM ciphertext (1088), full composite
+public-key encoding (1992), and mandatory dual signature (3381). The proof
+covers domain `AnonGuard-directory-transport-v4/initiator/responder` followed by
+the exact complete initiator hello and unsigned responder response. The pin is
+checked against the full response identity before accepting the proof.
 
-## Relay links and circuit establishment
+Both parties reject non-contributory X25519. Before encapsulation, ML-KEM public
+keys must have the correct length and every encoded 12-bit polynomial coefficient
+below 3329. The two shared secrets form `X25519 || ML-KEM`, 64 bytes. HKDF-SHA256
+uses a salt hashing the transcript and signature, with distinct v4 directional
+labels. Each side exchanges an encrypted role-specific confirmation frame before
+returning a usable session. The total handshake has a ten-second deadline.
+Missing identities, old `AGDIR003` and authentication failure have no fallback.
+The responder is identity authenticated; initiators remain anonymous unless a
+higher-level operation authenticates them.
 
-Every adjacent relay link uses TLS 1.3 with mandatory ALPN `anonguard/3`. A self-signed Ed25519 certificate must contain the directory-pinned public key, be currently valid, and pass TLS handshake signature verification. Early data and resumption are disabled. TLS authenticates the receiving relay; anonymous clients are not required to present a certificate. Wrong identity, protocol version or deadline closes the connection, without plaintext fallback.
+Frames carry a four-byte ciphertext length and ChaCha20-Poly1305 ciphertext with
+16-byte tag. Plaintext is at most one MiB. Directional nonces use four zero bytes
+and a monotonic eight-byte counter. Exhaustion, tampering, replay, I/O error or
+cancelled partial operation poisons the retained session; reconnect instead of
+resuming a partially consumed stream. Frame I/O deadlines are bounded.
 
-Cells are 2048 bytes. The outer layout is circuit ID (4), sequence (4), command (1), stream ID (2), length (2), random padding (32), AEAD tag (16), payload (1987). The legacy `ephemeral_key` member is random padding, not a Sphinx header or proof of unlinkability. Layered routing consumes some payload capacity; callers use the circuit's maximum usable payload rather than the raw 1987-byte field.
+Directory documents use an authenticated `AGDOC006` frame containing a four-byte
+plaintext-document length, followed by exactly the required number of encrypted
+frames. Total length is 1..6 MiB, at most six chunks; nonfinal chunks are exactly
+one MiB and the final chunk has the exact remainder. The entire document has a
+15-second deadline. Raw JSON fallback and malformed envelopes are refused.
+Control RPCs continue using individual frames. Connection limits remain necessary
+because timeouts do not preempt synchronous cryptographic computation.
 
-CREATE carries 1222 bytes: hop index (1), client X25519 public key (32), ML-KEM-768 encapsulation key (1184), handshake context ID (4), version byte (3). CREATED carries fresh responder key material and an Ed25519 signature binding the v3 domain, context ID, hop index, relay identity and handshake key material. The client verifies the expected identity and hybrid response before adding a hop. HKDF binds the signed transcript to the combined X25519 and ML-KEM secrets. Ephemeral state is discarded and designated secret containers zeroize on drop; this is not a formal implementation proof.
+Relay descriptors use domain `AnonGuard-RelayDescriptor-v6`: length-prefixed
+ASCII node ID and canonical host, port, X25519 onion key, composite identity pin,
+exit flag, PoW nonce and registration timestamp. Node IDs are at most 128 bytes;
+hosts are canonical IP literals or lowercase ASCII DNS names of at most 253
+bytes. Ports must be nonzero. A self-contained dual proof authenticates the
+entire descriptor. Registration also requires fresh PoW (production default 26
+bits), with bounded replay retention. PoW does not prove operator independence.
 
-EXTEND opens a pinned TLS connection to a directory-authorized next relay and creates a fresh random downstream link ID. Intermediate nodes translate incoming and outgoing IDs, validating the downstream ID on responses. The handshake context is retained inside encrypted transport. Independent directional hop keys and sequence counters protect onion layers. Link-local IDs are excluded from end-to-end AEAD associated data because relays translate them; TLS authenticates them on each link. Sequence metadata is authenticated, and sequence overflow terminates the circuit. The context remains visible to participating relays and does not prevent collusion.
+Snapshot digests use `AnonGuard-Consensus-v6`, validity times and deterministically
+sorted relay fields. Exact-snapshot proofs combine; descriptor intersection does
+not form consensus. Duplicate composite or component identities are rejected at
+admission/quorum boundaries. Limits remain 512 relays and 16 authority signatures.
+Authorities freeze and durably sign one view per 300-second epoch, valid for 600
+seconds. Clients persist accepted epoch/digest before directory replacement;
+rollback, same-epoch conflict and invalid descriptors fail closed. Concurrent
+reconciliation has bounded per-peer deadlines. Partitions and divergent frozen
+views can prevent quorum until a later epoch: this is quorum-signed distribution,
+not a complete Byzantine agreement/liveness protocol.
 
-Circuit construction has a 30-second overall deadline; extension has a 20-second deadline. Setup errors terminate the circuit. Entry guards are identity pinned and persisted, with a bounded initial set of three. A failed entry TCP/TLS connection receives a 60-second cooldown. Downstream failure does not rotate the guard. Missing guards do not expand the set without explicit operator state reset. Subnet diversity is a placement heuristic, not verified AS or operator independence.
+## Relay TLS authentication and hop-local cover
 
-## Stream state and flow control
+Adjacent links require TLS 1.3, ALPN `anonguard/6`, and the hybrid TLS group
+`X25519MLKEM768`; classical-only group negotiation is excluded. Allowed ciphers
+are AES-256-GCM or ChaCha20-Poly1305. Early data, tickets and resumption are disabled.
+The current certificate signature/SPKI remains Ed25519. Its custom extension
+`2.25.2676937280591097606` carries the composite public identity; the certificate
+must have exactly one such extension, match the expected composite pin and Ed
+component, be valid now, and pass TLS signature verification.
 
-One circuit serves one destination TCP stream, stream ID 1. RELAY opens the validated destination; CONNECTED and all stream responses must be authenticated as originating at the selected exit. Other hops cannot legitimately supply application DATA or acknowledgements.
+Before returning the stream, the initiator sends a fresh 32-byte challenge. The
+responder returns a 5373-byte network proof over
+`AnonGuard-relay-channel-auth-v6`, ALPN, challenge, and a 32-byte TLS exporter using
+label `AnonGuard-link-auth-v6` and challenge context. Both identity components
+verify against the pinned composite identity. TLS and supplemental proof steps
+have separate bounded deadlines. There is no accept-all certificate workaround,
+plaintext path or Ed-only fallback. Anonymous clients do not present identity
+certificates. This custom composition requires independent protocol review;
+external web PKI, addon signing and operating-system trust are separate surfaces.
 
-DATA (7) carries bytes. DATA_ACK (8) carries the four-byte cumulative number of DATA cells consumed. Each direction permits at most 32 outstanding DATA cells. Acknowledgements must increase and cannot exceed transmitted data. Receivers grant credit after writing to their application or destination socket. Credit and cell sequence exhaustion are errors. DUMMY (9) carries padding, END (10) ends only the upload direction, and DESTROY (4) terminates the circuit. Malformed or inappropriate commands close the connection.
+After authentication, each direction uses a hop-local covered stream: a fixed
+8196-byte encrypted-TLS envelope every 20 ms while the link is alive, with a
+random starting phase. Four envelope bytes precede either an 8192-byte onion cell
+or random link-local dummy payload. Dummies do not reach the onion parser.
+Queues are bounded; partial cells, invalid envelopes, prolonged silence or blocked
+writes close the link. Missed scheduling opportunities do not cause catch-up
+bursts. Dropping a stream cancels its workers. Cover begins after authentication
+and ends with connection lifetime. Handshake boundaries, lifetime, congestion and
+multi-link correlation remain observable. Scheduled cost is about 409.8 kB/s per
+direction per link before TLS/TCP overhead, regardless of session profile.
 
-Application reads, cell queues and flow-control windows are bounded. Client upload buffering is 64 KiB. Client and exit each share DATA, coalesced ACK and DUMMY traffic on an anchored 20 ms clock, skipping missed ticks rather than producing a catch-up burst. DATA and ACK slots alternate when both are pending. This profile limits throughput and adds cover-traffic cost; it is not a proven website-fingerprinting defense. TLS record framing, TCP segmentation, setup, termination, intermediate jitter and network load remain observable.
+## Onion cells and circuit establishment
 
-After application EOF, the client drains buffered upload and sends END, while continuing acknowledgements and padding. The exit shuts only the destination write half, continues reading the response, and sends DESTROY after destination EOF and acknowledgement of all transmitted DATA. Destination writes and important relay writes are bounded to 30 seconds. Exit idle progress is bounded to 60 seconds and circuit lifetime to one hour. Failure closes the stream; there is no silent destination reconnection or transaction replay.
+V6 cells are **8192 bytes**, with 61-byte header and 8131-byte payload. Header:
+circuit ID (4), sequence (4), command (1), stream ID (2), length (2), random
+padding (32), AEAD tag (16). Random padding is not a Sphinx header. Onion layers
+consume usable payload capacity; callers must use circuit-derived capacity.
 
-## Exit and local isolation boundaries
+CREATE carries 1222 bytes: hop index (1), client X25519 key (32), ML-KEM-768 key
+(1184), handshake context ID (4), version byte (6). CREATED carries responder
+X25519 key (32), composite identity pin (32), self-contained dual proof (5373),
+and ML-KEM ciphertext (1088): **6525 bytes**. Exact version/length and composite
+pin verification are required. Domain `AnonGuard-handshake-v6` binds context ID,
+hop index, pin and all exchange material; context-bound HKDF combines the two
+shared secrets before creating directional onion keys.
 
-Exit policy validates all DNS results before connecting, blocks private/special addresses by default, and shares one deadline across DNS and address fallback. Unsupported `.onion` destinations are refused. Development private-network permission is an explicit insecure option. End-to-end application TLS remains the application's responsibility.
+EXTEND authenticates the directory-authorized next relay, uses a fresh downstream
+link ID, and preserves the encrypted handshake context. Intermediates translate
+link-local circuit IDs and validate downstream responses. Sequence metadata is
+AEAD authenticated; overflow closes circuits. Context visibility does not prevent
+relay collusion. Circuit construction and extension have bounded deadlines.
 
-Linux protection creates a fresh namespace with loopback only. nftables input/output policies are DROP, allowing only the numeric loopback proxy endpoint and its loopback return traffic. Rules are installed before loopback is brought up. A private Unix socket bridges to the host gateway. The helper verifies namespace identity before listening, and bridge tasks cancel on kill-switch activation or helper failure. No host-wide firewall is modified. Protected applications must be launched in the namespace as an unprivileged user. Rules survive daemon exit; namespace removal is explicit after those applications stop.
+Paths contain 3..8 hops, CLI default range 3..5, with persistent identity-pinned
+entry guards, non-exit middles and an exit. Entry-only failure cooldown is 60
+seconds; downstream failure does not rotate the guard. Subnet diversity is a
+heuristic, not verified AS/operator independence. Longer routes are not inherently
+more anonymous.
 
-Windows and macOS do not implement kernel isolation. Strict fail-closed startup refuses those platforms. Filesystem access, privileged escape, browser identity and applications outside the namespace are not protected.
+## Streams, sessions and exits
 
-## Migration and exclusions
+Legacy single-destination circuits retain bounded DATA/ACK windows, directional
+keys, upload half-close and acknowledged response termination. Optional padded
+sessions authenticate an exact profile inside the circuit and multiplex bounded
+streams. Balanced schedules 40 ms; strict 20 ms; research RMT/Poisson modes use
+bounded samplers. Session DATA warm-up, idle duration/volume tails and finish
+handshakes are separate from mandatory 20-ms adjacent-link cover. The profile
+encoding remains its internal version 1 inside the mandatory v6 channel.
 
-Upgrade all authorities, relays and clients together. Previous descriptors and plaintext links are incompatible. Preserve private keys and durable v3 votes/rollback state; migrate legacy address-only guards through an explicit administrative reset. Corrupt security state fails startup. There is no automated authority-key rotation ceremony or seamless circuit rekey: fresh circuits replace expired ones, without replaying existing streams.
+SOCKS credentials are local context labels, not password authentication; they are
+not sent to relays. Browser isolation supplies distinct contexts; ordinary
+no-auth clients share the default context. Sessions cap streams, queues, credit
+and lifetime. Failed streams are closed/reset without direct fallback or
+transparent transaction replay. The current larger cells and mandatory link cover
+change throughput and cost materially; old v5 performance measurements do not
+measure v6.
 
-Multipath gateway transport is retired. Onion services, rendezvous discovery, browser isolation and a universal public-network deployment are not implemented by v3. Optional private obfs4 entry and protected authority bootstrap are implemented; their censorship resistance is not independently established. Research utilities remaining in the tree are not supported runtime features.
+Exit policy validates all DNS results, rejects private/special ranges by default,
+and bounds DNS/connect fallback. Explicit private-exit permission is lab-only.
+`.onion` services are unsupported. End-to-end HTTPS and account/cookie identity
+remain application responsibilities. Linux native firewall and restricted
+headless containment provide separate documented trust boundaries; neither
+protects against a compromised administrator/kernel or arbitrary host IPC.
+
+## Coordinated migration and evidence limits
+
+Upgrade authorities, relays, clients and generated deployment artifacts together.
+V5 ALPN, old directory transport, raw Ed pins/signatures, old cell sizes and
+legacy identity bundles are incompatible. Guard/transport/snapshot version checks
+must not be bypassed. Back up and protect existing keys, votes, revocation journals,
+guards and rollback state; perform an explicit reviewed migration with freshly
+authenticated composite pins. Do not erase journals or silently reinterpret old
+pins to make startup pass. Revocation policy version 2 retires composite pins;
+it remains offline, quorum authorized and effective at coordinated restart.
+
+No automated ceremony proves continuity from a legacy Ed-only trust root to a new
+PQ identity. Independent crypto review, external known-answer/interoperability
+validation, fuzzing, current-commit VM acceptance and traffic-analysis experiments
+remain release gates. Post-quantum algorithms here are conventional software;
+RMT is a classical statistical sampler, not quantum hardware or QKD. No complete
+quantum protection, undetectability, global correlation resistance or Tor
+superiority is established by this specification.

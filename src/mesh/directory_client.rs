@@ -1,7 +1,7 @@
 //! Bounded parallel directory requests with endpoint-specific identity pins.
 use crate::core::config::AuthorityEndpoint;
+use crate::crypto::identity::VerifyingKey;
 use crate::mesh::{ConsensusDocument, ProxyPool, SecureTransportSession};
-use ed25519_dalek::VerifyingKey;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -97,7 +97,7 @@ impl PinnedDirectoryClient {
                 };
                 let mut session = SecureTransportSession::client_handshake(socket, Some(pinned)).await?;
                 session.write_frame(b"GET_CONSENSUS").await?;
-                let frame = session.read_frame().await?;
+                let frame = session.read_document().await?;
                 let snapshot: ConsensusDocument = serde_json::from_slice(&frame)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                 if snapshot.relays.len() > crate::mesh::consensus::MAX_DIRECTORY_RELAYS
@@ -139,8 +139,8 @@ impl PinnedDirectoryClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::identity::SigningKey;
     use crate::mesh::RelayDescriptor;
-    use ed25519_dalek::SigningKey;
     use tokio::net::TcpListener;
 
     fn snapshot(host: &str) -> ConsensusDocument {
@@ -176,7 +176,7 @@ mod tests {
                     return;
                 }
                 if let Some(reply) = reply {
-                    let _ = session.write_frame(&reply).await;
+                    let _ = session.write_document(&reply).await;
                 } else {
                     std::future::pending::<()>().await;
                 }

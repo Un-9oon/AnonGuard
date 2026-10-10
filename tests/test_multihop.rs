@@ -1,3 +1,4 @@
+use anonguard::crypto::identity::SigningKey;
 use anonguard::{
     core::state_machine::GuardedSocket,
     gateway::server::{build_telescopic_circuit, handle_onion_relay_connection},
@@ -8,7 +9,6 @@ use anonguard::{
         circuit::MAX_HOPS,
     },
 };
-use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::{
     sync::{atomic::AtomicBool, Arc},

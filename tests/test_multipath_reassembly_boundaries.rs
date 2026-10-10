@@ -42,7 +42,12 @@ fn duplicate_buffered_packets_preserve_first_payload() {
 #[test]
 fn rejects_packets_larger_than_a_cell_without_advancing() {
     let mut receiver = multipath::MultiPathReassembler::default();
-    assert!(receiver.receive(&packet(0, &vec![0; 2048])).is_none());
+    assert!(receiver
+        .receive(&packet(
+            0,
+            &vec![0; anonguard::onion::cell::ONION_CELL_SIZE]
+        ))
+        .is_none());
     assert_eq!(
         receiver.receive(&packet(0, b"valid")),
         Some(b"valid".to_vec())
@@ -57,8 +62,10 @@ fn slicing_refuses_short_outputs_and_oversized_cells_without_consuming_sequence(
     let mut short = [0x77; 7];
     assert!(slicer.slice(b"", &mut short).is_err());
     assert_eq!(short, [0x77; 7]);
-    let mut output = vec![0x77; 2048];
-    assert!(slicer.slice(&vec![0; 1980], &mut output).is_err());
+    let mut output = vec![0x77; anonguard::onion::cell::ONION_CELL_SIZE];
+    assert!(slicer
+        .slice(&vec![0; anonguard::onion::cell::PAYLOAD_SIZE], &mut output)
+        .is_err());
     assert!(output.iter().all(|byte| *byte == 0x77));
     let length = slicer.slice(b"valid", &mut output).unwrap();
     assert_eq!(&output[..length], packet(0, b"valid"));

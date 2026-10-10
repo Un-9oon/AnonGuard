@@ -3,7 +3,7 @@
 //! Collects authenticated volunteer relay registrations, validates Proof-of-Work,
 //! and issues cryptographically signed consensus documents.
 
-use ed25519_dalek::SigningKey;
+use crate::crypto::identity::SigningKey;
 use rand::rngs::OsRng;
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,7 +24,14 @@ pub const DEFAULT_MAX_AUTHORITY_CONNECTIONS: usize = 512;
 fn relay_conflicts(relays: &HashMap<String, RelayDescriptor>, candidate: &RelayDescriptor) -> bool {
     relays.values().any(|existing| {
         existing.node_id != candidate.node_id
-            && (existing.identity_key_ed25519 == candidate.identity_key_ed25519
+            && (existing.identity_pin == candidate.identity_pin
+                || (existing.signature.len() == crate::crypto::identity::PROOF_SIZE
+                    && candidate.signature.len() == crate::crypto::identity::PROOF_SIZE
+                    && (existing.signature[8..40] == candidate.signature[8..40]
+                        || existing.signature
+                            [40..crate::crypto::hybrid_identity::PUBLIC_KEY_SIZE]
+                            == candidate.signature
+                                [40..crate::crypto::hybrid_identity::PUBLIC_KEY_SIZE]))
                 || (existing.host == candidate.host && existing.port == candidate.port))
     })
 }
@@ -39,7 +46,7 @@ pub struct DirectoryAuthority {
     pub pow_difficulty: u32,
     connection_semaphore: Arc<tokio::sync::Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
-    pub peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
+    pub peer_authorities: Vec<(String, Option<crate::crypto::identity::VerifyingKey>)>,
     pub allow_unauthenticated_registration: bool,
     /// Production authorities defer voting until the advertised network can
     /// support a three-hop circuit with an exit. Ephemeral consensus tests may opt out.
@@ -87,7 +94,7 @@ impl DirectoryAuthority {
         authority_id: String,
         listen_addr: String,
         pow_difficulty: u32,
-        peer_authorities: Vec<(String, Option<ed25519_dalek::VerifyingKey>)>,
+        peer_authorities: Vec<(String, Option<crate::crypto::identity::VerifyingKey>)>,
     ) -> Self {
         let mut auth = Self::with_difficulty(authority_id, listen_addr, pow_difficulty);
         auth.peer_authorities = peer_authorities;
@@ -129,7 +136,7 @@ impl DirectoryAuthority {
         let vote_path = key_path.as_ref().with_extension("votes.json");
         // At most thirteen retained five-minute snapshots of bounded relay data.
         let votes: Vec<ConsensusDocument> =
-            match crate::core::storage::read_bounded_file(&vote_path, 16 * 1024 * 1024) {
+            match crate::core::storage::read_bounded_file(&vote_path, 64 * 1024 * 1024) {
                 Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
                     error!("Invalid persisted authority vote state");
                     std::process::exit(1);
@@ -200,7 +207,7 @@ impl DirectoryAuthority {
             if doc
                 .relays
                 .iter()
-                .any(|relay| self.revoked.contains(&relay.identity_key_ed25519))
+                .any(|relay| self.revoked.contains(&relay.identity_pin))
             {
                 return Err(
                     "Frozen vote contains a retired identity; waiting for next epoch".into(),
@@ -217,7 +224,7 @@ impl DirectoryAuthority {
             return Err("Directory capacity exceeded".into());
         }
         relays.retain(|r| {
-            !self.revoked.contains(&r.identity_key_ed25519)
+            !self.revoked.contains(&r.identity_pin)
                 && r.verify_identity()
                 && r.registered_at <= now
                 && now - r.registered_at <= RELAY_TTL_SECS
@@ -242,17 +249,17 @@ impl DirectoryAuthority {
         Ok(doc)
     }
 
-    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+    pub fn verifying_key(&self) -> crate::crypto::identity::VerifyingKey {
         self.signing_key.verifying_key()
     }
 
-    /// Registers a relay after verifying its Proof-of-Work and Ed25519 identity signature.
+    /// Registers a relay after verifying its Proof-of-Work and composite identity signature.
     pub async fn register_relay(&self, descriptor: RelayDescriptor) -> Result<(), String> {
-        if self.revoked.contains(&descriptor.identity_key_ed25519) {
+        if self.revoked.contains(&descriptor.identity_pin) {
             return Err("Relay identity is retired".into());
         }
         if !descriptor.verify_identity() {
-            return Err("Invalid or missing Ed25519 cryptographic identity signature".to_string());
+            return Err("Invalid or missing hybrid cryptographic identity signature".to_string());
         }
 
         let now = current_timestamp_secs();
@@ -278,9 +285,9 @@ impl DirectoryAuthority {
             return Err("Directory capacity exceeded".into());
         }
         if let Some(existing) = relays.get(&descriptor.node_id) {
-            if existing.identity_key_ed25519 != descriptor.identity_key_ed25519 {
+            if existing.identity_pin != descriptor.identity_pin {
                 return Err(format!(
-                    "Relay impersonation prevented: node_id '{}' already claimed by another Ed25519 key",
+                    "Relay impersonation prevented: node_id '{}' already claimed by another hybrid key",
                     descriptor.node_id
                 ));
             }
@@ -366,8 +373,9 @@ impl DirectoryAuthority {
                 Ok(Ok(Some(peer_sig))) => {
                     // Verify the signature is valid for this digest before appending
                     if let Some(pubkey) = pinned_key {
-                        if let Ok(sig_bytes) = peer_sig.signature_bytes.as_slice().try_into() {
-                            let ed_sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
+                        if let Ok(ed_sig) = crate::crypto::identity::Signature::from_slice(
+                            &peer_sig.signature_bytes,
+                        ) {
                             if pubkey.verify_strict(&digest, &ed_sig).is_ok()
                                 && received_keys.insert(pubkey.to_bytes())
                             {
@@ -426,7 +434,7 @@ impl DirectoryAuthority {
             let relays = self.active_relays.read().await;
             relays.clone()
         };
-        local_map.retain(|_, relay| !self.revoked.contains(&relay.identity_key_ed25519));
+        local_map.retain(|_, relay| !self.revoked.contains(&relay.identity_pin));
 
         let peer_lists = futures::future::join_all(
             self.peer_authorities
@@ -458,9 +466,7 @@ impl DirectoryAuthority {
                         {
                             continue;
                         }
-                        if !self.revoked.contains(&desc.identity_key_ed25519)
-                            && desc.verify_identity()
-                        {
+                        if !self.revoked.contains(&desc.identity_pin) && desc.verify_identity() {
                             // Validate PoW and freshness to reject malicious peers pushing fake views
                             let is_valid_pow = verify_pow(
                                 &desc.node_id,
@@ -483,7 +489,7 @@ impl DirectoryAuthority {
                             local_map
                                 .entry(desc.node_id.clone())
                                 .and_modify(|existing| {
-                                    if desc.identity_key_ed25519 != existing.identity_key_ed25519 {
+                                    if desc.identity_pin != existing.identity_pin {
                                         warn!("Authority [{}]: Rejected impersonation attempt via gossip for node_id {}: identity key mismatch", self.authority_id, desc.node_id);
                                     } else if desc.registered_at > existing.registered_at {
                                         *existing = desc.clone();
@@ -513,13 +519,13 @@ impl DirectoryAuthority {
         // Persist confirmed-good gossiped descriptors back into `self.active_relays`
         // so we don't have to re-fetch them successfully on every round.
         let mut active = self.active_relays.write().await;
-        active.retain(|_, relay| !self.revoked.contains(&relay.identity_key_ed25519));
+        active.retain(|_, relay| !self.revoked.contains(&relay.identity_pin));
         for (id, desc) in &local_map {
             if relay_conflicts(&active, desc) {
                 continue;
             }
             if let Some(existing) = active.get(id) {
-                if existing.identity_key_ed25519 != desc.identity_key_ed25519 {
+                if existing.identity_pin != desc.identity_pin {
                     warn!("Authority [{}]: Rejected impersonation attempt during local persist for node_id {}: identity key mismatch", self.authority_id, id);
                     continue;
                 }
@@ -546,20 +552,20 @@ impl DirectoryAuthority {
 
     async fn fetch_peer_relay_list(
         peer_addr: &str,
-        pinned_key: Option<&ed25519_dalek::VerifyingKey>,
+        pinned_key: Option<&crate::crypto::identity::VerifyingKey>,
     ) -> Result<Vec<RelayDescriptor>, Box<dyn std::error::Error + Send + Sync>> {
         use tokio::net::TcpStream;
         let stream = TcpStream::connect(peer_addr).await?;
         let mut session = SecureTransportSession::client_handshake(stream, pinned_key).await?;
         session.write_frame(b"GET_RELAY_LIST").await?;
-        let resp = session.read_frame().await?;
+        let resp = session.read_document().await?;
         let list: Vec<RelayDescriptor> = serde_json::from_slice(&resp)?;
         Ok(list)
     }
 
     async fn fetch_peer_cross_check(
         peer_addr: &str,
-        pinned_key: Option<&ed25519_dalek::VerifyingKey>,
+        pinned_key: Option<&crate::crypto::identity::VerifyingKey>,
         digest_hex: &str,
     ) -> Result<Option<AuthoritySignature>, Box<dyn std::error::Error + Send + Sync>> {
         use tokio::net::TcpStream;
@@ -646,7 +652,7 @@ impl DirectoryAuthority {
                                 match auth_self.generate_consensus().await {
                                     Ok(consensus) => {
                                         if let Ok(serialized) = serde_json::to_vec(&consensus) {
-                                            let _ = session.write_frame(&serialized).await;
+                                            let _ = session.write_document(&serialized).await;
                                         }
                                     }
                                     Err(_) => {
@@ -660,7 +666,7 @@ impl DirectoryAuthority {
                                 let list: Vec<RelayDescriptor> = relays.values().cloned().collect();
                                 drop(relays);
                                 if let Ok(serialized) = serde_json::to_vec(&list) {
-                                    let _ = session.write_frame(&serialized).await;
+                                    let _ = session.write_document(&serialized).await;
                                 }
                             } else if let Some(digest_hex) = text.strip_prefix("BFT_CROSS_CHECK ") {
                                 let list = auth_self.reconcile_relays().await;
@@ -756,7 +762,7 @@ mod tests {
             started.send(()).unwrap();
             proceed.await.unwrap();
             session
-                .write_frame(&serde_json::to_vec(&vec![old]).unwrap())
+                .write_document(&serde_json::to_vec(&vec![old]).unwrap())
                 .await
                 .unwrap();
         });
@@ -820,7 +826,7 @@ mod tests {
             started.send(()).unwrap();
             proceed.await.unwrap();
             session
-                .write_frame(&serde_json::to_vec(&vec![advertised]).unwrap())
+                .write_document(&serde_json::to_vec(&vec![advertised]).unwrap())
                 .await
                 .unwrap();
         });

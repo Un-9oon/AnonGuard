@@ -208,7 +208,7 @@ struct Args {
     #[arg(long)]
     fetch_from: Option<String>,
 
-    /// Path to persist the relay's long-term Ed25519 identity key
+    /// Path to persist the relay's long-term composite identity key
     #[arg(long)]
     identity_key_path: Option<PathBuf>,
 
@@ -240,7 +240,7 @@ fn decode_hex_32(s: &str) -> Option<[u8; 32]> {
     Some(bytes)
 }
 
-fn load_or_create_identity_key(path: &std::path::Path) -> ed25519_dalek::SigningKey {
+fn load_or_create_identity_key(path: &std::path::Path) -> anonguard::crypto::identity::SigningKey {
     match anonguard::core::storage::load_or_create_signing_key(path) {
         Ok(key) => key,
         Err(e) => {
@@ -270,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let key = anonguard::core::storage::load_or_create_signing_key(path)?;
         println!(
             "{}",
-            serde_json::json!({ "public_key_ed25519": hex::encode(key.verifying_key().to_bytes()) })
+            serde_json::json!({ "protocol_version": 6, "identity_suite": "Ed25519+ML-DSA-65", "public_key_hybrid_pin": hex::encode(key.verifying_key().to_bytes()), "public_key_hybrid": hex::encode(key.hybrid().public_key().encode()) })
         );
         return Ok(());
     }
@@ -398,8 +398,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Vec::new()
     };
 
-    let mut trusted_authorities: std::collections::HashMap<String, ed25519_dalek::VerifyingKey> =
-        std::collections::HashMap::new();
+    let mut trusted_authorities: std::collections::HashMap<
+        String,
+        anonguard::crypto::identity::VerifyingKey,
+    > = std::collections::HashMap::new();
     if let Some(ref keys_str) = args.authority_keys {
         for entry in keys_str.split(',') {
             let (id_or_addr, key_hex) = entry
@@ -411,7 +413,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 return Err("Authority key identifier must not be empty".into());
             }
             let bytes = decode_hex_32(key_hex.trim()).ok_or("Invalid authority key hex")?;
-            let vk = ed25519_dalek::VerifyingKey::from_bytes(&bytes)?;
+            let vk = anonguard::crypto::identity::VerifyingKey::from_bytes(&bytes)
+                .map_err(|_| "Invalid or duplicate directory identity pin")?;
             if trusted_authorities.insert(id, vk).is_some() {
                 return Err("Duplicate authority key identifier".into());
             }

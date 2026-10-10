@@ -1,7 +1,7 @@
 //! Offline quorum-authorized, cumulative identity retirement for owned deployments.
 //! Policies take effect at coordinated restart; this is not online revocation gossip.
+use crate::crypto::identity::{Signature, SigningKey, VerifyingKey};
 use crate::mesh::AuthoritySignature;
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -10,7 +10,7 @@ use std::{
 };
 
 pub const MAX_REVOKED_IDENTITIES: usize = 512;
-pub const MAX_POLICY_BYTES: u64 = 256 * 1024;
+pub const MAX_POLICY_BYTES: u64 = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -43,7 +43,7 @@ impl RevocationPolicy {
         revoked: Vec<[u8; 32]>,
     ) -> Self {
         Self {
-            version: 1,
+            version: 2,
             generation,
             authority_set: authority_set_digest(keys),
             revoked,
@@ -52,7 +52,7 @@ impl RevocationPolicy {
     }
 
     pub fn validate_shape(&self) -> Result<(), String> {
-        if self.version != 1
+        if self.version != 2
             || self.generation == 0
             || self.revoked.len() > MAX_REVOKED_IDENTITIES
             || self.signatures.len() > 16
@@ -69,7 +69,7 @@ impl RevocationPolicy {
         for signature in &self.signatures {
             if signature.authority_id.is_empty()
                 || signature.authority_id.len() > 128
-                || signature.signature_bytes.len() != 64
+                || signature.signature_bytes.len() != crate::crypto::identity::PROOF_SIZE
             {
                 return Err("Invalid retirement signature shape".into());
             }
@@ -133,18 +133,20 @@ impl RevocationPolicy {
             );
         }
         let mut signers = HashSet::new();
+        let mut classical_keys = HashSet::new();
+        let mut pq_keys = HashSet::new();
         let digest = self.digest();
         for signature in &self.signatures {
             if let Some(key) = keys.get(&signature.authority_id) {
-                let bytes: &[u8; 64] = signature
-                    .signature_bytes
-                    .as_slice()
-                    .try_into()
+                let proof = Signature::from_slice(&signature.signature_bytes)
                     .map_err(|_| "Invalid retirement signature")?;
-                if key
-                    .verify_strict(&digest, &Signature::from_bytes(bytes))
-                    .is_ok()
-                {
+                if key.verify_strict(&digest, &proof).is_ok() {
+                    let (classical, pq) = proof
+                        .component_pins()
+                        .map_err(|_| "Invalid retirement identity")?;
+                    if !classical_keys.insert(classical) || !pq_keys.insert(pq) {
+                        return Err("Retirement signers alias an identity component".into());
+                    }
                     signers.insert(key.to_bytes());
                 }
             }

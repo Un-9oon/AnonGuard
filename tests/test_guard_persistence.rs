@@ -80,7 +80,7 @@ fn failed_atomic_replacement_cleans_temp_files() {
 async fn seed_directory(authority: &anonguard::mesh::authority::DirectoryAuthority, exit: bool) {
     use anonguard::mesh::{consensus::RelayDescriptor, sybil::current_timestamp_secs};
     for i in 0..3 {
-        let key = ed25519_dalek::SigningKey::from_bytes(&[40 + i; 32]);
+        let key = anonguard::crypto::identity::SigningKey::from_bytes(&[40 + i; 32]);
         let mut relay = RelayDescriptor::new(
             format!("seed-{i}"),
             format!("{}.1.1.1", i + 1),
@@ -110,7 +110,7 @@ async fn authority_restart_retains_its_signed_snapshot() {
     drop(authority);
     let restarted =
         DirectoryAuthority::with_persistent_key("authority".into(), "127.0.0.1:0".into(), 0, &path);
-    let key = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+    let key = anonguard::crypto::identity::SigningKey::from_bytes(&[37; 32]);
     let now = current_timestamp_secs();
     let mut relay = RelayDescriptor::new(
         "relay".into(),
@@ -208,7 +208,7 @@ async fn production_bootstrap_does_not_freeze_an_unusable_partial_directory() {
         .unwrap_err()
         .contains("voting deferred"));
     assert!(!path.with_extension("votes.json").exists());
-    let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let key = anonguard::crypto::identity::SigningKey::from_bytes(&[42; 32]);
     let mut exit = RelayDescriptor::new(
         "seed-2".into(),
         "3.1.1.1".into(),

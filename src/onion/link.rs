@@ -1,12 +1,17 @@
-//! TLS 1.3 links with directory-pinned Ed25519 identities and mandatory v5 ALPN.
-use ed25519_dalek::SigningKey;
+//! Mandatory v6 hybrid TLS with composite identity pins and exporter-bound dual signatures.
+use crate::crypto::hybrid_identity::HybridPublicKey;
+use crate::crypto::identity::{Signature, SigningKey, VerifyingKey, PROOF_SIZE};
+use rand::RngCore;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::{io, sync::Arc};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-pub const ALPN: &[u8] = b"anonguard/5";
+pub const ALPN: &[u8] = b"anonguard/6";
+const IDENTITY_OID: &str = "2.25.2676937280591097606";
+const IDENTITY_OID_ARCS: &[u64] = &[2, 25, 2676937280591097606];
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -35,7 +40,7 @@ impl ServerCertVerifier for IdentityVerifier {
             || key.algorithm.algorithm.to_id_string() != "1.3.101.112"
             || key.algorithm.parameters.is_some()
             || key.subject_public_key.unused_bits != 0
-            || key.subject_public_key.data.as_ref() != self.pinned
+            || !certificate_identity_matches(&parsed, self.pinned)
             || !parsed.validity().is_valid_at(time)
         {
             return Err(rustls::Error::General(
@@ -74,20 +79,28 @@ impl ServerCertVerifier for IdentityVerifier {
         vec![SignatureScheme::ED25519]
     }
 }
-pub fn acceptor(identity: &SigningKey) -> io::Result<TlsAcceptor> {
+pub fn acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
     // RFC 8410 PKCS#8 Ed25519 private key, from the persisted directory identity.
     let mut bytes = vec![
         0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
         0x20,
     ];
-    bytes.extend_from_slice(&identity.to_bytes());
+    bytes.extend_from_slice(&identity.classical_key().to_bytes());
     let private = PrivatePkcs8KeyDer::from(bytes);
     let pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&private, &rcgen::PKCS_ED25519)
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let cert = rcgen::CertificateParams::new(vec!["relay.anonguard.invalid".into()])
-        .and_then(|p| p.self_signed(&pair))
+    let mut params = rcgen::CertificateParams::new(vec!["relay.anonguard.invalid".into()])
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    params
+        .custom_extensions
+        .push(rcgen::CustomExtension::from_oid_content(
+            IDENTITY_OID_ARCS,
+            identity.hybrid().public_key().encode().to_vec(),
+        ));
+    let cert = params
+        .self_signed(&pair)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let provider = Arc::new(hybrid_provider());
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| io::Error::other(e.to_string()))?
@@ -97,18 +110,32 @@ pub fn acceptor(identity: &SigningKey) -> io::Result<TlsAcceptor> {
     config.alpn_protocols = vec![ALPN.to_vec()];
     config.max_early_data_size = 0;
     config.send_tls13_tickets = 0;
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    Ok(RelayAcceptor {
+        tls: TlsAcceptor::from(Arc::new(config)),
+        identity: identity.clone(),
+    })
 }
 pub async fn connect(
     stream: TcpStream,
     pinned: [u8; 32],
-) -> io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+) -> io::Result<crate::onion::link_cover::CoveredStream> {
+    stream.set_nodelay(true)?;
+    connect_guarded(stream, pinned).await
+}
+
+/// Ownership of the guarded transport must remain inside TLS and cover workers,
+/// so scheduled padding and queued cells obey the same kill-switch checks.
+pub async fn connect_guarded<S>(
+    stream: S,
+    pinned: [u8; 32],
+) -> io::Result<crate::onion::link_cover::CoveredStream>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     if pinned == [0; 32] {
         return Err(invalid("Relay link requires a directory identity pin"));
     }
-    // Cells are paced by the session; avoid a second TCP batching policy.
-    stream.set_nodelay(true)?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(hybrid_provider());
     let verifier = Arc::new(IdentityVerifier {
         pinned,
         provider: provider.clone(),
@@ -121,7 +148,7 @@ pub async fn connect(
         .with_no_client_auth();
     config.alpn_protocols = vec![ALPN.to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
-    let tls = tokio::time::timeout(
+    let mut tls = tokio::time::timeout(
         TIMEOUT,
         TlsConnector::from(Arc::new(config)).connect(
             ServerName::try_from("relay.anonguard.invalid")
@@ -134,19 +161,98 @@ pub async fn connect(
     if tls.get_ref().1.alpn_protocol() != Some(ALPN) {
         return Err(invalid("Relay protocol version mismatch"));
     }
-    Ok(tls)
+    tokio::time::timeout(TIMEOUT, async {
+        let mut challenge = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut challenge);
+        tls.write_all(&challenge).await?;
+        let mut proof = vec![0u8; PROOF_SIZE];
+        tls.read_exact(&mut proof).await?;
+        let mut exporter = [0u8; 32];
+        tls.get_ref()
+            .1
+            .export_keying_material(&mut exporter, b"AnonGuard-link-auth-v6", Some(&challenge))
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let message = link_auth_message(&challenge, &exporter);
+        VerifyingKey::from_bytes(&pinned)?
+            .verify_strict(&message, &Signature::from_slice(&proof)?)?;
+        Ok::<(), io::Error>(())
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PQ link authentication timed out"))??;
+    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
 }
-pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    acceptor: &TlsAcceptor,
+pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(
+    acceptor: &RelayAcceptor,
     stream: S,
-) -> io::Result<tokio_rustls::server::TlsStream<S>> {
-    let tls = tokio::time::timeout(TIMEOUT, acceptor.accept(stream))
+) -> io::Result<crate::onion::link_cover::CoveredStream> {
+    let mut tls = tokio::time::timeout(TIMEOUT, acceptor.tls.accept(stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Relay TLS handshake timed out"))??;
     if tls.get_ref().1.alpn_protocol() != Some(ALPN) {
         return Err(invalid("Relay protocol version mismatch"));
     }
-    Ok(tls)
+    tokio::time::timeout(TIMEOUT, async {
+        let mut challenge = [0u8; 32];
+        tls.read_exact(&mut challenge).await?;
+        let mut exporter = [0u8; 32];
+        tls.get_ref()
+            .1
+            .export_keying_material(&mut exporter, b"AnonGuard-link-auth-v6", Some(&challenge))
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let message = link_auth_message(&challenge, &exporter);
+        let proof = acceptor.identity.sign(&message).to_bytes();
+        tls.write_all(&proof).await?;
+        tls.flush().await?;
+        Ok::<(), io::Error>(())
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PQ link authentication timed out"))??;
+    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+}
+
+fn link_auth_message(challenge: &[u8; 32], exporter: &[u8; 32]) -> Vec<u8> {
+    let mut bytes = b"AnonGuard-relay-channel-auth-v6".to_vec();
+    bytes.extend_from_slice(ALPN);
+    bytes.extend_from_slice(challenge);
+    bytes.extend_from_slice(exporter);
+    bytes
+}
+
+pub struct RelayAcceptor {
+    tls: TlsAcceptor,
+    identity: SigningKey,
+}
+fn hybrid_provider() -> rustls::crypto::CryptoProvider {
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519MLKEM768];
+    provider.cipher_suites.retain(|suite| {
+        matches!(
+            suite.suite(),
+            rustls::CipherSuite::TLS13_AES_256_GCM_SHA384
+                | rustls::CipherSuite::TLS13_CHACHA20_POLY1305_SHA256
+        )
+    });
+    provider
+}
+fn certificate_identity_matches(
+    cert: &x509_parser::certificate::X509Certificate<'_>,
+    pin: [u8; 32],
+) -> bool {
+    let mut extensions = cert
+        .extensions()
+        .iter()
+        .filter(|ext| ext.oid.to_id_string() == IDENTITY_OID);
+    let Some(extension) = extensions.next() else {
+        return false;
+    };
+    if extensions.next().is_some() {
+        return false;
+    }
+    let Ok(identity) = HybridPublicKey::decode(extension.value) else {
+        return false;
+    };
+    identity.fingerprint() == pin
+        && cert.public_key().subject_public_key.data.as_ref() == identity.classical_bytes()
 }
 #[cfg(test)]
 mod tests {
@@ -165,7 +271,10 @@ mod tests {
             let task = tokio::spawn(async move {
                 let (raw, _) = listener.accept().await.unwrap();
                 if let Ok(mut secured) = accept(&server, raw).await {
-                    secured.write_all(b"protected").await.unwrap();
+                    let mut cell = [0u8; crate::onion::cell::ONION_CELL_SIZE];
+                    cell[..9].copy_from_slice(b"protected");
+                    secured.write_all(&cell).await.unwrap();
+                    secured.flush().await.unwrap();
                 }
             });
             let pin = if wrong {
@@ -195,7 +304,7 @@ mod tests {
             let (raw, _) = listener.accept().await.unwrap();
             assert!(accept(&server, raw).await.is_err());
         });
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let provider = Arc::new(hybrid_provider());
         let verifier = Arc::new(IdentityVerifier {
             pinned: identity.verifying_key().to_bytes(),
             provider: provider.clone(),
@@ -214,6 +323,45 @@ mod tests {
             .await;
         // TLS can finish without ALPN; the application accept path must refuse it.
         drop(connection);
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn inner_guard_stops_idle_cover_after_kill_switch() {
+        use crate::core::state_machine::GuardedSocket;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let identity = SigningKey::from_bytes(&[42; 32]);
+        let pin = identity.verifying_key().to_bytes();
+        let server = acceptor(&identity).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (raw, _) = listener.accept().await.unwrap();
+            let mut secured = accept(&server, raw).await.unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), secured.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        });
+        let raw = TcpStream::connect(endpoint).await.unwrap();
+        raw.set_nodelay(true).unwrap();
+        let kill = Arc::new(AtomicBool::new(false));
+        let guarded = GuardedSocket::new(raw, kill.clone())
+            .begin_verification()
+            .mark_verified();
+        let mut client = connect_guarded(guarded, pin).await.unwrap();
+        kill.store(true, Ordering::SeqCst);
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), client.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
         task.await.unwrap();
     }
 }

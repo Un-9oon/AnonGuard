@@ -75,7 +75,7 @@ pub struct GuardConfig {
     /// Bound identity/address/pin records used by relay registration.
     #[serde(default)]
     pub authority_endpoints: Vec<AuthorityEndpoint>,
-    /// [B3] Pinned Ed25519 identity keys (raw 32-byte arrays, hex-encoded) for each
+    /// [B3] Pinned composite identity keys (raw 32-byte arrays, hex-encoded) for each
     /// Directory Authority listed in `directory_authorities`. When non-empty, the relay
     /// registration handshake enforces STS-style key pinning against the first key in
     /// this list (matching the authority ordering in `directory_authorities`). An empty
@@ -98,7 +98,7 @@ pub struct GuardConfig {
     pub enable_firewall_killswitch: bool,
     /// Registration PoW difficulty in leading zero bits
     pub pow_difficulty: u32,
-    /// Path to persist the relay's long-term Ed25519 identity key
+    /// Path to persist the relay's long-term composite identity key
     pub identity_key_path: std::path::PathBuf,
     /// Path to persist the client's Entry Guards (Hop 0 pins)
     pub guard_state_path: std::path::PathBuf,
@@ -145,7 +145,7 @@ impl Default for GuardConfig {
             directory_authorities: Vec::new(),
             authority_endpoints: Vec::new(),
             // [B3] Empty by default — operators MUST populate this from their authority's
-            // published Ed25519 identity key. An empty list triggers a warning at startup.
+            // published composite identity key. An empty list triggers a warning at startup.
             // See docs/reports/hardening_findings.md for bootstrap threat model.
             authority_identity_keys: Vec::new(),
             listen_addr: "127.0.0.1:9050".to_string(),

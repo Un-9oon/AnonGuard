@@ -1,7 +1,7 @@
+use anonguard::crypto::identity::SigningKey;
 use anonguard::mesh::authority::DirectoryAuthority;
 use anonguard::mesh::consensus::RelayDescriptor;
 use anonguard::mesh::sybil::{current_timestamp_secs, solve_pow_bounded};
-use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 
 #[tokio::test]

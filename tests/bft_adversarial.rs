@@ -1,4 +1,4 @@
-use ed25519_dalek::SigningKey;
+use anonguard::crypto::identity::SigningKey;
 use rand::rngs::OsRng;
 use std::time::Duration;
 use tokio::time::sleep;

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use tokio::net::TcpListener;
 use tokio::time::{sleep, Duration};
 
+use anonguard::crypto::identity::{SigningKey, VerifyingKey};
 use anonguard::mesh::authority::DirectoryAuthority;
 use anonguard::mesh::SecureTransportSession;
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 
 #[tokio::test]

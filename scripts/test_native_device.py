@@ -17,7 +17,7 @@ def load(name):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 setup=load('device_setup');adapter=load('native_adapter');browser=load('browser_session')
 def document():
-    return {'version':1,'quorum':1,'authorities':[{'id':'authority','address':'192.168.1.2:9100','public_key':'01'*32}]}
+    return {'version':6,'quorum':1,'authorities':[{'id':'authority','address':'192.168.1.2:9100','public_key':'01'*32}]}
 def query():
     return struct.pack('!6H',42,0x100,1,0,0,0)+b'\x07example\x03com\0\0\x01\0\x01'
 class Contracts(unittest.TestCase):

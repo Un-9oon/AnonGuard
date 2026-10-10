@@ -43,7 +43,7 @@ fn load_bindings(path: &std::path::Path, maximum: usize) -> io::Result<Vec<Bridg
     let mut identities = std::collections::HashSet::new();
     let mut endpoints = std::collections::HashSet::new();
     for entry in &bridges {
-        if ed25519_dalek::VerifyingKey::from_bytes(&entry.identity)
+        if crate::crypto::identity::VerifyingKey::from_bytes(&entry.identity)
             .map_or(true, |key| key.is_weak())
             || !identities.insert(entry.identity)
             || !endpoints.insert(entry.bridge)
@@ -203,7 +203,7 @@ mod tests {
             rand::random::<u128>()
         )));
         let binding = BridgeTransport {
-            identity: ed25519_dalek::SigningKey::from_bytes(&[51; 32])
+            identity: crate::crypto::identity::SigningKey::from_bytes(&[51; 32])
                 .verifying_key()
                 .to_bytes(),
             proxy: "127.0.0.1:1080".parse().unwrap(),
@@ -217,7 +217,7 @@ mod tests {
         .unwrap();
         assert_eq!(load_bridges(&fixture.0).unwrap().len(), 1);
         let mut alias = binding.clone();
-        alias.identity = ed25519_dalek::SigningKey::from_bytes(&[52; 32])
+        alias.identity = crate::crypto::identity::SigningKey::from_bytes(&[52; 32])
             .verifying_key()
             .to_bytes();
         std::fs::write(

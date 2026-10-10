@@ -1,12 +1,12 @@
 //! Local proof-of-concept tests for round-3 review. Not part of the upstream suite.
 use anonguard::core::state_machine::GuardedSocket;
+use anonguard::crypto::identity::SigningKey;
 use anonguard::gateway::server::handle_onion_relay_connection;
 use anonguard::onion::cell::{CellCommand, OnionCell, ONION_CELL_SIZE};
 use anonguard::onion::circuit::{
     build_create_cell, encode_relay_target, perform_client_relay_handshake, process_created_cell,
     OnionCircuit, RelayCircuitHop,
 };
-use ed25519_dalek::SigningKey;
 use ml_kem::{EncodedSizeUser, KemCore};
 use rand::rngs::OsRng;
 use std::net::SocketAddr;
@@ -64,7 +64,7 @@ fn poc_replay_window_gap_off_by_one() {
 
 async fn one_hop_exit(
     dest: SocketAddr,
-) -> (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit) {
+) -> (anonguard::onion::link_cover::CoveredStream, OnionCircuit) {
     one_hop_exit_opt(dest, false).await
 }
 
@@ -73,7 +73,7 @@ async fn one_hop_exit(
 async fn one_hop_exit_opt(
     dest: SocketAddr,
     chunked: bool,
-) -> (tokio_rustls::client::TlsStream<TcpStream>, OnionCircuit) {
+) -> (anonguard::onion::link_cover::CoveredStream, OnionCircuit) {
     let sk = SigningKey::generate(&mut OsRng);
     let pk = sk.verifying_key().to_bytes();
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -198,7 +198,7 @@ async fn run_case(split: bool) -> (bool, bool) {
     let wb = circ.wrap_forward(&mut b).unwrap();
     if split {
         s.write_all(&wb[..512]).await.unwrap();
-        s.flush().await.unwrap();
+        assert!(s.flush().await.is_err(), "Partial-cell flush must refuse");
         tokio::time::sleep(Duration::from_millis(150)).await;
         s.write_all(&wb[512..]).await.unwrap();
     } else {
@@ -325,7 +325,7 @@ async fn stream_rejects_authenticated_data_from_a_non_exit_hop() {
         }
     }
     let (local, mut application) = tokio::io::duplex(4096);
-    let (transport, mut malicious_entry) = tokio::io::duplex(4096);
+    let (transport, mut malicious_entry) = tokio::io::duplex(ONION_CELL_SIZE * 2);
     let kill = Arc::new(AtomicBool::new(false));
     let mut local = GuardedSocket::new(local, kill.clone())
         .begin_verification()

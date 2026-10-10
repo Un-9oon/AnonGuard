@@ -1,6 +1,8 @@
 //! Cryptographic TLS and HTTP protocol normalization.
 
 pub mod headers;
+pub mod hybrid_identity;
+pub mod identity;
 pub mod ja4;
 
 pub use headers::{HeaderNormalizer, CHROME_HEADER_ORDER, LEAK_HEADERS};

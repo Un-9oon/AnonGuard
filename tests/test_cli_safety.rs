@@ -29,7 +29,7 @@ fn strict_firewall_requires_explicit_installation() {
 
 #[test]
 fn authority_endpoints_require_matching_independent_pins() {
-    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let key = anonguard::crypto::identity::SigningKey::from_bytes(&[7; 32]);
     let public = hex::encode(key.verifying_key().to_bytes());
     let unrelated = format!("other:{public}");
     refuses(

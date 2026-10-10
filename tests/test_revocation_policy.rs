@@ -1,4 +1,5 @@
 //! Quorum retirement cannot be weakened by aliases, rollback or local-file errors.
+use anonguard::crypto::identity::{SigningKey, VerifyingKey};
 use anonguard::{
     core::{
         revocation::{load_and_commit, RevocationPolicy},
@@ -6,7 +7,6 @@ use anonguard::{
     },
     mesh::{ConsensusDocument, DirectoryAuthority, ProxyPool, RelayDescriptor},
 };
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -309,7 +309,7 @@ async fn retired_relay_is_rejected_at_authority_and_removed_from_verified_pool()
     let now = anonguard::mesh::current_timestamp_secs();
     let retired = relay(50, now);
     let live = relay(51, now);
-    let denied = HashSet::from([retired.identity_key_ed25519]);
+    let denied = HashSet::from([retired.identity_pin]);
     let authority = DirectoryAuthority::with_difficulty("a".into(), "127.0.0.1:0".into(), 0)
         .with_revoked_identities(denied.clone());
     assert!(authority
@@ -342,7 +342,7 @@ async fn authenticated_peer_gossip_cannot_reintroduce_a_retired_relay() {
     let peer_key = SigningKey::from_bytes(&[90; 32]);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut authority = DirectoryAuthority::with_difficulty("a".into(), "127.0.0.1:0".into(), 0)
-        .with_revoked_identities(HashSet::from([retired.identity_key_ed25519]));
+        .with_revoked_identities(HashSet::from([retired.identity_pin]));
     authority.peer_authorities = vec![(
         listener.local_addr().unwrap().to_string(),
         Some(peer_key.verifying_key()),
@@ -355,7 +355,7 @@ async fn authenticated_peer_gossip_cannot_reintroduce_a_retired_relay() {
                 .unwrap();
         assert_eq!(session.read_frame().await.unwrap(), b"GET_RELAY_LIST");
         session
-            .write_frame(&serde_json::to_vec(&vec![retired]).unwrap())
+            .write_document(&serde_json::to_vec(&vec![retired]).unwrap())
             .await
             .unwrap();
     });
@@ -411,8 +411,5 @@ async fn frozen_retired_vote_is_never_rewritten_or_served_as_current() {
             .with_revoked_identities(HashSet::from([public(50)]));
     assert!(restarted.generate_consensus().await.is_err());
     assert_eq!(std::fs::read(&journal).unwrap(), original);
-    assert!(vote
-        .relays
-        .iter()
-        .any(|r| r.identity_key_ed25519 == public(50)));
+    assert!(vote.relays.iter().any(|r| r.identity_pin == public(50)));
 }

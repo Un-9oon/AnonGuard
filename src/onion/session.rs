@@ -366,7 +366,11 @@ async fn run<W: AsyncWrite + Unpin>(
                     if client && !finishing { finishing=true; controls.push_back((CellCommand::SessionFinish,0,vec![])); }
                     if !client && peer_finish {
                         let wire=crypto.outgoing(CellCommand::SessionFinished,0,&[])?;
-                        tokio::time::timeout(Duration::from_secs(5),writer.write_all(&wire)).await??;
+                        tokio::time::timeout(Duration::from_secs(5),async {
+                            writer.write_all(&wire).await?;
+                            writer.flush().await?;
+                            writer.shutdown().await
+                        }).await??;
                         return Ok(());
                     }
                 }
