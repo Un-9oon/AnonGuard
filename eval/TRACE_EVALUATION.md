@@ -41,3 +41,42 @@ detect duplicate content. No accuracy result for AnonGuard or Tor is supplied.
 Synthetic unit-test accuracy proves only evaluator mechanics. Compare profiles
 at matched latency/bandwidth budgets; report confidence intervals across independent
 collection runs and tune exclusively on separate validation groups.
+
+## Owned-capture pilot limitations and integrity controls
+
+`capture_owned_testnet.py` records partial progress before collection and preserves
+failure metadata plus available capture logs/PCAPs. Use a fresh output directory:
+existing complete or partial evidence is not overwritten. Flow-observer failures,
+truncated capture records and kernel capture loss refuse a sample. Failed visits
+must remain in the report denominator; a successful rerun does not erase failures.
+
+Capture accounting separates bytes before the request, during its measured lifetime,
+and during the one-second post-request window. These are **whole gateway-link
+bytes**, including headers, retransmissions and cover from earlier still-active
+contexts. They are not request-attributed bandwidth overhead. In particular, strict
+mode reuses one context per collection block, so background contexts may accumulate.
+A fair per-request overhead experiment requires matched context lifetimes plus
+separate idle baseline windows; subtracting a guessed baseline is not acceptable.
+
+For a request-independent observation experiment, set
+`ANONGUARD_CAPTURE_WINDOW_SECONDS=5` (bounded to 5..120 seconds) alongside
+`ANONGUARD_TRAFFIC_EVAL`. Each capture continues for that duration after request
+start, including idle cover after completion. A request exceeding the window
+invalidates the sample instead of changing its observation duration. Keep the
+same window for every compared build/profile. This avoids deliberately stopping
+capture at each response's end, but does not remove observable session starts,
+congestion, accumulated contexts or later session termination. It is an evaluation
+control, not a new anonymity guarantee. Record failures and longer-workload exclusions.
+
+`evaluate_owned_capture.py` adds seeded held-out-label permutation diagnostics and
+majority-class/count baselines. Permutation preserves test class counts and never
+changes the trained model. This is a pipeline sanity check, not an anonymity proof.
+Wilson intervals assume independent visits: same-VM sequential samples and multiple
+model seeds do not provide independent deployments. Hyperparameters must be fixed
+before collecting a separate confirmation dataset.
+
+The exploratory link matcher reports tied maxima and events omitted by the fixed
+20-second window. It independently aligns both links to their first payload, losing
+absolute timing lag. Repeated sessions and workloads invalidate interpreting its
+same-VM top-1 rate as global-adversary resistance. Destination-side, multi-network,
+open-world and established defense-aware attacks remain unevaluated.

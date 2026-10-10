@@ -8,14 +8,18 @@ import numpy as np
 from evaluate_traces import load
 
 def exit_events(path):
-    data=path.read_bytes();assert data[:4]==b'\xd4\xc3\xb2\xa1' and struct.unpack('<I',data[20:24])[0]==1
+    data=path.read_bytes()
+    if len(data)<24:raise ValueError('Truncated PCAP header')
+    assert data[:4]==b'\xd4\xc3\xb2\xa1' and struct.unpack('<I',data[20:24])[0]==1
     offset=24;events=[]
     while offset<len(data):
+        if len(data)-offset<16:raise ValueError('Truncated PCAP record header')
         sec,frac,size,_=struct.unpack('<IIII',data[offset:offset+16]);offset+=16
+        if size>len(data)-offset:raise ValueError('Truncated PCAP packet')
         packet=data[offset:offset+size];offset+=size
         if len(packet)<54 or packet[12:14]!=b'\x08\x00':continue
         ip=packet[14:];ihl=(ip[0]&15)*4
-        if ip[9]!=6:continue
+        if ihl<20 or len(ip)<ihl+20 or ip[9]!=6:continue
         src=socket.inet_ntoa(ip[12:16]);dst=socket.inet_ntoa(ip[16:20]);tcp=ip[ihl:]
         payload=struct.unpack('!H',ip[2:4])[0]-ihl-((tcp[12]>>4)*4)
         if payload<=0:continue
@@ -30,7 +34,7 @@ def bins(events):
     result=np.zeros((2,400))
     for t,d,n in events:
         index=int(t/.05)
-        if index<400:result[0 if d==1 else 1,index]+=n
+        if 0<=index<400:result[0 if d==1 else 1,index]+=n
     return result
 
 def similarity(a,b):
@@ -45,8 +49,10 @@ def similarity(a,b):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('dataset');p.add_argument('pcap_directory');p.add_argument('--output',required=True);args=p.parse_args()
     doc,digest=load(args.dataset);results={}
+    if doc.get('complete') is False:raise ValueError('Incomplete capture must not be evaluated as a complete pilot')
     for profile in sorted({t['defense'] for t in doc['traces']}):
         traces=[t for t in doc['traces'] if t['defense']==profile and t['group']=='block-2']
+        if not traces:raise ValueError('No held-out windows for '+profile)
         clients=[bins(t['events']) for t in traces]
         exits=[bins(exit_events(Path(args.pcap_directory)/(t['id']+'.readable.pcap'))) for t in traces]
         matrix=[[similarity(client,exit_link) for exit_link in exits] for client in clients]
@@ -55,9 +61,14 @@ def main():
             winner=int(np.argmax(row));correct+=winner==i
             details.append({'id':traces[i]['id'],'selected_exit_window':traces[winner]['id'],'paired_score':row[i],'best_score':row[winner]})
         results[profile]={'candidate_windows':len(traces),'correct_top1':correct,'top1_rate':correct/len(traces),
-                          'random_candidate_chance':1/len(traces),'details':details}
+                          'random_candidate_chance':1/len(traces),
+                          'tied_top_score_rows':sum(sum(abs(value-max(row))<1e-12 for value in row)>1 for row in matrix),
+                          'client_events_outside_window':sum(e[0]>=20 for t in traces for e in t['events']),
+                          'details':details}
     report={'dataset_sha256':digest,'bin_ms':50,'maximum_shift_ms':500,'maximum_window_seconds':20,
             'results':results,'scope':'Same-VM capture-window matching, client-to-guard versus last-relay-to-exit, 12 held-out windows per profile. Repeated workloads and ongoing cover/session traffic affect attribution. Exploratory Pearson baseline selected after collection; no external validation.',
+            'alignment':'Each link is independently zeroed at first payload; absolute clock lag is discarded. Scores are exploratory.',
+            'uncertainty':'Repeated sequential windows share workload and session state; top-1 matching is not an independent anonymity estimate.',
             'destination_side_correlation':'NOT EVALUATED','global_adversary_resistance':'NOT ESTABLISHED'}
     with open(args.output,'x') as f:json.dump(report,f,indent=2)
     for profile,result in results.items():print(profile,result['correct_top1'],'/',result['candidate_windows'])

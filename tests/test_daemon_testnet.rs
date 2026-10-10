@@ -142,34 +142,35 @@ async fn ready(address: SocketAddr) {
     .expect("Daemon listener did not start");
 }
 
+fn testnet_deadline(browser: bool) -> Duration {
+    if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
+        // 36 samples, plus bounded setup, transfer and teardown margin.
+        // The collector separately refuses invalid observation windows.
+        let window = std::env::var("ANONGUARD_CAPTURE_WINDOW_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && (5.0..=120.0).contains(value))
+            .unwrap_or(0.0);
+        Duration::from_secs_f64((window * 36.0 + 180.0).max(600.0))
+    } else if browser && std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
+        Duration::from_secs(180)
+    } else {
+        Duration::from_secs(90)
+    }
+}
+
 #[tokio::test]
 async fn pinned_cli_testnet_bootstraps_transfers_and_closes_after_relay_loss() {
-    tokio::time::timeout(
-        Duration::from_secs(if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
-            600
-        } else {
-            90
-        }),
-        exercise(false),
-    )
-    .await
-    .expect("CLI testnet exceeded its bounded lifetime");
+    tokio::time::timeout(testnet_deadline(false), exercise(false))
+        .await
+        .expect("CLI testnet exceeded its bounded lifetime");
 }
 
 #[tokio::test]
 async fn padded_cli_testnet_transfers_and_closes_after_relay_loss() {
-    tokio::time::timeout(
-        Duration::from_secs(if std::env::var_os("ANONGUARD_TRAFFIC_EVAL").is_some() {
-            600
-        } else if std::env::var_os("ANONGUARD_BROWSER_TESTNET").is_some() {
-            180
-        } else {
-            90
-        }),
-        exercise(true),
-    )
-    .await
-    .expect("Padded CLI deadline");
+    tokio::time::timeout(testnet_deadline(true), exercise(true))
+        .await
+        .expect("Padded CLI deadline");
 }
 
 async fn exercise(padded: bool) {

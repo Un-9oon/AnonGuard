@@ -106,6 +106,8 @@ pub async fn connect(
     if pinned == [0; 32] {
         return Err(invalid("Relay link requires a directory identity pin"));
     }
+    // Cells are paced by the session; avoid a second TCP batching policy.
+    stream.set_nodelay(true)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Arc::new(IdentityVerifier {
         pinned,

@@ -1,6 +1,9 @@
 """Offline browser policy, topology and lifecycle contracts; no real browser launch."""
 import importlib.util
 import json
+import hashlib
+import io
+import zipfile
 import os
 from pathlib import Path
 import subprocess
@@ -124,6 +127,48 @@ class BrowserSessionTests(unittest.TestCase):
             self.assertEqual((output / 'anonguard.cfg').read_text(), browser.autoconfig())
             self.assertEqual((output / 'anonguard.js').read_text(), browser.AUTOCONFIG_LOADER)
             self.assertEqual(subprocess.run(command, capture_output=True, timeout=5).returncode, 1)
+
+    def test_bundle_is_coherent_exclusive_and_invalid_endpoint_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / 'bundle'
+            manifest = browser.emit_bundle(destination, '127.0.0.1', 9050, True, True)
+            self.assertTrue(manifest['signed_extension_required'])
+            self.assertFalse(manifest['browser_accepted'])
+            for name, digest in manifest['sha256'].items():
+                self.assertEqual(hashlib.sha256((destination / name).read_bytes()).hexdigest(), digest)
+                self.assertEqual((destination / name).stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads((destination / 'policies.json').read_text()),
+                             browser.policy('127.0.0.1', 9050, True, True))
+            with self.assertRaises(FileExistsError):
+                browser.emit_bundle(destination, '127.0.0.1', 9050, True, True)
+            bad = Path(directory) / 'bad'
+            with self.assertRaises(ValueError):
+                browser.emit_bundle(bad, '8.8.8.8', 9050, True, True)
+            self.assertFalse(bad.exists())
+
+    def test_extension_preflight_rejects_unsigned_wrong_identity_and_extra_code(self):
+        source = Path(__file__).resolve().parents[1] / 'browser/isolation'
+        manifest = json.loads((source / 'manifest.json').read_text())
+        def package(document, signatures=True, extra=None):
+            stream = io.BytesIO()
+            with zipfile.ZipFile(stream, 'w') as archive:
+                archive.writestr('manifest.json', json.dumps(document))
+                archive.writestr('isolation.js', 'test')
+                archive.writestr('background.js', 'test')
+                if signatures:
+                    archive.writestr('META-INF/mozilla.rsa', 'fixture, not a signature')
+                    archive.writestr('META-INF/mozilla.sf', 'fixture, not a signature')
+                if extra:
+                    archive.writestr(extra, 'test')
+            return stream.getvalue()
+        result = browser.validate_extension(package(manifest))
+        self.assertFalse(result['signature_verified'])
+        wrong = json.loads(json.dumps(manifest))
+        wrong['browser_specific_settings']['gecko']['id'] = 'other@example.com'
+        for content in (package(manifest, False), package(wrong),
+                        package(manifest, extra='../escape'), package(manifest, extra='extra.js'), b'bad'):
+            with self.subTest(content=content[:20]), self.assertRaises(ValueError):
+                browser.validate_extension(content)
 
     def test_invalid_endpoint_never_creates_policy(self):
         for host in ('127.0.0.1', '8.8.8.8', '::1', '10.77.0.1;exec'):

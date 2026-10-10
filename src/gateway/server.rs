@@ -329,6 +329,9 @@ impl GatewayServer {
             };
 
             let (client_stream, client_addr) = listener.accept().await?;
+            if self.config.relay_mode {
+                client_stream.set_nodelay(true)?;
+            }
             let client_ip = client_addr.ip();
 
             // 2. Per-IP connection ceiling (prevent single-client connection flooding)

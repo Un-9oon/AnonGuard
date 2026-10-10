@@ -14,6 +14,25 @@
 
 Install `bubblewrap`, `python3`, `libseccomp2`, `iproute2`, `nftables`, and `util-linux` from trusted OS repositories. Provision a minimal rootfs beneath a root-owned non-writable parent, including only the approved executable and runtime libraries. Create a dedicated host application account and record its numeric UID/GID.
 
+Before configuring the optional restricted application launcher, run the packaged
+read-only prerequisite diagnostic **as the intended ordinary application user**:
+
+```sh
+anonguard-setup --check-app-containment
+```
+
+This action needs no authority bootstrap and creates no files, host firewall rules,
+accounts or AppArmor policies. It verifies protected non-set-ID OS Bubblewrap/true
+executables, then runs `/usr/bin/true` in disposable Bubblewrap namespaces with a
+read-only root, private proc/dev and a ten-second limit. JSON reports namespace
+permission and the Ubuntu AppArmor restriction setting; refusal includes an
+administrator action rather than a global security downgrade. Running with sudo
+is refused because root success does not establish the application user's permission.
+A successful basic probe does **not** verify the prepared gateway namespace,
+immutable application rootfs, seccomp configuration or complete containment; run
+the actual launcher acceptance afterward. Native transparent client/volunteer roles
+do not themselves require Bubblewrap, so this diagnostic is a separate explicit action.
+
 On Ubuntu kernels enforcing AppArmor user-namespace restrictions, an administrator must authorize the trusted OS Bubblewrap executable. If the OS already ships and loads a Bubblewrap profile, keep that vendor policy. Otherwise inspect `deploy/apparmor/anonguard-bwrap` (packaged as `/usr/share/doc/anonguard/anonguard-bwrap.apparmor`), install it beneath `/etc/apparmor.d/`, and load it with `sudo apparmor_parser -r /etc/apparmor.d/anonguard-bwrap`. This executable-specific `userns` permission applies to other users of `/usr/bin/bwrap` too; it is an explicit host policy decision. Do not install a duplicate attachment alongside a vendor Bubblewrap profile, disable AppArmor globally, or turn off the kernel user-namespace restriction. The launcher never changes host AppArmor policy automatically. Without the required policy, setup refuses execution. The application still has namespace creation blocked by seccomp and Bubblewrap's nested namespace limit.
 
 Configure authority endpoints, pins and quorum, then start the gateway in its administrative namespace mode. The packaged DynamicUser service does not automatically receive namespace privileges. Use the same namespace and IPv4 proxy port for the application:

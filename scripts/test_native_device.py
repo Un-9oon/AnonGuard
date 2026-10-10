@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 import struct
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -20,6 +21,27 @@ def document():
 def query():
     return struct.pack('!6H',42,0x100,1,0,0,0)+b'\x07example\x03com\0\0\x01\0\x01'
 class Contracts(unittest.TestCase):
+    def test_containment_probe_reports_refusal_without_changing_policy(self):
+        with patch.object(setup.os, 'geteuid', return_value=1000), \
+                patch.object(setup.Path, 'resolve', return_value=Path('/usr/bin/true')), \
+                patch.object(setup.Path, 'stat', return_value=SimpleNamespace(st_mode=setup.stat.S_IFREG | 0o755, st_uid=0)), \
+                patch.object(setup.Path, 'read_text', return_value='1\n'), \
+                patch.object(setup.os, 'access', return_value=True), \
+                patch.object(setup.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'permission denied')) as run:
+            result = setup.check_app_containment()
+        self.assertFalse(result['namespace_probe_passed'])
+        self.assertFalse(result['host_policy_modified'])
+        self.assertIn('do not disable', result['action'])
+        self.assertEqual(run.call_count, 1)
+        self.assertIn('--unshare-all', run.call_args.args[0])
+        self.assertEqual(run.call_args.kwargs['timeout'], 10)
+
+    def test_containment_probe_does_not_accept_root_as_application_user(self):
+        with patch.object(setup.os, 'geteuid', return_value=0), patch.object(setup.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'without sudo'):
+                setup.check_app_containment()
+        run.assert_not_called()
+
     def test_bootstrap_shapes(self):
         setup.bootstrap(json.dumps(document()))
         for bad in (None,[],{},dict(document(),quorum=0),dict(document(),authorities=[None])):

@@ -78,6 +78,14 @@ Privileged services must be audited independently. Client mode restricts LAN
 services and can interrupt ordinary desktop applications; use a dedicated device
 and retain console access.
 
+For the optional restricted headless application feature, use
+`anonguard-setup --check-app-containment` as the intended non-root application user
+before provisioning. This bounded read-only Bubblewrap namespace diagnostic
+reports an actionable refusal on Ubuntu AppArmor/kernel restrictions and never
+installs or disables host policy. See [application containment prerequisites](LINUX_APP_CONTAINMENT.md).
+It is separate from native role activation: native client/relay services do not
+need Bubblewrap, and a successful probe is not full application acceptance.
+
 ## Native browser
 
 Render a native loopback policy with:

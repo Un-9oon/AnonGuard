@@ -25,6 +25,30 @@ transport is otherwise unchanged. Preserve identities, guards and rollback state
 
 ## Timing behavior
 
+Padded sessions wait a fresh profile interval after completing each socket write.
+Backpressure therefore cannot produce immediate catch-up cells from an expired
+timer. Relay TCP links disable Nagle batching so the kernel does not deliberately
+add another small-write delay. Congestion, TCP segmentation and host scheduling
+still affect wire timing; these settings are not a traffic-analysis proof.
+
+### Cover budget and deployment tradeoff
+
+The strict session interval is 20 ms: nominally 100 KiB/s of 2048-byte cells per
+direction, or 200 KiB/s across both directions of each circuit link, even while
+idle. Balanced uses 40 ms, nominally 50 KiB/s per direction. These are scheduling
+budgets before TLS/TCP overhead, segmentation, retransmission and backpressure,
+not measured throughput. Each hop carries that traffic; multiple isolated
+contexts multiply it. The gateway bounds cached contexts to eight, streams to
+sixteen per session and session lifetime to 300 seconds. Normal idle completion
+also obeys the existing minimum-age/idle and 64-cell volume boundaries.
+
+Native setup keeps balanced mode as its default. Use strict only with an explicit
+cover budget; it does not promise stronger measured anonymity on every workload.
+Reducing cover when application bytes stop can expose activity, while lengthening
+tails consumes bandwidth. Do not tune these policies using the same held-out
+attack samples used to claim success. Measure complete session lifetimes and
+independent idle windows before reporting per-request or deployment-wide cost.
+
 Default scheduling uses a 20 ms continuous timer and emits DATA, ACK or DUMMY
 cells. `--rmt-morphing --rmt-ensemble goe` or `gue` selects experimental
 Wigner-surmise intervals. GOE uses inverse-transform sampling; GUE uses a scaled

@@ -265,6 +265,41 @@ def apply(files):
         subprocess.run(['/usr/bin/systemctl', 'enable', '--now', 'anonguard-relay.service'], check=True)
 
 
+def check_app_containment():
+    """Probe the current ordinary user's namespace permission; no policy changes."""
+    if sys.platform != 'linux' or os.geteuid() == 0:
+        raise ValueError('Run --check-app-containment as the ordinary application user on Linux, without sudo')
+    executable = Path('/usr/bin/bwrap')
+    for dependency in (executable, Path('/usr/bin/true')):
+        resolved = dependency.resolve(strict=True)
+        metadata = resolved.stat()
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_mode & (0o022 | stat.S_ISUID | stat.S_ISGID)
+                or not os.access(resolved, os.X_OK)):
+            raise ValueError('Probe requires trusted non-set-ID OS dependency: ' + str(dependency))
+        for parent in resolved.parents:
+            metadata = parent.stat()
+            if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                raise ValueError('Probe dependency ancestor is not administrator-controlled')
+    restriction = Path('/proc/sys/kernel/apparmor_restrict_unprivileged_userns')
+    restricted = restriction.read_text().strip() == '1' if restriction.exists() else None
+    result = subprocess.run([
+        str(executable), '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev',
+        '--unshare-all', '--die-with-parent', '--new-session', '--', '/usr/bin/true',
+    ], capture_output=True, text=True, timeout=10, env={'PATH': '/usr/bin:/bin', 'LANG': 'C'})
+    report = {'namespace_probe_passed': result.returncode == 0,
+              'apparmor_userns_restricted': restricted,
+              'host_policy_modified': False, 'deployment_accepted': False,
+              'scope': 'current user basic Bubblewrap namespaces; not full application containment'}
+    if result.returncode:
+        report['diagnostic'] = result.stderr.strip()[:2000]
+        report['action'] = ('Review the vendor Bubblewrap AppArmor profile and '
+                            '/usr/share/doc/anonguard/anonguard-bwrap.apparmor with an administrator. '
+                            'Keep existing vendor attachments; do not disable AppArmor or kernel restrictions. '
+                            'See docs/LINUX_APP_CONTAINMENT.md; other kernel/container restrictions may also deny namespaces.')
+    return report
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--role', choices=('client', 'volunteer'))
@@ -273,10 +308,16 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--output', type=Path, help='Render only; never activate services')
     action.add_argument('--apply', action='store_true', help='Configure this device from its console')
+    action.add_argument('--check-app-containment', action='store_true',
+                        help='Read-only ordinary-user Bubblewrap prerequisite probe; no bootstrap needed')
     parser.add_argument('--relay-bind', default='0.0.0.0:9443')
     parser.add_argument('--relay-advertise')
     args = parser.parse_args()
     try:
+        if args.check_app_containment:
+            report = check_app_containment()
+            print(json.dumps(report))
+            return 0 if report['namespace_probe_passed'] else 1
         if args.role is None:
             if not sys.stdin.isatty():
                 raise ValueError('Noninteractive setup requires --role')

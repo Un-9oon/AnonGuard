@@ -1,6 +1,8 @@
 #!/usr/bin/python3 -I
 """Experimental disposable Firefox ESR sessions on a native client or inside the optional SOCKS-only application VM."""
 import argparse
+import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -11,6 +13,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import zipfile
+import shutil
 
 
 LOCKED_PREFERENCES = {
@@ -104,6 +108,68 @@ def policy(host, port, native=False, isolated=False):
             'install_url': 'file:///usr/share/anonguard/browser/isolation-signed.xpi',
         }
     return document
+
+
+def validate_extension(content):
+    """Bounded structural preflight; Firefox must authenticate the actual signature."""
+    if len(content) > 1024 * 1024:
+        raise ValueError('Isolation extension exceeds size bound')
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            entries = archive.infolist()
+            names = [entry.filename for entry in entries]
+            if (len(entries) > 32 or len(names) != len(set(names))
+                    or sum(entry.file_size for entry in entries) > 2 * 1024 * 1024
+                    or any(entry.flag_bits & 1 for entry in entries)):
+                raise ValueError('Unsafe isolation extension archive')
+            required = {'manifest.json', 'isolation.js', 'background.js'}
+            if not required.issubset(names) or any(
+                    name not in required and not re.fullmatch(r'META-INF/[A-Za-z0-9_.-]+', name)
+                    for name in names):
+                raise ValueError('Unexpected isolation extension code or archive path')
+            # Signed Mozilla XPI artifacts contain these PKCS7 signature members.
+            # Their existence is not a cryptographic authenticity verdict.
+            if not {'META-INF/mozilla.rsa', 'META-INF/mozilla.sf'}.issubset(names):
+                raise ValueError('Isolation extension has no Mozilla signature structure')
+            manifest = json.loads(archive.read('manifest.json'))
+            if (manifest.get('manifest_version') != 2
+                    or manifest.get('browser_specific_settings', {}).get('gecko', {}).get('id')
+                    != 'isolation@anonguard.local'
+                    or manifest.get('background') != {'scripts': ['isolation.js', 'background.js'], 'persistent': True}
+                    or set(manifest.get('permissions', [])) != {
+                        'proxy', 'webRequest', 'webRequestBlocking', 'tabs', '<all_urls>', 'cookies'}):
+                raise ValueError('Isolation extension manifest does not match supported contract')
+            if not re.fullmatch(r'[0-9]+(?:\.[0-9]+){1,3}', manifest.get('version', '')):
+                raise ValueError('Invalid isolation extension version')
+    except (zipfile.BadZipFile, KeyError, TypeError, AttributeError, json.JSONDecodeError) as error:
+        raise ValueError('Invalid isolation extension archive') from error
+    return {'version': manifest['version'], 'sha256': hashlib.sha256(content).hexdigest(),
+            'signature_verified': False}
+
+
+def emit_bundle(destination, host, port, native=False, isolated=False):
+    """Generate a reviewable coherent set, without changing installed Firefox."""
+    document = policy(host, port, native, isolated)
+    destination.mkdir(mode=0o700)
+    try:
+        files = {'policies.json': json.dumps(document, indent=2) + '\n',
+                 'anonguard.cfg': autoconfig(), 'anonguard.js': AUTOCONFIG_LOADER}
+        for name, content in files.items():
+            descriptor = os.open(destination / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, 'w') as stream:
+                stream.write(content)
+        manifest = {'version': 1, 'native_client': native, 'circuit_isolation': isolated,
+                    'sha256': {name: hashlib.sha256(content.encode()).hexdigest()
+                               for name, content in files.items()},
+                    'signed_extension_required': isolated, 'browser_accepted': False}
+        with (destination / 'bundle.json').open('x') as stream:
+            json.dump(manifest, stream, indent=2)
+            stream.write('\n')
+        (destination / 'bundle.json').chmod(0o600)
+    except BaseException:
+        shutil.rmtree(destination)
+        raise
+    return manifest
 
 
 def trusted_file(path, maximum=65536):
@@ -249,6 +315,7 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument('--emit-policy', type=Path)
     action.add_argument('--emit-autoconfig', type=Path)
+    action.add_argument('--emit-bundle', type=Path)
     action.add_argument('--check', action='store_true')
     action.add_argument('--launch', action='store_true')
     parser.add_argument('--proxy-host')
@@ -263,6 +330,9 @@ def main():
     args = parser.parse_args()
     try:
         host, port = endpoint(args.proxy_host or ('127.0.0.1' if args.native_client else '10.77.0.1'), args.proxy_port, args.native_client)
+        if args.emit_bundle:
+            print(json.dumps(emit_bundle(args.emit_bundle, host, port, args.native_client, args.circuit_isolation)))
+            return 0
         if args.emit_autoconfig:
             args.emit_autoconfig.mkdir(mode=0o700)
             for name, content in (('anonguard.cfg', autoconfig()), ('anonguard.js', AUTOCONFIG_LOADER)):
@@ -285,7 +355,7 @@ def main():
             raise ValueError('Browser sessions require an ordinary user in the Linux client environment')
         validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client, args.circuit_isolation)
         if args.circuit_isolation:
-            trusted_file(Path("/usr/share/anonguard/browser/isolation-signed.xpi"), maximum=1024 * 1024)
+            validate_extension(trusted_file(Path("/usr/share/anonguard/browser/isolation-signed.xpi"), maximum=1024 * 1024))
         if args.native_client:
             validate_native(json.loads(trusted_file(args.device_profile)))
         else:
@@ -310,7 +380,7 @@ def main():
                               'policy_loaded_by_browser': 'NOT VERIFIED', 'version': version.strip()}))
             return 0
         return launch(browser, host, port)
-    except (ValueError, OSError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    except (ValueError, OSError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'Browser session refused: {error}', file=sys.stderr)
         return 1
 

@@ -129,3 +129,46 @@ resources and an actual `distribution/policies.json`. It verifies policy loading
 and all relevant preference locks in ordinary and isolated profiles, without
 changing the installed Firefox. It does not establish the operator's installed
 client configuration, addon signature acceptance or all fingerprint surfaces.
+
+### Coherent provisioning bundle
+
+Generate all three configuration inputs together instead of mixing an old policy
+with new privacy locks:
+
+```bash
+python3 scripts/browser_session.py --native-client --circuit-isolation \
+  --emit-bundle ./browser-provisioning
+```
+
+The destination must not exist. It contains `policies.json`, `anonguard.cfg`,
+`anonguard.js`, and a SHA-256 inventory in `bundle.json`; files are private to the
+creator. Generation changes neither Firefox nor host services. The inventory is
+for consistency checking, not a signature or an authenticity proof.
+
+For an administrator-managed Firefox ESR installation, install the reviewed
+policy at `/etc/firefox/policies/policies.json`, the cfg beside the resolved vendor
+Firefox executable, and the loader at that directory's
+`defaults/pref/anonguard.js`. Use root-owned files mode 0644 and protected,
+non-symlink ancestor directories. Refuse conflicting AutoConfig loaders rather
+than overwriting another administrator's setup. This policy affects that Firefox
+installation, including other users; provision a dedicated installation when
+shared-browser behavior must be preserved. Do not copy files into a vendor
+resource tree through symlinked directories.
+
+Circuit isolation additionally requires the genuine Mozilla-signed XPI at
+`/usr/share/anonguard/browser/isolation-signed.xpi`. The launcher now rejects
+unsigned archives, wrong extension identities, unexpected executable members,
+duplicate members, archive traversal, and oversized decompressed contents.
+Signature-member presence is only a structural preflight: Firefox must verify
+the actual signature and accept the managed extension. Never rename the unsigned
+source package to make it appear signed, or disable signature verification.
+A non-isolated bundle deliberately uses the shared default circuit and must not
+be described as providing per-origin circuit isolation.
+
+After protected installation, run `anonguard-browser --native-client
+--circuit-isolation --check` as the ordinary client user. This verifies files and
+service prerequisites; its output still states that browser policy loading has
+not been verified. Acceptance must include actual policy locks, managed addon
+loading, distinct SOCKS origin credentials, and failure refusal in the installed
+browser. The automation tests use temporary addon installation and are not a
+substitute for the signed distribution acceptance test.

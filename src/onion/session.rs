@@ -361,7 +361,6 @@ async fn run<W: AsyncWrite + Unpin>(
         }
         tokio::select! {
             _=&mut clock => {
-                clock.as_mut().reset(Instant::now()+profile.interval());
                 let idle=streams.is_empty() && connecting.is_empty() && controls.is_empty();
                 if idle && profile.can_finish(start.elapsed(),activity.elapsed(),cells) {
                     if client && !finishing { finishing=true; controls.push_back((CellCommand::SessionFinish,0,vec![])); }
@@ -394,6 +393,8 @@ async fn run<W: AsyncWrite + Unpin>(
                 let (command,id,data)=selected.or_else(||controls.pop_front()).unwrap_or((CellCommand::Dummy,0,vec![]));
                 let wire=crypto.outgoing(command,id,&data)?;
                 tokio::time::timeout(Duration::from_secs(30),writer.write_all(&wire)).await??;
+                // Backpressure must not leave an expired timer and trigger a catch-up burst.
+                clock.as_mut().reset(Instant::now()+profile.interval());
                 cells=cells.checked_add(1).ok_or_else(||invalid("Cell count exhausted"))?;
                 let retired:Vec<_>=streams.iter().filter(|(_,stream)|stream.sent_end && stream.received_end && stream.window.drained() && stream.received==stream.written && stream.ack.is_none()).map(|(id,_)|*id).collect();
                 for id in retired {streams.remove(&id);closed.insert(id);}
@@ -583,6 +584,46 @@ mod tests {
         assert!(count >= 750); // >=30s at 40ms; tail survives an early finish request.
         task.await.unwrap().unwrap();
     }
+    #[tokio::test(start_paused = true)]
+    async fn backpressure_does_not_trigger_a_catch_up_cell() {
+        let (client, _) = pair();
+        let (_frame_tx, frames) = mpsc::channel(4);
+        let (_requests, opens) = mpsc::channel(4);
+        let (writer, mut reader) = tokio::io::duplex(ONION_CELL_SIZE);
+        let task = tokio::spawn(async move {
+            let mut workers = JoinSet::new();
+            run(
+                writer,
+                frames,
+                client,
+                Profile::Balanced,
+                Some(opens),
+                None,
+                &mut workers,
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(40)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(40)).await;
+        tokio::task::yield_now().await;
+        // The second write is blocked behind the unread first cell.
+        tokio::time::advance(Duration::from_millis(200)).await;
+        let mut wire = [0; ONION_CELL_SIZE];
+        reader.read_exact(&mut wire).await.unwrap();
+        tokio::task::yield_now().await;
+        reader.read_exact(&mut wire).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(39), reader.read_exact(&mut wire))
+                .await
+                .is_err()
+        );
+        reader.read_exact(&mut wire).await.unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn session_without_peer_finish_has_a_hard_lifetime() {
         let (_, exit) = pair();

@@ -2,6 +2,12 @@
 
 Status: experimental v5. Completion of this engineering redesign is not approval for public anonymity deployment and does not establish superiority to Tor.
 
+Latest follow-up: [parallel engineering and owned-VM validation](ENHANCEMENT_VALIDATION_2026-10-10.md)
+records session backpressure/Nagle fixes, evidence-integrity controls, fixed-window
+evaluation, browser provisioning and Ubuntu prerequisites. Fresh pilot results
+still expose duration/volume information and link correlation; these changes do
+not close the production-anonymity release gates.
+
 ## Implemented redesign
 
 - Bounded randomized 3–8-hop circuits (CLI default 3–5), persistent entry guards, certified non-exit middles and an exit, with optional bounded traffic-independent RMT/Poisson/Lorenz cell scheduling. Protocol v5 changes the backward sequence layout and transcript domains; coordinated relay/client upgrade is mandatory. See [the routing and scheduling contract](MULTIHOP_SCHEDULING.md). Longer paths and statistical timing are not proven anonymity improvements.
