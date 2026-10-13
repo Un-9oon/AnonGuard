@@ -77,19 +77,19 @@ GitHub Actions run must be inspected separately before claiming green remote CI.
 
 ## Dependency advisory evidence
 
-The direct RustSec archive/Git downloads failed in this environment. The official
-GitHub connector returned the complete, non-truncated 2296-entry recursive tree
-at RustSec revision `6aed84668c23d7f535077a9fe918bf1fa0f6a5bc`. Every advisory
-Markdown blob for every package name in Cargo.lock was selected: 96 files.
-All 96 fetched bytes matched the upstream Git blob SHA-1. This excludes only
-advisories for crates absent from the lockfile, not applicable advisories or
-warning classes. Cargo-audit 0.22.2 scanned 309 lockfile packages with no ignored
-advisories and `--deny warnings`: zero matching vulnerabilities and zero warnings.
+The complete RustSec snapshot at revision
+`6aed84668c23d7f535077a9fe918bf1fa0f6a5bc` was downloaded after initial
+network failures. Every extracted file matched its upstream Git blob SHA-1
+in the complete, non-truncated 2296-entry recursive tree. Cargo-audit 0.22.2
+loaded all 1310 advisories and scanned 309 lockfile packages with no ignored
+advisories and `--deny warnings`: zero vulnerabilities and zero warnings.
 
-[The manifest](evidence/2026-10-13/rustsec-advisory-manifest.json) records every
-path/hash and source revision; [the audit JSON](evidence/2026-10-13/cargo-audit.json)
-records the result. Its Git metadata fields are null because the fetched subset
-is not a Git checkout. This is a snapshot check of published dependency
+[Full snapshot provenance](evidence/2026-10-13/rustsec-full-snapshot.json) records
+the revision, archive hash and verification count;
+[the audit JSON](evidence/2026-10-13/cargo-audit.json) records the full result.
+Its Git metadata fields are null because the archive is not a Git checkout.
+The earlier 96-advisory relevant-package check and hash manifest are retained
+as separate evidence. This is a snapshot check of published dependency
 advisories, not evidence that custom protocol composition is secure.
 
 ## Outstanding acceptance
