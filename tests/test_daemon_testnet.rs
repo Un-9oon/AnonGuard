@@ -51,8 +51,11 @@ impl Testnet {
         ];
         args.extend_from_slice(authority_args);
         args.extend(extra.iter().map(|s| s.to_string()));
+        // Allow the same deployment regression to exercise the optimized artifact.
+        let binary = std::env::var_os("ANONGUARD_TEST_DAEMON")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_anonguard-daemon").into());
         self.daemons.push(
-            Command::new(env!("CARGO_BIN_EXE_anonguard-daemon"))
+            Command::new(binary)
                 .args(args)
                 .stdout(output.try_clone().unwrap())
                 .stderr(output)

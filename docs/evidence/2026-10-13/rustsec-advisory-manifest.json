@@ -1,0 +1,391 @@
+{
+  "source": "RustSec/advisory-db",
+  "revision": "6aed84668c23d7f535077a9fe918bf1fa0f6a5bc",
+  "scope": "All advisory Markdown blobs whose crate directory matches any Cargo.lock package; selected from complete non-truncated upstream recursive tree (2296 entries). Git blob SHA-1 verified for every fetched file.",
+  "advisories": [
+    {
+      "path": "crates/anstream/RUSTSEC-2024-0404.md",
+      "sha": "7c88be6f2e568d2ccd33e9d0c6e8f6f041fd49f6"
+    },
+    {
+      "path": "crates/aws-lc-sys/RUSTSEC-2026-0044.md",
+      "sha": "1b94e75fd3f44989e268a57fa13a789215ebcf35"
+    },
+    {
+      "path": "crates/aws-lc-sys/RUSTSEC-2026-0045.md",
+      "sha": "7cb5517c7258f8a636f159b184c8d362bbd09a41"
+    },
+    {
+      "path": "crates/aws-lc-sys/RUSTSEC-2026-0046.md",
+      "sha": "a0f51147388090f31fb09f6b6a8bee44420918da"
+    },
+    {
+      "path": "crates/aws-lc-sys/RUSTSEC-2026-0047.md",
+      "sha": "92302ef413f6ce7d5ba516b21678b3a96af0f168"
+    },
+    {
+      "path": "crates/aws-lc-sys/RUSTSEC-2026-0048.md",
+      "sha": "b18a60a1472848ab63164c8d1ee25954f1158621"
+    },
+    {
+      "path": "crates/base64/RUSTSEC-2017-0004.md",
+      "sha": "9f23ea17de30b520b444d781f018e293ee0726c1"
+    },
+    {
+      "path": "crates/bumpalo/RUSTSEC-2020-0006.md",
+      "sha": "e5da37434bf40f29c66ad73fc853ed50f049c0a4"
+    },
+    {
+      "path": "crates/bumpalo/RUSTSEC-2022-0078.md",
+      "sha": "ca9ecaf41598f2f347704f0495607ef226afc784"
+    },
+    {
+      "path": "crates/bytes/RUSTSEC-2026-0007.md",
+      "sha": "00f4b2053f775619882baedab93971938d16475c"
+    },
+    {
+      "path": "crates/chacha20/RUSTSEC-2019-0029.md",
+      "sha": "64743cd2fd7ac98ef7b86f33c7710d676d801868"
+    },
+    {
+      "path": "crates/cmov/RUSTSEC-2026-0003.md",
+      "sha": "52a930e720015bac0e21084364ede8675b4a0881"
+    },
+    {
+      "path": "crates/crossbeam-deque/RUSTSEC-2021-0093.md",
+      "sha": "4a3c24110e2084a97e4a3ea69b4f73fcea24e234"
+    },
+    {
+      "path": "crates/crossbeam-epoch/RUSTSEC-2026-0204.md",
+      "sha": "80d99c946bdd0ee6d24c402bf887f80f91e05586"
+    },
+    {
+      "path": "crates/crossbeam-utils/RUSTSEC-2022-0041.md",
+      "sha": "90470e3350ff92aa68b4471da579ee6a2c41d10d"
+    },
+    {
+      "path": "crates/curve25519-dalek/RUSTSEC-2024-0344.md",
+      "sha": "67b854219fc9063d1c24c80ab5586b139754af9c"
+    },
+    {
+      "path": "crates/ed25519-dalek/RUSTSEC-2022-0093.md",
+      "sha": "36d43cfac0c23c39dee3802e113834b6cdf8b631"
+    },
+    {
+      "path": "crates/futures-task/RUSTSEC-2020-0060.md",
+      "sha": "11191c2a7708d4a237ad37de3dc10cd5ae322b7a"
+    },
+    {
+      "path": "crates/futures-task/RUSTSEC-2020-0061.md",
+      "sha": "ca56af5726ce6b8a4143210fc2808c44db338ec3"
+    },
+    {
+      "path": "crates/futures-util/RUSTSEC-2020-0059.md",
+      "sha": "45a2203bce0d00bfb9dadb3030b499767a4a509b"
+    },
+    {
+      "path": "crates/futures-util/RUSTSEC-2020-0062.md",
+      "sha": "68ba1a7847959aa0327b89180cdbd120f00e77e9"
+    },
+    {
+      "path": "crates/generator/RUSTSEC-2019-0020.md",
+      "sha": "e870e4078417c1f7e68b48609948505275a1f435"
+    },
+    {
+      "path": "crates/generator/RUSTSEC-2020-0151.md",
+      "sha": "11d77efce33e86297bbd2e1f60d9a6813825d947"
+    },
+    {
+      "path": "crates/generic-array/RUSTSEC-2020-0146.md",
+      "sha": "17b32ed3caff175cca147037d42dea776a0759c1"
+    },
+    {
+      "path": "crates/h2/RUSTSEC-2023-0034.md",
+      "sha": "79d3c904a7f6c9bc928e55154eaa99f4c6eee2bf"
+    },
+    {
+      "path": "crates/h2/RUSTSEC-2024-0003.md",
+      "sha": "adca9e3ec97549ca29a882c23592a58ac47003c6"
+    },
+    {
+      "path": "crates/h2/RUSTSEC-2024-0332.md",
+      "sha": "3243ad73390a89f1e87a01916a1ca00edaa9675f"
+    },
+    {
+      "path": "crates/h2/RUSTSEC-2026-0258.md",
+      "sha": "afd22869c74872884501c004652235095e0e10c5"
+    },
+    {
+      "path": "crates/hashbrown/RUSTSEC-2024-0402.md",
+      "sha": "93322d4677b9c2f47a7f81f7e73902312eaf3fdc"
+    },
+    {
+      "path": "crates/http/RUSTSEC-2019-0033.md",
+      "sha": "47dfe4709f6301739184e7e3c2a91652256a83c3"
+    },
+    {
+      "path": "crates/http/RUSTSEC-2019-0034.md",
+      "sha": "92ee2f679e02cd30c8e3ff6567015092461850d7"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2016-0002.md",
+      "sha": "b31304357b706868b79f6b066ed1b05560b0412e"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2017-0002.md",
+      "sha": "020006c6e2867791b7430b30ec69a86ae78f2cc8"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2020-0008.md",
+      "sha": "4735732bf787ec3629038304119146202a78ff0e"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2021-0020.md",
+      "sha": "c7896841c5cbc400ea9de8defbc7e5bfd8d95b3c"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2021-0078.md",
+      "sha": "f2155cd7fd75f9248696e6340da510f4112b0131"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2021-0079.md",
+      "sha": "94ea9f6e7291977ca0452cab83ca1a02d25e4092"
+    },
+    {
+      "path": "crates/hyper/RUSTSEC-2022-0022.md",
+      "sha": "0c83a4d1b202133a74084a6d7301122dbcf50819"
+    },
+    {
+      "path": "crates/idna/RUSTSEC-2024-0421.md",
+      "sha": "2eeb07ee8fa4633ffed401749a680bc238ffc575"
+    },
+    {
+      "path": "crates/keccak/RUSTSEC-2026-0012.md",
+      "sha": "a495403067a3a738bda3e39744fb0d103573aed9"
+    },
+    {
+      "path": "crates/lock_api/RUSTSEC-2020-0070.md",
+      "sha": "8d6a474bfe35b7ee76a0d2d4713572da9fb0b299"
+    },
+    {
+      "path": "crates/metrics-util/RUSTSEC-2021-0113.md",
+      "sha": "e3d211236176b3a8b55c1d61514e5b0eba69e4b4"
+    },
+    {
+      "path": "crates/mio/RUSTSEC-2020-0081.md",
+      "sha": "b3e1ee23beaed55dd29cfc3e085e05fa5f3407fa"
+    },
+    {
+      "path": "crates/mio/RUSTSEC-2024-0019.md",
+      "sha": "2d88c4bef93e8a1538514052e8b06e11a7ed1f15"
+    },
+    {
+      "path": "crates/ml-dsa/RUSTSEC-2025-0144.md",
+      "sha": "36ace6170205b87eb41942d35e0039f25e84e2dd"
+    },
+    {
+      "path": "crates/once_cell/RUSTSEC-2019-0017.md",
+      "sha": "2001b4218a8a614246e37ff00ee0b2dfcaeca7eb"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2020-0074.md",
+      "sha": "8ac6771d2b93890efbcc9912958ded3d71ace243"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2024-0378.md",
+      "sha": "edf6a41166744eb5babc7708c4dd0061dca1545a"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2024-0409.md",
+      "sha": "54b172b419831b9e53c31d21ba774cc78256aa52"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2025-0020.md",
+      "sha": "9772eef4d8fc0073fc47c62cde973c7966cc7b2c"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2026-0013.md",
+      "sha": "7d8f5d153995884b603efc188a8d1a49afcbfd8c"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2026-0176.md",
+      "sha": "d0d2725288e79ceae55e7519fd508ff479eaf78f"
+    },
+    {
+      "path": "crates/pyo3/RUSTSEC-2026-0177.md",
+      "sha": "af70f325ed2f2fdc6e0d2bd81eff2d1ceae0d32b"
+    },
+    {
+      "path": "crates/rand/RUSTSEC-2026-0097.md",
+      "sha": "8682f0b8caa97451376124e2720fbe8b6adcf6c3"
+    },
+    {
+      "path": "crates/rand_core/RUSTSEC-2019-0035.md",
+      "sha": "d475ca1278107854fd7a168cfc299e74c3a3e729"
+    },
+    {
+      "path": "crates/rand_core/RUSTSEC-2021-0023.md",
+      "sha": "ca243d158653df49351f11830bcd5d332f039dfe"
+    },
+    {
+      "path": "crates/raw-cpuid/RUSTSEC-2021-0013.md",
+      "sha": "8eed868fc763bd7beb5d32df68f325851a5255c3"
+    },
+    {
+      "path": "crates/raw-cpuid/RUSTSEC-2021-0089.md",
+      "sha": "3ed3849628e5505d42487cdca4fb53ed1c8a476f"
+    },
+    {
+      "path": "crates/regex/RUSTSEC-2022-0013.md",
+      "sha": "5842dabb8df596d94fef95d5521bc7985a796222"
+    },
+    {
+      "path": "crates/ring/RUSTSEC-2025-0007.md",
+      "sha": "983aea18fbd22cd7af1eb636046ab7bd92d596f4"
+    },
+    {
+      "path": "crates/ring/RUSTSEC-2025-0009.md",
+      "sha": "30bfaae03001e08f58d828c13519708942d66c70"
+    },
+    {
+      "path": "crates/ring/RUSTSEC-2025-0010.md",
+      "sha": "68572a5cb9cd5d1afedb2b7c251515431fc3eb9a"
+    },
+    {
+      "path": "crates/rustls-webpki/RUSTSEC-2023-0053.md",
+      "sha": "09b580aff5a6e9569377bb3c53d9856121921a4f"
+    },
+    {
+      "path": "crates/rustls-webpki/RUSTSEC-2026-0049.md",
+      "sha": "642f030a1d6f84aebd5ed8f42edcf353d8c1bafa"
+    },
+    {
+      "path": "crates/rustls-webpki/RUSTSEC-2026-0098.md",
+      "sha": "501391f1ff1e1e7209b08df000d895d5318cdc95"
+    },
+    {
+      "path": "crates/rustls-webpki/RUSTSEC-2026-0099.md",
+      "sha": "1171f2e8aed7295d3551284aabb5096467270ef9"
+    },
+    {
+      "path": "crates/rustls-webpki/RUSTSEC-2026-0104.md",
+      "sha": "e67d9c3224a3df010689043c212d217214b92c20"
+    },
+    {
+      "path": "crates/rustls/RUSTSEC-2024-0336.md",
+      "sha": "34ad2e5128a29c256de9ee341a28cb5abaff3eae"
+    },
+    {
+      "path": "crates/rustls/RUSTSEC-2024-0399.md",
+      "sha": "dbda18ac8988f9a1473555633c47777bcc5790d0"
+    },
+    {
+      "path": "crates/rustls/RUSTSEC-2026-0285.md",
+      "sha": "368f7b527ed9d5c527909216df1dd826d63927cd"
+    },
+    {
+      "path": "crates/security-framework/RUSTSEC-2017-0003.md",
+      "sha": "90ba7aca2927c72552964d75a9ef212665e3d114"
+    },
+    {
+      "path": "crates/sha2/RUSTSEC-2021-0100.md",
+      "sha": "d9d53aa6ad040ae3f68c5b99ba7a377c1bc63265"
+    },
+    {
+      "path": "crates/shlex/RUSTSEC-2024-0006.md",
+      "sha": "bd8bf3c6279427d4bab940fd76f20bb5dc388cb6"
+    },
+    {
+      "path": "crates/slab/RUSTSEC-2025-0047.md",
+      "sha": "a8275406c14c328c51de5dd30b69bf880238b53f"
+    },
+    {
+      "path": "crates/smallvec/RUSTSEC-2018-0003.md",
+      "sha": "1eca2b3653dc552d342130d1a5b1c4a3c86ddd69"
+    },
+    {
+      "path": "crates/smallvec/RUSTSEC-2018-0018.md",
+      "sha": "ce95f4a97db04eadbd0876136c1d486d262b7ae2"
+    },
+    {
+      "path": "crates/smallvec/RUSTSEC-2019-0009.md",
+      "sha": "99adbc419985f097e56b661c333b48e819b0d2ce"
+    },
+    {
+      "path": "crates/smallvec/RUSTSEC-2019-0012.md",
+      "sha": "fdbbf8afb06ae1209fef40e391a23fba1dd97452"
+    },
+    {
+      "path": "crates/smallvec/RUSTSEC-2021-0003.md",
+      "sha": "8525aa2ba20aa1fb037bfa30a24fc462082caca6"
+    },
+    {
+      "path": "crates/socket2/RUSTSEC-2020-0079.md",
+      "sha": "e774786704abaf5ec603d281cae65e8ecac8fbe0"
+    },
+    {
+      "path": "crates/thread_local/RUSTSEC-2022-0006.md",
+      "sha": "f5b97de3d321ea1951e56df51ac0be2ba2af8de2"
+    },
+    {
+      "path": "crates/time/RUSTSEC-2020-0071.md",
+      "sha": "cc1eeda40b9ec6a214c0ccf37a31f458e61abe77"
+    },
+    {
+      "path": "crates/time/RUSTSEC-2026-0009.md",
+      "sha": "842539179c68797803f31c0da4613962de667bfb"
+    },
+    {
+      "path": "crates/tokio-rustls/RUSTSEC-2020-0019.md",
+      "sha": "cb797b4f4bb065d3dfaeee1fec118c16e5fccd63"
+    },
+    {
+      "path": "crates/tokio/RUSTSEC-2021-0072.md",
+      "sha": "60ea47400ad60b5c31b89916d4b7400f6b5efcd4"
+    },
+    {
+      "path": "crates/tokio/RUSTSEC-2021-0124.md",
+      "sha": "f72016f2d1f148cc46121ef79b1365a69c0c8871"
+    },
+    {
+      "path": "crates/tokio/RUSTSEC-2023-0001.md",
+      "sha": "e4dee6f08b4b9c7c5d2f6b9f9431639944e9c491"
+    },
+    {
+      "path": "crates/tokio/RUSTSEC-2023-0005.md",
+      "sha": "93d1c2e068a5fce9df9fd9a9d478604daa6624cc"
+    },
+    {
+      "path": "crates/tokio/RUSTSEC-2025-0023.md",
+      "sha": "f97ef67343b31364edb7496ef362f36a51d6aa26"
+    },
+    {
+      "path": "crates/tracing-subscriber/RUSTSEC-2025-0055.md",
+      "sha": "33a1209da54ab8256fba4d091a1d81abeb423d97"
+    },
+    {
+      "path": "crates/tracing/RUSTSEC-2023-0078.md",
+      "sha": "f1146e3685ddf784b280c7777ed9c0a35adc1aa4"
+    },
+    {
+      "path": "crates/untrusted/RUSTSEC-2018-0001.md",
+      "sha": "c694af42e6b1bbf32fafc14229124160802a3a28"
+    },
+    {
+      "path": "crates/zerocopy/RUSTSEC-2023-0074.md",
+      "sha": "6bc9db6d2f4b255fbe5a1dc7dcad9c04d7e9da2d"
+    },
+    {
+      "path": "crates/zeroize_derive/RUSTSEC-2021-0115.md",
+      "sha": "d04937adf9577ed0998aae50943ba5c8d08e6aeb"
+    },
+    {
+      "path": "crates/zerovec-derive/RUSTSEC-2024-0346.md",
+      "sha": "3b9b39b7408785c9f37a0e0c726925d82b83a5f7"
+    },
+    {
+      "path": "crates/zerovec/RUSTSEC-2024-0347.md",
+      "sha": "31dd020b39b71daa2031cb48514df820b248370a"
+    }
+  ]
+}

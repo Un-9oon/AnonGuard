@@ -1523,7 +1523,9 @@ pub async fn handle_onion_relay_connection(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::time::timeout(
         std::time::Duration::from_secs(3600),
-        handle_relay_inner(
+        // Keep the enlarged v6 relay state out of the parent connection future.
+        // Otherwise nested debug poll frames exhaust default Tokio worker stacks.
+        Box::pin(handle_relay_inner(
             client,
             kill_switch_arc,
             jitter,
@@ -1531,7 +1533,7 @@ pub async fn handle_onion_relay_connection(
             relay_identity_key,
             is_exit_allowed,
             pool,
-        ),
+        )),
     )
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Circuit lifetime expired"))?
@@ -1754,7 +1756,10 @@ async fn handle_relay_inner(
                 }) => {
                     let payload = &client_buf[45..45 + len];
                     let extend_ok = tokio::time::timeout(std::time::Duration::from_secs(20), async {
-                            let (next_h, next_p, next_pub, next_mlkem_pub, hop_index) = decode_extend_payload(payload)
+                            // The gateway framing appends a mandatory 32-byte pin to
+                            // the canonical EXTEND body parsed by the circuit module.
+                            let body_len = payload.len().checked_sub(32).ok_or("EXTEND identity pin missing")?;
+                            let (next_h, next_p, next_pub, next_mlkem_pub, hop_index) = decode_extend_payload(&payload[..body_len])
                                 .map_err(|e| format!("bad EXTEND payload: {e}"))?;
 
                             if hop_index != relay_hop.hop_index + 1 {

@@ -56,23 +56,31 @@ async fn real_obfs4_preserves_pinned_anonguard_tls() {
     assert_eq!(fields[2], "socks5");
     let proxy = fields[3].parse().unwrap();
     let acceptor = link::acceptor(&key).unwrap();
+    let expected = anonguard::onion::cell::OnionCell::new(
+        11,
+        0,
+        anonguard::onion::cell::CellCommand::Data,
+        0,
+        b"ANONGUARD-OBFS4-OK",
+    )
+    .unwrap()
+    .serialize();
     let backend_task = tokio::spawn(async move {
         let (stream, _) = backend.accept().await.unwrap();
         let mut stream = link::accept(&acceptor, stream).await.unwrap();
-        let mut request = [0; 18];
+        let mut request = [0; anonguard::onion::cell::ONION_CELL_SIZE];
         stream.read_exact(&mut request).await.unwrap();
-        assert_eq!(&request, b"ANONGUARD-OBFS4-OK");
+        assert_eq!(request, expected);
         stream.write_all(&request).await.unwrap();
+        stream.flush().await.unwrap();
+        stream.shutdown().await.unwrap();
     });
     let stream = transport::connect(proxy, binding.bridge, &binding.arguments)
         .await
         .unwrap();
     let mut authenticated = link::connect(stream, pin).await.unwrap();
-    authenticated
-        .write_all(b"ANONGUARD-OBFS4-OK")
-        .await
-        .unwrap();
-    let mut response = [0; 18];
+    authenticated.write_all(&expected).await.unwrap();
+    let mut response = [0; anonguard::onion::cell::ONION_CELL_SIZE];
     tokio::time::timeout(
         Duration::from_secs(10),
         authenticated.read_exact(&mut response),
@@ -80,7 +88,7 @@ async fn real_obfs4_preserves_pinned_anonguard_tls() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(&response, b"ANONGUARD-OBFS4-OK");
+    assert_eq!(response, expected);
     backend_task.await.unwrap();
     client.kill().await.unwrap();
     server.kill().await.unwrap();

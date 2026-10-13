@@ -51,6 +51,11 @@ jobs:
       - name: Run Test Suite
         run: cargo test --locked --all-targets --verbose
 
+      - name: Verify optimized daemon deployment
+        run: |
+          cargo build --release --locked
+          ANONGUARD_TEST_DAEMON="$PWD/target/release/anonguard-daemon" cargo test --locked --test test_daemon_testnet -- --test-threads=1
+
       - name: Install real obfs4 transport for interoperability verification
         run: sudo apt-get update && sudo apt-get install -y obfs4proxy
 

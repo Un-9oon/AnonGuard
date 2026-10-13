@@ -152,6 +152,22 @@ It does not upgrade destination web certificates, DoT PKI, Mozilla signing,
 operating-system trust, traffic-analysis resistance or endpoint security. No
 percentage of production readiness or complete quantum safety is inferred.
 
-### In-progress v6 checkpoint (2026-10-10)
+### Historical in-progress v6 checkpoint (2026-10-10)
 
 This checkpoint is published at the project owner’s request before remaining fixes. The real CLI daemon testnet currently fails: relay Tokio workers overflow their stacks during startup. The full regression run also found authority-error-message and legacy cell-size test failures; those two were edited but the complete suite has not been rerun after all changes. Do not deploy this checkpoint for production anonymity. Focused dual-signature, external ML-DSA vectors, guarded-link cancellation and session tests provide partial evidence only. Resume with the startup failure, then rerun formatting, strict Clippy, all targets and deployment-path checks before release.
+
+### Verified follow-up (2026-10-13)
+
+The startup overflow and EXTEND pin-framing regression above are fixed. The
+locked Linux all-target suite passed 267 tests with zero failures; two opt-in
+tests were skipped. Real obfs4 interoperability was separately executed and
+passed, alongside both private-bridge daemon tests and both optimized-release
+daemon tests. Formatting, strict all-target Clippy, release compilation and
+selected CI Python/JavaScript contracts passed. Current dependency advisories
+were checked against a hash-verified RustSec snapshot with no matching
+vulnerabilities or warnings. See [reproducible validation details](VALIDATION_2026-10-13.md).
+
+These results supersede the software failures in the historical checkpoint;
+they do not close the independent audit, sustained fuzzing, installed signed
+browser, privileged v6 leak/crash or multi-region traffic-analysis gates above.
+The prior VM address is unreachable, so no fresh v6 VM acceptance is claimed.

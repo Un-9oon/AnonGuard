@@ -364,4 +364,100 @@ mod tests {
         );
         task.await.unwrap();
     }
+    #[tokio::test]
+    async fn exporter_proof_components_and_cross_channel_replay_refuse() {
+        use crate::crypto::hybrid_identity::PUBLIC_KEY_SIZE;
+        let identity = SigningKey::from_bytes(&[61; 32]);
+        let pin = identity.verifying_key().to_bytes();
+        let server = acceptor(&identity).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut previous = None;
+            for mode in 0..5 {
+                let (raw, _) = listener.accept().await.unwrap();
+                let mut tls = server.tls.accept(raw).await.unwrap();
+                let mut challenge = [0; 32];
+                tls.read_exact(&mut challenge).await.unwrap();
+                let mut exporter = [0; 32];
+                tls.get_ref()
+                    .1
+                    .export_keying_material(
+                        &mut exporter,
+                        b"AnonGuard-link-auth-v6",
+                        Some(&challenge),
+                    )
+                    .unwrap();
+                let mut proof = server
+                    .identity
+                    .sign(&link_auth_message(&challenge, &exporter))
+                    .to_bytes();
+                match mode {
+                    0 => previous = Some(proof.clone()),
+                    1 => proof[PUBLIC_KEY_SIZE + 8] ^= 1, // Classical signature alone corrupt.
+                    2 => proof[PUBLIC_KEY_SIZE + 72] ^= 1, // PQ signature alone corrupt.
+                    3 => {
+                        challenge[0] ^= 1;
+                        proof = server
+                            .identity
+                            .sign(&link_auth_message(&challenge, &exporter))
+                            .to_bytes();
+                    }
+                    4 => proof = previous.take().unwrap(), // Valid identity proof from another TLS exporter.
+                    _ => unreachable!(),
+                }
+                tls.write_all(&proof).await.unwrap();
+                tls.flush().await.unwrap();
+            }
+        });
+        for mode in 0..5 {
+            let result = connect(TcpStream::connect(endpoint).await.unwrap(), pin).await;
+            assert_eq!(result.is_ok(), mode == 0, "exporter proof mode {mode}");
+            drop(result);
+        }
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn classical_only_kex_and_old_alpn_cannot_downgrade() {
+        for classical_only in [false, true] {
+            let identity = SigningKey::from_bytes(&[62; 32]);
+            let server = acceptor(&identity).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let pin = identity.verifying_key().to_bytes();
+            let task = tokio::spawn(async move {
+                let (raw, _) = listener.accept().await.unwrap();
+                assert!(accept(&server, raw).await.is_err());
+            });
+            let mut provider = hybrid_provider();
+            if classical_only {
+                provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+            }
+            let provider = Arc::new(provider);
+            let verifier = Arc::new(IdentityVerifier {
+                pinned: pin,
+                provider: provider.clone(),
+            });
+            let mut config = rustls::ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth();
+            config.alpn_protocols = vec![if classical_only {
+                ALPN.to_vec()
+            } else {
+                b"anonguard/5".to_vec()
+            }];
+            let result = TlsConnector::from(Arc::new(config))
+                .connect(
+                    ServerName::try_from("relay.anonguard.invalid").unwrap(),
+                    TcpStream::connect(endpoint).await.unwrap(),
+                )
+                .await;
+            assert!(result.is_err(), "downgrade classical_only={classical_only}");
+            task.await.unwrap();
+        }
+    }
 }
