@@ -117,6 +117,47 @@ checks both installed binaries' dynamic dependencies. Disposable package tests
 now exercise distinct upgrade/downgrade fixtures and persistent-state hashes.
 Privileged package installation was not performed on this host.
 
+## Same-day dependency advisory follow-up
+
+The first remote push (`637a4a8`) passed browser integration, tests/lint and
+Linux/macOS/Windows compilation, but the fresh dependency audit found four
+Rustls advisories published on 2026-10-14: RUSTSEC-2026-0346, 0347, 0348 and 0349.
+Each upstream advisory specifies Rustls >=0.23.46. Cargo.toml now requires that
+patch floor, and Cargo regenerated both lockfiles at 0.23.46. The downloaded
+archive matched crates.io SHA-256
+`48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf`.
+
+The patched-dependency full suite again passed 271 tests with zero failures and
+two opt-in skips. Strict Clippy, optimized build and all fuzz-harness compilation
+were rechecked. The earlier ASAN mutation totals above belong to checkpoint
+`637a4a8` before this Rustls patch; they are not relabelled as a new TLS fuzz run.
+
+The fresh upstream RustSec database at
+`edb58f5974b83eb8302332821cb6d389777aa351` contains 1329 advisories. Cargo-audit
+0.22.2 with `--deny warnings` reported zero vulnerabilities/warnings in both
+root (309 packages) and fuzz (275 packages) lockfiles. All 310 distinct locked
+registry package versions also matched current authenticated index checksums
+and had non-yanked status. No advisory was ignored.
+
+The initial vendor-only cache caused yanked lookups to emit error diagnostics
+even though cargo-audit returned zero. Those incomplete results were rejected.
+After populating an isolated sparse cache from the verified HTTPS index
+responses, both audits completed without diagnostic errors. CI now explicitly
+rejects these soft errors, empty inventories, findings and warnings; four new
+admission regression tests pass. Both root and fuzz lockfiles are audited.
+
+The existing relay configuration already disables resumption, only offers the
+hybrid KEX group, and does not enable ECH or Brotli certificate decompression.
+These facts limit particular advisory conditions; they do not substitute for
+updating the dependency. See the official
+[RustSec advisory records](https://github.com/RustSec/advisory-db/tree/edb58f5974b83eb8302332821cb6d389777aa351/crates/rustls).
+
+A separate OpenSSL 3.6.4 interoperability probe also passed seven message sizes
+in each Rust-to-OpenSSL ML-DSA-65 and Ed25519 verification path, an OpenSSL-to-Rust
+composite proof, and altered-message/signature refusal. It exercises the actual
+domain-separated identity transcript with test-only keys. This validates a
+signature backend boundary, not the complete protocol or external audit gate.
+
 ## Assurance still required
 
 Independent protocol/composition review, sustained fuzz campaigns, installed

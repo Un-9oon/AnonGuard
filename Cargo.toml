@@ -38,7 +38,7 @@ harness = false
 [dependencies]
 # Async Runtime & Networking
 tokio = { version = "1.38", features = ["full"] }
-rustls = { version = "0.23.40", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs", "ring", "std"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "ring"] }
 x509-parser = "0.18"

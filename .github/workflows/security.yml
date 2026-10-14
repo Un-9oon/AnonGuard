@@ -17,5 +17,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
+      - name: Verify fail-closed audit admission
+        run: python3 scripts/test_dependency_audit.py
       - name: Security Vulnerability Audit (Blocking Gate)
-        run: cargo audit --deny warnings
+        run: |
+          for lockfile in Cargo.lock fuzz/Cargo.lock; do
+            audit_status=0
+            cargo audit --file "$lockfile" --deny warnings --json > audit.json 2> audit.log || audit_status=$?
+            cat audit.log
+            cat audit.json
+            python3 scripts/check_dependency_audit.py --report audit.json --diagnostics audit.log
+            if [ "$audit_status" -ne 0 ]; then exit "$audit_status"; fi
+          done
