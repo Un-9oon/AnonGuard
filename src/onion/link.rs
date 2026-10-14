@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const ALPN: &[u8] = b"anonguard/6";
+pub const TRACKER_ALPN: &[u8] = b"anonguard-tracker/1";
 const IDENTITY_OID: &str = "2.25.2676937280591097606";
 const IDENTITY_OID_ARCS: &[u64] = &[2, 25, 2676937280591097606];
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -80,6 +81,12 @@ impl ServerCertVerifier for IdentityVerifier {
     }
 }
 pub fn acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
+    acceptor_for(identity, ALPN)
+}
+pub fn tracker_acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
+    acceptor_for(identity, TRACKER_ALPN)
+}
+fn acceptor_for(identity: &SigningKey, protocol: &'static [u8]) -> io::Result<RelayAcceptor> {
     // RFC 8410 PKCS#8 Ed25519 private key, from the persisted directory identity.
     let mut bytes = vec![
         0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
@@ -107,12 +114,13 @@ pub fn acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
         .with_no_client_auth()
         .with_single_cert(vec![cert.der().clone()], private.into())
         .map_err(|e| io::Error::other(e.to_string()))?;
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = vec![protocol.to_vec()];
     config.max_early_data_size = 0;
     config.send_tls13_tickets = 0;
     Ok(RelayAcceptor {
         tls: TlsAcceptor::from(Arc::new(config)),
         identity: identity.clone(),
+        protocol,
     })
 }
 pub async fn connect(
@@ -132,6 +140,23 @@ pub async fn connect_guarded<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    let tls = connect_authenticated(stream, pinned, ALPN).await?;
+    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+}
+pub async fn connect_tracker<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: S,
+    pinned: [u8; 32],
+) -> io::Result<tokio_rustls::client::TlsStream<S>> {
+    connect_authenticated(stream, pinned, TRACKER_ALPN).await
+}
+async fn connect_authenticated<S>(
+    stream: S,
+    pinned: [u8; 32],
+    protocol: &'static [u8],
+) -> io::Result<tokio_rustls::client::TlsStream<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if pinned == [0; 32] {
         return Err(invalid("Relay link requires a directory identity pin"));
     }
@@ -146,7 +171,7 @@ where
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    config.alpn_protocols = vec![ALPN.to_vec()];
+    config.alpn_protocols = vec![protocol.to_vec()];
     config.resumption = rustls::client::Resumption::disabled();
     let mut tls = tokio::time::timeout(
         TIMEOUT,
@@ -158,7 +183,7 @@ where
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Relay TLS handshake timed out"))??;
-    if tls.get_ref().1.alpn_protocol() != Some(ALPN) {
+    if tls.get_ref().1.alpn_protocol() != Some(protocol) {
         return Err(invalid("Relay protocol version mismatch"));
     }
     tokio::time::timeout(TIMEOUT, async {
@@ -172,23 +197,46 @@ where
             .1
             .export_keying_material(&mut exporter, b"AnonGuard-link-auth-v6", Some(&challenge))
             .map_err(|e| io::Error::other(e.to_string()))?;
-        let message = link_auth_message(&challenge, &exporter);
+        let message = channel_auth_message(protocol, &challenge, &exporter);
         VerifyingKey::from_bytes(&pinned)?
             .verify_strict(&message, &Signature::from_slice(&proof)?)?;
         Ok::<(), io::Error>(())
     })
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PQ link authentication timed out"))??;
-    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+    Ok(tls)
 }
 pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static>(
     acceptor: &RelayAcceptor,
     stream: S,
 ) -> io::Result<crate::onion::link_cover::CoveredStream> {
+    if acceptor.protocol != ALPN {
+        return Err(invalid("Wrong acceptor protocol"));
+    }
+    let tls = accept_authenticated(acceptor, stream).await?;
+    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+}
+pub async fn accept_tracker(
+    acceptor: &RelayAcceptor,
+    stream: TcpStream,
+) -> io::Result<tokio_rustls::server::TlsStream<TcpStream>> {
+    if acceptor.protocol != TRACKER_ALPN {
+        return Err(invalid("Wrong acceptor protocol"));
+    }
+    accept_authenticated(acceptor, stream).await
+}
+async fn accept_authenticated<S>(
+    acceptor: &RelayAcceptor,
+    stream: S,
+) -> io::Result<tokio_rustls::server::TlsStream<S>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let protocol = acceptor.protocol;
     let mut tls = tokio::time::timeout(TIMEOUT, acceptor.tls.accept(stream))
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Relay TLS handshake timed out"))??;
-    if tls.get_ref().1.alpn_protocol() != Some(ALPN) {
+    if tls.get_ref().1.alpn_protocol() != Some(protocol) {
         return Err(invalid("Relay protocol version mismatch"));
     }
     tokio::time::timeout(TIMEOUT, async {
@@ -199,7 +247,7 @@ pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Se
             .1
             .export_keying_material(&mut exporter, b"AnonGuard-link-auth-v6", Some(&challenge))
             .map_err(|e| io::Error::other(e.to_string()))?;
-        let message = link_auth_message(&challenge, &exporter);
+        let message = channel_auth_message(protocol, &challenge, &exporter);
         let proof = acceptor.identity.sign(&message).to_bytes();
         tls.write_all(&proof).await?;
         tls.flush().await?;
@@ -207,12 +255,16 @@ pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Se
     })
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "PQ link authentication timed out"))??;
-    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+    Ok(tls)
 }
 
+#[cfg(test)]
 fn link_auth_message(challenge: &[u8; 32], exporter: &[u8; 32]) -> Vec<u8> {
+    channel_auth_message(ALPN, challenge, exporter)
+}
+fn channel_auth_message(protocol: &[u8], challenge: &[u8; 32], exporter: &[u8; 32]) -> Vec<u8> {
     let mut bytes = b"AnonGuard-relay-channel-auth-v6".to_vec();
-    bytes.extend_from_slice(ALPN);
+    bytes.extend_from_slice(protocol);
     bytes.extend_from_slice(challenge);
     bytes.extend_from_slice(exporter);
     bytes
@@ -221,6 +273,7 @@ fn link_auth_message(challenge: &[u8; 32], exporter: &[u8; 32]) -> Vec<u8> {
 pub struct RelayAcceptor {
     tls: TlsAcceptor,
     identity: SigningKey,
+    protocol: &'static [u8],
 }
 fn hybrid_provider() -> rustls::crypto::CryptoProvider {
     let mut provider = rustls::crypto::aws_lc_rs::default_provider();

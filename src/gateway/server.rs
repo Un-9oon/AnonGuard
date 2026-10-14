@@ -664,7 +664,7 @@ impl GatewayServer {
                         }
                     } else {
                         // Plain SOCKS5 multi-proxy chaining (when onion routing is disabled)
-                        let mut current_stream = None;
+                        let mut current_stream: Option<Box<dyn crate::core::state_machine::GuardedIo>> = None;
                         for (i, node) in chain.iter().enumerate() {
                             let is_first = i == 0;
                             let is_last = i == chain.len() - 1;
@@ -685,56 +685,27 @@ impl GatewayServer {
                                             return;
                                         }
                                     };
-                                    match TcpStream::connect(&tracker_url).await {
-                                        Ok(mut s) => {
-                                            use tokio::io::{
-                                                AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
-                                                BufReader,
-                                            };
-                                            let payload = if !auth_token.is_empty() {
-                                                format!(
-                                                    "CONNECT_REVERSE {} {}\n",
-                                                    node_id, auth_token
-                                                )
-                                            } else {
-                                                format!("CONNECT_REVERSE {}\n", node_id)
-                                            };
-                                            let _ = s.write_all(payload.as_bytes()).await;
-                                            let mut reader = BufReader::new(s);
-                                            let mut resp = String::new();
-                                            if (&mut reader)
-                                                .take(1024)
-                                                .read_line(&mut resp)
-                                                .await
-                                                .is_ok()
-                                                && resp.trim() == "OK"
-                                            {
-                                                current_stream = Some(reader.into_inner());
-                                            } else {
-                                                error!(
-                                                    "Tracker rejected CONNECT_REVERSE: {}",
-                                                    resp
-                                                );
-                                                pool.rotate_on_block(&node.raw_url).await;
-                                                let _ = crate::gateway::chain::send_socks5_reply(
-                                                    &mut client,
-                                                    0x04,
-                                                )
-                                                .await;
-                                                return;
-                                            }
+                                    let connection = async {
+                                        let pin = config.tracker_identity_pin.ok_or_else(|| std::io::Error::new(
+                                            std::io::ErrorKind::InvalidInput, "Reverse tunnel requires tracker identity pin"))?;
+                                        let tcp = TcpStream::connect(&tracker_url).await?;
+                                        let guarded = GuardedSocket::new(tcp, kill_switch.atomic_handle())
+                                            .begin_verification().mark_verified();
+                                        let mut stream = crate::onion::link::connect_tracker(guarded, pin).await?;
+                                        crate::mesh::tracker::write_control(&mut stream,
+                                            &format!("CONNECT_REVERSE {} {}", node_id, auth_token)).await?;
+                                        if crate::mesh::tracker::read_control(&mut stream).await? != "OK" {
+                                            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,
+                                                "Tracker refused reverse capability"));
                                         }
-                                        Err(e) => {
-                                            error!(
-                                                "Failed to connect to tracker {}: {}",
-                                                tracker_url, e
-                                            );
+                                        Ok::<_, std::io::Error>(stream)
+                                    };
+                                    match tokio::time::timeout(std::time::Duration::from_secs(20), connection).await {
+                                        Ok(Ok(stream)) => current_stream = Some(Box::new(stream)),
+                                        _ => {
+                                            warn!("Authenticated reverse tunnel failed");
                                             pool.rotate_on_block(&node.raw_url).await;
-                                            let _ = crate::gateway::chain::send_socks5_reply(
-                                                &mut client,
-                                                0x04,
-                                            )
-                                            .await;
+                                            let _ = crate::gateway::chain::send_socks5_reply(&mut client, 0x04).await;
                                             return;
                                         }
                                     }
@@ -745,7 +716,7 @@ impl GatewayServer {
                                         format!("{}:{}", node.host, node.port)
                                     };
                                     match TcpStream::connect(&addr).await {
-                                        Ok(s) => current_stream = Some(s),
+                                        Ok(s) => current_stream = Some(Box::new(s)),
                                         Err(e) => {
                                             error!(
                                                 "Failed to connect to entry node {}: {}",
@@ -846,9 +817,17 @@ impl GatewayServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut tasks = tokio::task::JoinSet::new();
         let host_port = tracker_url.trim_start_matches("http://");
-        // Generate a cryptographically secure authorization token for this reverse relay instance
-        let auth_token = format!("{:016x}", rand::random::<u64>());
-        info!("[AnonGuard Reverse Relay] Active and guarded (node: {}, token: <REDACTED>). Maintaining outbound pool to Tracker: {}", node_id, host_port);
+        let tracker_pin = self
+            .config
+            .tracker_identity_pin
+            .ok_or("Reverse relay requires tracker identity pin")?;
+        let token_path = self
+            .config
+            .reverse_token_file
+            .as_ref()
+            .ok_or("Reverse relay requires a private capability file")?;
+        let auth_token = read_reverse_capability(token_path)?;
+        info!("[AnonGuard Reverse Relay] Maintaining authenticated outbound pool to tracker");
 
         // Keep a pool of 3 connections
         for _ in 0..3 {
@@ -865,32 +844,47 @@ impl GatewayServer {
 
             tasks.spawn(async move {
                 loop {
-                    match TcpStream::connect(&hp).await {
-                        Ok(mut stream) => {
-                            use tokio::io::AsyncWriteExt;
+                    let connection = async {
+                        let tcp = TcpStream::connect(&hp).await?;
+                        let guarded = GuardedSocket::new(tcp, kill_switch.atomic_handle())
+                            .begin_verification().mark_verified();
+                        crate::onion::link::connect_tracker(guarded, tracker_pin).await
+                    };
+                    match tokio::time::timeout(std::time::Duration::from_secs(20), connection).await {
+                        Ok(Ok(mut stream)) => {
                             let now = crate::mesh::sybil::current_timestamp_secs();
-                            let nonce = match crate::mesh::sybil::solve_pow_bounded(
-                                &nid,
-                                now,
-                                pow_difficulty,
-                            ) {
-                                Some(n) => n,
-                                None => {
+                            let proof_node = nid.clone();
+                            let nonce = match tokio::task::spawn_blocking(move || {
+                                crate::mesh::sybil::solve_pow_bounded_from(
+                                    &proof_node, now, pow_difficulty, rand::random::<u64>(),
+                                )
+                            }).await {
+                                Ok(Some(n)) => n,
+                                _ => {
                                     error!("Failed to solve PoW for reverse relay registration within bounds (DoS protection)");
                                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                                     continue;
                                 }
                             };
-                            let payload =
-                                format!("REGISTER_REVERSE {} {} {} {}\n", nid, token, now, nonce);
-                            if stream.write_all(payload.as_bytes()).await.is_ok() {
-                                // Wait for the tracker to send data (meaning a client has connected to this stream)
-                                // We peek 1 byte to see if it's SOCKS5 (0x05) or Onion Protocol (anything else)
-                                let mut buf = [0u8; 1];
-                                if stream.peek(&mut buf).await.is_ok() {
-                                    info!("Reverse Relay: Received incoming client connection from tracker!");
-
+                            let payload = format!("REGISTER_REVERSE {} {} {} {}", nid, token, now, nonce);
+                            let registration = async {
+                                crate::mesh::tracker::write_control(&mut stream, &payload).await?;
+                                if crate::mesh::tracker::read_control(&mut stream).await? != "REGISTERED" {
+                                    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Reverse registration refused"));
+                                }
+                                if crate::mesh::tracker::read_control_wait(&mut stream).await? != "READY" {
+                                    return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Reverse handoff refused"));
+                                }
+                                Ok::<(), std::io::Error>(())
+                            }.await;
+                            if registration.is_ok() {
+                                // Retain buffered bytes when inspecting the nested application protocol.
+                                use tokio::io::AsyncBufReadExt;
+                                let mut stream = tokio::io::BufReader::new(stream);
+                                if let Ok(Ok(buf)) = tokio::time::timeout(std::time::Duration::from_secs(10), stream.fill_buf()).await {
+                                    if buf.is_empty() { continue; }
                                     let is_socks5 = buf[0] == 0x05;
+                                    info!("Reverse Relay: Received incoming client connection from tracker!");
 
                                     if is_socks5 {
                                         if !allow_open_socks5 {
@@ -900,7 +894,7 @@ impl GatewayServer {
 
                                         // Process exactly like a Relay Mode client for open SOCKS5
                                         let (target_host, target_port) =
-                                            match crate::gateway::chain::intercept_socks5_request(
+                                            match crate::gateway::chain::read_socks5_request(
                                                 &mut stream,
                                             )
                                             .await
@@ -919,6 +913,7 @@ impl GatewayServer {
                                             .await
                                         {
                                             Ok(mut target_stream) => {
+                                                if crate::gateway::chain::send_socks5_reply(&mut stream, 0x00).await.is_err() || stream.flush().await.is_err() { continue; }
                                                 info!("Reverse relay forwarding traffic");
                                                 let _ = morph_bidirectional_guarded(
                                                     &mut stream,
@@ -929,6 +924,7 @@ impl GatewayServer {
                                                 .await;
                                             }
                                             Err(e) => {
+                                                let _ = crate::gateway::chain::send_socks5_reply(&mut stream, 0x02).await;
                                                 error!(kind=?e.kind(), "Reverse relay destination blocked or unreachable");
                                             }
                                         }
@@ -955,19 +951,53 @@ impl GatewayServer {
                                 }
                             }
                         }
-                        Err(e) => {
-                            warn!("Failed to connect to Tracker: {}", e);
+                        _ => {
+                            warn!("Failed to establish authenticated tracker connection");
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         }
                     }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             });
         }
 
-        // Block forever
-        std::future::pending::<()>().await;
-        Ok(())
+        // Surface a crashed/stopped pool worker rather than silently losing service.
+        if let Some(result) = tasks.join_next().await {
+            result?;
+        }
+        Err("Reverse relay pool worker stopped".into())
     }
+}
+
+/// Capabilities are provisioned out of band; never log or publish their content.
+fn read_reverse_capability(path: &std::path::Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = crate::core::storage::open_regular_file(path, 65)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        if metadata.mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Reverse capability file must have no group/other permissions",
+            ));
+        }
+    }
+    let mut token = String::new();
+    file.take(66).read_to_string(&mut token)?;
+    let token = token.strip_suffix('\n').unwrap_or(&token);
+    if token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Reverse capability must be 64 lowercase hexadecimal characters",
+        ));
+    }
+    Ok(token.to_owned())
 }
 
 async fn establish_session(

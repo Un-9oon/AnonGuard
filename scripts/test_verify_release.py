@@ -15,6 +15,16 @@ spec.loader.exec_module(release)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_debian_version_cannot_be_relabelled_under_another_tag(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = list(self.fixture(Path(temp)))
+            older = args[0].with_name('anonguard_0.1.0_amd64.deb')
+            args[0].rename(older)
+            args[0] = older
+            with self.assertRaisesRegex(ValueError, 'version must match'):
+                release.verify(*args)
+            self.assertFalse(args[4].exists())
+
     def fixture(self, root, reject=False):
         asset = root / "anonguard_0.2.0_amd64.deb"
         asset.write_bytes(b"package fixture")

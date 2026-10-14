@@ -9,7 +9,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = OnionCell::parse(&buf);
     // Reach valid-header parsing from short inputs while retaining arbitrary
     // command and length coverage in the raw parse above.
-    buf[8] = data.first().copied().unwrap_or(7) % 11;
+    buf[8] = data.first().copied().unwrap_or(7) % 19;
     buf[11..13].copy_from_slice(&(data.len().min(PAYLOAD_SIZE) as u16).to_be_bytes());
     let _ = OnionCell::parse(&buf);
 });

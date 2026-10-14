@@ -14,11 +14,7 @@ fuzz_target!(|data: &[u8]| {
     let difficulty = u32::from_be_bytes(data[16..20].try_into().unwrap());
     let current_time = u64::from_be_bytes(data[20..28].try_into().unwrap());
 
-    let node_id = if let Ok(s) = std::str::from_utf8(&data[28..]) {
-        s
-    } else {
-        "fuzz_node"
-    };
+    let node_id = std::str::from_utf8(&data[28..]).unwrap_or("fuzz_node");
 
     // verify_pow must never panic, regardless of input.
     let _ = verify_pow(node_id, timestamp, nonce, difficulty, current_time);

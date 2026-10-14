@@ -160,8 +160,16 @@ struct Args {
     #[arg(long, default_value_t = false)]
     reverse_relay: bool,
 
-    /// Tracker URL to announce this relay to (e.g. http://1.2.3.4:8080)
+    /// Composite identity pin of the tracker (64 hexadecimal characters)
     #[arg(long)]
+    tracker_key: Option<String>,
+
+    /// Private file containing a provisioned 256-bit reverse relay capability
+    #[arg(long, requires = "reverse_relay")]
+    reverse_token_file: Option<PathBuf>,
+
+    /// Authenticated tracker endpoint for a reverse relay (host:port)
+    #[arg(long, requires_all = ["reverse_relay", "tracker_key", "reverse_token_file"])]
     announce: Option<String>,
 
     /// Allow open, unauthenticated plain SOCKS5 proxying when running in relay mode (off by default)
@@ -204,8 +212,8 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     killswitch_trip_threshold: usize,
 
-    /// Tracker URL to fetch active nodes from (e.g. http://1.2.3.4:8080)
-    #[arg(long)]
+    /// Authenticated tracker endpoint for explicitly provisioned reverse proxies
+    #[arg(long, requires = "tracker_key")]
     fetch_from: Option<String>,
 
     /// Path to persist the relay's long-term composite identity key
@@ -494,6 +502,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Err("Unlisted bridge backend must listen on numeric loopback".into());
     }
 
+    let tracker_identity_pin = args
+        .tracker_key
+        .as_deref()
+        .map(|value| {
+            let bytes = hex::decode(value).map_err(|_| "Invalid --tracker-key hex")?;
+            let pin: [u8; 32] = bytes
+                .try_into()
+                .map_err(|_| "Tracker pin must be 32 bytes")?;
+            if pin == [0; 32] {
+                return Err("Tracker pin cannot be zero");
+            }
+            Ok(pin)
+        })
+        .transpose()?;
+    if args.reverse_relay && (args.announce.is_none() || args.reverse_token_file.is_none()) {
+        return Err(
+            "Reverse relay requires --announce, --tracker-key and --reverse-token-file".into(),
+        );
+    }
     let config = GuardConfig {
         padded_sessions: args.padded_sessions,
         privacy_profile: args.privacy_profile.clone(),
@@ -539,6 +566,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         is_exit: args.is_exit,
         reverse_relay_mode: args.reverse_relay,
         tracker_url: args.fetch_from.clone(),
+        tracker_identity_pin,
+        reverse_token_file: args.reverse_token_file.clone(),
         #[cfg(target_os = "linux")]
         enable_firewall_killswitch: args.enable_firewall_killswitch,
         #[cfg(not(target_os = "linux"))]
@@ -638,7 +667,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if args.tracker {
         let tracker =
-            anonguard::mesh::TrackerServer::with_difficulty(args.listen, args.pow_difficulty);
+            anonguard::mesh::TrackerServer::with_difficulty(args.listen, args.pow_difficulty)
+                .with_identity(anonguard::core::storage::load_or_create_signing_key(
+                    &config.identity_key_path,
+                )?);
+        info!(tracker_pin = %hex::encode(tracker.identity_pin()), "Authenticated tracker identity");
         let res = tokio::select! {
             r = tracker.run() => r,
             _ = tokio::signal::ctrl_c() => {
@@ -672,42 +705,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await
             .map_err(|_| "Invalid --proxy endpoint")?;
         info!("[AnonGuard] Added inline proxy to pool");
-    }
-
-    if args.relay {
-        if let Some(tracker_url) = args.announce.clone() {
-            let my_listen = args.listen.clone();
-            let pow_difficulty = args.pow_difficulty;
-            let node_id = format!("relay-{}", my_listen);
-            tokio::spawn(async move {
-                let host_port = tracker_url.trim_start_matches("http://");
-                loop {
-                    let now = anonguard::mesh::sybil::current_timestamp_secs();
-                    let nonce = match anonguard::mesh::sybil::solve_pow_bounded(
-                        &node_id,
-                        now,
-                        pow_difficulty,
-                    ) {
-                        Some(n) => n,
-                        None => {
-                            tracing::error!("Failed to solve PoW within bounds. CPU too slow or difficulty too high!");
-                            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                            continue;
-                        }
-                    };
-                    let line = format!("REGISTER_REVERSE {} {} {}\n", node_id, now, nonce);
-
-                    if let Ok(mut stream) = tokio::net::TcpStream::connect(host_port).await {
-                        use tokio::io::AsyncWriteExt;
-                        let _ = stream.write_all(line.as_bytes()).await;
-                        tracing::debug!("Announced presence to tracker {}", tracker_url);
-                    } else {
-                        tracing::warn!("Failed to announce to tracker {}", tracker_url);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                }
-            });
-        }
     }
 
     if !args.reverse_relay {
@@ -746,45 +743,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             });
         }
 
-        if let Some(tracker_url) = args.fetch_from.clone() {
-            let pool_clone = pool.clone();
-            tokio::spawn(async move {
-                let host_port = tracker_url.trim_start_matches("http://");
-                let payload = format!("GET /nodes HTTP/1.1\r\nHost: {}\r\n\r\n", host_port);
-
-                loop {
-                    if let Ok(mut stream) = tokio::net::TcpStream::connect(host_port).await {
-                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                        let _ = stream.write_all(payload.as_bytes()).await;
-
-                        let mut resp = vec![0; 4096];
-                        if let Ok(n) = stream.read(&mut resp).await {
-                            let resp_str = String::from_utf8_lossy(&resp[..n]);
-                            if let Some(idx) = resp_str.find("\r\n\r\n") {
-                                let body = &resp_str[idx + 4..];
-                                // Clear existing nodes and add new authenticated ones
-                                for line in body.lines() {
-                                    let trimmed = line.trim();
-                                    if !trimmed.is_empty() {
-                                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                                        let reverse_uri = if parts.len() >= 2 {
-                                            format!("reverse://{}@{}:0", parts[1], parts[0])
-                                        } else {
-                                            format!("reverse://{}:0", parts[0])
-                                        };
-                                        let _ = pool_clone.add_proxy(&reverse_uri).await;
-                                    }
-                                }
-                                tracing::debug!("Fetched updated reverse node list from tracker");
-                            }
-                        }
-                    } else {
-                        tracing::warn!("Failed to fetch from tracker {}", tracker_url);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
-                }
-            });
-        }
+        // Reverse capabilities must be provisioned in a private proxy file.
+        // Tracker discovery IDs alone never authorize a tunnel.
     }
 
     let kill_switch = KillSwitchController::with_threshold(
@@ -795,6 +755,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let gateway_state_path = config.guard_state_path.clone();
     #[cfg(target_os = "linux")]
     let gateway_kill = kill_switch.clone();
+    let reverse_node_id = hex::encode(relay_identity_key.verifying_key().to_bytes());
     let gateway = GatewayServer::new(config, pool, kill_switch, relay_identity_key);
 
     #[cfg(target_os = "linux")]
@@ -822,9 +783,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         res = async {
             if args.reverse_relay {
                 if let Some(tracker_url) = args.announce {
-                    // Generate a cryptographically random Node ID (fix #15: was ms%10000 — too short)
-                    let node_id = format!("node-{:016x}", rand::random::<u64>());
-                    gateway.run_reverse_relay(&tracker_url, &node_id).await
+                    gateway.run_reverse_relay(&tracker_url, &reverse_node_id).await
                 } else {
                     tracing::error!("--announce <tracker_url> is required for --reverse-relay");
                     Ok(())

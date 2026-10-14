@@ -74,7 +74,7 @@ Package: ${PKG_NAME}
 Architecture: any
 Description: Experimental anonymity transport
 EOF
-SHLIBS_OUTPUT="$(cd "${DEPS_DIR}" && dpkg-shlibdeps -O -e"${STAGING_DIR}/usr/bin/anonguard-daemon")"
+SHLIBS_OUTPUT="$(cd "${DEPS_DIR}" && dpkg-shlibdeps -O -e"${STAGING_DIR}/usr/bin/anonguard-daemon" -e"${STAGING_DIR}/usr/bin/anonguard-identity-policy")"
 SHLIBS_DEPENDS="$(printf '%s\n' "${SHLIBS_OUTPUT}" | sed -n 's/^shlibs:Depends=//p')"
 if [ -z "${SHLIBS_DEPENDS}" ]; then
     echo 'No runtime library dependencies detected; refusing an incomplete Debian package' >&2
@@ -98,6 +98,8 @@ cp "${ROOT_DIR}/scripts/vm_profile.py" "${STAGING_DIR}/usr/share/doc/anonguard/v
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/vm_profile.py"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/deployment_preflight.py"
 cp "${ROOT_DIR}/scripts/verify_release.py" "${STAGING_DIR}/usr/share/doc/anonguard/verify_release.py"
+cp "${ROOT_DIR}/scripts/check_release_version.py" "${STAGING_DIR}/usr/share/doc/anonguard/check_release_version.py"
+chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/check_release_version.py"
 chmod 644 "${STAGING_DIR}/usr/share/doc/anonguard/verify_release.py"
 mkdir -p "${STAGING_DIR}/usr/share/doc/anonguard/docs"
 chmod 755 "${STAGING_DIR}/usr/share/doc/anonguard/docs"
@@ -132,7 +134,7 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
-Depends: ${SHLIBS_DEPENDS}, python3 (>= 3.10)
+Depends: ${SHLIBS_DEPENDS}, python3 (>= 3.11)
 Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux, obfs4proxy
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
@@ -149,6 +151,10 @@ cat << 'EOF' > "${STAGING_DIR}/DEBIAN/postinst"
 set -e
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+fi
+if [ "${1:-}" = configure ] && [ -n "${2:-}" ]; then
+    echo 'AnonGuard upgrade: routing services remain stopped; retained firewall restrictions are not removed.' >&2
+    echo 'Review protocol/state compatibility and follow docs/RELEASE_VERIFICATION.md before explicitly restarting.' >&2
 fi
 exit 0
 EOF

@@ -1,5 +1,6 @@
 name: Firefox Browser Integration
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -10,7 +11,7 @@ permissions:
 jobs:
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,6 +34,16 @@ jobs:
           ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}
         run: python scripts/test_browser_policy_live.py
       - uses: dtolnay/rust-toolchain@stable
+      - name: Cache locked Rust compilation
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: browser-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            browser-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
       - name: Verify Firefox through real pinned onion testnet
         env:
           ANONGUARD_FIREFOX: ${{ steps.firefox.outputs.firefox-path }}

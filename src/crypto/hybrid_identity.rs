@@ -16,7 +16,7 @@ const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 /// The final 32 bytes are the unconstrained matrix seed.
 pub fn mlkem768_public_is_canonical(bytes: &[u8]) -> bool {
     bytes.len() == 1184
-        && bytes[..1152].chunks_exact(3).all(|triple| {
+        && bytes[..1152].as_chunks::<3>().0.iter().all(|triple| {
             let first = u16::from(triple[0]) | (u16::from(triple[1] & 15) << 8);
             let second = u16::from(triple[1] >> 4) | (u16::from(triple[2]) << 4);
             first < 3329 && second < 3329
@@ -56,9 +56,9 @@ impl HybridSigningKey {
     pub fn read_private_file(path: &std::path::Path) -> io::Result<Self> {
         use std::io::Read;
         let file = crate::core::storage::open_regular_file(path, 72)?;
-        let metadata = file.metadata()?;
         #[cfg(unix)]
         {
+            let metadata = file.metadata()?;
             use std::os::unix::fs::PermissionsExt;
             if metadata.permissions().mode() & 0o077 != 0 {
                 return Err(io::Error::new(

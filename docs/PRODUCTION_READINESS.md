@@ -171,3 +171,23 @@ These results supersede the software failures in the historical checkpoint;
 they do not close the independent audit, sustained fuzzing, installed signed
 browser, privileged v6 leak/crash or multi-region traffic-analysis gates above.
 The prior VM address is unreachable, so no fresh v6 VM acceptance is claimed.
+
+### Tracker and distribution hardening (2026-10-15)
+
+The optional private reverse tracker now requires pinned hybrid TLS with a
+separate ALPN and exporter-bound dual-signature proof. Plaintext bearer
+commands are refused. Waiting sockets are monitored for closure/early data,
+expire after 60 seconds, and are limited to three per node and 128 globally
+within a 512-connection budget. Client and volunteer callers use protected
+framed controls; private capabilities are provisioned out of band. Real local
+reverse transfer and refill tests accompany the change. Public node-ownership
+certification and reverse onion circuit transport are not implemented; see
+[the private rendezvous contract](REVERSE_TRACKER.md).
+
+Release publishing now requires browser integration and exact Cargo/tag/Debian
+version agreement. Package tests exercise distinct upgrade/downgrade fixtures
+and persistent-state preservation; the package requires Python 3.11 or newer.
+All 13 fuzz harnesses compile against the v6 APIs and are included in CI.
+These changes improve specific engineering gates; they do not close the
+independent review, installed signed-browser, privileged v6 acceptance,
+sustained fuzzing or multi-network anonymity measurement requirements.

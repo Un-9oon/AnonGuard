@@ -1,593 +1,270 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock};
-use tracing::{info, warn};
+//! Pinned hybrid TLS rendezvous. Waiting registrations own their sockets and
+//! admission permits until handoff, EOF or a bounded lifetime.
+use crate::crypto::identity::SigningKey;
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{oneshot, Mutex, OwnedSemaphorePermit, Semaphore},
+};
 
-// In-memory directory of active nodes: NodeID -> ReverseNodeEntry
-#[derive(Clone)]
-pub struct ReverseNodeEntry {
-    pub auth_token: String,
-    pub streams: Arc<Mutex<Vec<(TcpStream, tokio::sync::OwnedSemaphorePermit)>>>,
+type Stream = tokio_rustls::server::TlsStream<TcpStream>;
+type Handoff = oneshot::Sender<(Stream, OwnedSemaphorePermit)>;
+struct Waiting {
+    id: u64,
+    request: oneshot::Sender<Handoff>,
 }
-
-type Directory = Arc<RwLock<HashMap<String, ReverseNodeEntry>>>;
-
+struct Entry {
+    token: String,
+    waiting: Vec<Waiting>,
+}
+type Directory = Arc<Mutex<HashMap<String, Entry>>>;
 pub const DEFAULT_MAX_TRACKER_CONNECTIONS: usize = 512;
+const MAX_WAITING: usize = 128;
+const MAX_PER_NODE: usize = 3;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+// Fits all 128 waiting node IDs (128 bytes each plus separators).
+const MAX_CONTROL: usize = 32 * 1024;
 
+pub async fn read_control<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<String> {
+    read_control_with_timeout(stream, CONTROL_TIMEOUT).await
+}
+pub async fn read_control_wait<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<String> {
+    read_control_with_timeout(stream, WAIT_TIMEOUT + CONTROL_TIMEOUT).await
+}
+async fn read_control_with_timeout<S: AsyncRead + Unpin>(
+    stream: &mut S,
+    timeout: Duration,
+) -> io::Result<String> {
+    tokio::time::timeout(timeout, async {
+        let size = stream.read_u32().await? as usize;
+        if size == 0 || size > MAX_CONTROL {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid tracker control length",
+            ));
+        }
+        let mut data = vec![0; size];
+        stream.read_exact(&mut data).await?;
+        String::from_utf8(data).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "Invalid tracker control UTF-8")
+        })
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Tracker control timed out"))?
+}
+pub async fn write_control<S: AsyncWrite + Unpin>(stream: &mut S, value: &str) -> io::Result<()> {
+    if value.is_empty() || value.len() > MAX_CONTROL {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid tracker control length",
+        ));
+    }
+    tokio::time::timeout(CONTROL_TIMEOUT, async {
+        stream.write_u32(value.len() as u32).await?;
+        stream.write_all(value.as_bytes()).await?;
+        stream.flush().await
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Tracker write timed out"))?
+}
+fn valid_node(node: &str) -> bool {
+    !node.is_empty()
+        && node.len() <= 128
+        && node
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+fn valid_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+fn tokens_match(a: &str, b: &str) -> bool {
+    subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).unwrap_u8() == 1
+}
 pub struct TrackerServer {
     listen_addr: String,
     pub pow_difficulty: u32,
-    connection_semaphore: Arc<tokio::sync::Semaphore>,
+    identity: SigningKey,
+    connection_semaphore: Arc<Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
 }
-
 impl TrackerServer {
     pub fn new(listen_addr: String) -> Self {
         Self::with_difficulty(listen_addr, crate::mesh::sybil::DEFAULT_POW_DIFFICULTY)
     }
-
     pub fn with_difficulty(listen_addr: String, pow_difficulty: u32) -> Self {
         Self {
             listen_addr,
             pow_difficulty,
-            connection_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                DEFAULT_MAX_TRACKER_CONNECTIONS,
-            )),
+            identity: SigningKey::generate(&mut rand::rngs::OsRng),
+            connection_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_TRACKER_CONNECTIONS)),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
-
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let listener = TcpListener::bind(&self.listen_addr).await?;
-        self.run_listener(listener).await
+    pub fn with_identity(mut self, identity: SigningKey) -> Self {
+        self.identity = identity;
+        self
     }
-
-    async fn run_listener(
+    pub fn identity_pin(&self) -> [u8; 32] {
+        self.identity.verifying_key().to_bytes()
+    }
+    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.run_listener(TcpListener::bind(&self.listen_addr).await?)
+            .await
+    }
+    pub async fn run_listener(
         &self,
         listener: TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let directory: Directory = Arc::new(RwLock::new(HashMap::new()));
+        let directory: Directory = Arc::new(Mutex::new(HashMap::new()));
+        let waiting = Arc::new(Semaphore::new(MAX_WAITING));
+        let acceptor = Arc::new(crate::onion::link::tracker_acceptor(&self.identity)?);
         let mut tasks = tokio::task::JoinSet::new();
-        eprintln!("TRACKER LISTENING ON {}", self.listen_addr);
-        info!(
-            "Rendezvous Tracker listening on {} (max {} concurrent connections)",
-            self.listen_addr, DEFAULT_MAX_TRACKER_CONNECTIONS
-        );
-
         loop {
             while tasks.try_join_next().is_some() {}
-            let (stream, addr) = listener.accept().await?;
-            eprintln!("TRACKER ACCEPTED CONNECTION FROM {}", addr);
-            let permit = match self.connection_semaphore.clone().try_acquire_owned() {
-                Ok(p) => p,
-                Err(_) => {
-                    warn!(
-                        "Tracker DoS defense: max concurrent limit ({}) reached, dropped connection from {}",
-                        DEFAULT_MAX_TRACKER_CONNECTIONS, addr
-                    );
-                    continue;
-                }
+            let (stream, _) = listener.accept().await?;
+            let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() else {
+                continue;
             };
-            let dir = directory.clone();
-            let pow_difficulty = self.pow_difficulty;
-            let registry = self.nonce_registry.clone();
-            tasks.spawn(async move {
-                if let Err(e) =
-                    handle_connection(stream, dir, pow_difficulty, registry, permit).await
-                {
-                    warn!("Tracker connection from {} failed: {}", addr, e);
-                }
-            });
-        }
-    }
-}
-
-async fn handle_connection(
-    stream: TcpStream,
-    directory: Directory,
-    pow_difficulty: u32,
-    nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
-    permit: tokio::sync::OwnedSemaphorePermit,
-) -> std::io::Result<()> {
-    use tokio::io::AsyncReadExt;
-    let mut reader = BufReader::new(stream);
-    let mut first_line = String::new();
-
-    match tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        (&mut reader).take(4096).read_line(&mut first_line),
-    )
-    .await
-    {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {
-            warn!("Tracker read timed out (Slowloris defense)");
-            return Ok(());
-        }
-    }
-
-    if first_line.is_empty() {
-        return Ok(());
-    }
-
-    let cmd = first_line.trim().to_string();
-
-    if cmd.starts_with("REGISTER_REVERSE") {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if parts.len() >= 4 {
-            let (node_id, auth_token, ts_str, nonce_str) = if parts.len() >= 5 {
-                (
-                    parts[1].to_string(),
-                    parts[2].to_string(),
-                    parts[3],
-                    parts[4],
-                )
-            } else {
-                (parts[1].to_string(), String::new(), parts[2], parts[3])
-            };
-
-            let timestamp: u64 = match ts_str.parse() {
-                Ok(ts) => ts,
-                Err(_) => {
-                    warn!("Invalid timestamp in REGISTER_REVERSE: {}", ts_str);
-                    use tokio::io::AsyncWriteExt;
-                    let mut s = reader.into_inner();
-                    let _ = s.write_all(b"ERROR_INVALID_TIMESTAMP\n").await;
-                    return Ok(());
-                }
-            };
-            let nonce: u64 = match nonce_str.parse() {
-                Ok(n) => n,
-                Err(_) => {
-                    warn!("Invalid nonce in REGISTER_REVERSE: {}", nonce_str);
-                    use tokio::io::AsyncWriteExt;
-                    let mut s = reader.into_inner();
-                    let _ = s.write_all(b"ERROR_INVALID_NONCE\n").await;
-                    return Ok(());
-                }
-            };
-
-            let now = crate::mesh::sybil::current_timestamp_secs();
-            if !crate::mesh::sybil::verify_pow(&node_id, timestamp, nonce, pow_difficulty, now) {
-                warn!(
-                    "Rejected unauthenticated REGISTER_REVERSE for node {} (invalid PoW)",
-                    node_id
-                );
-                use tokio::io::AsyncWriteExt;
-                let mut s = reader.into_inner();
-                let _ = s.write_all(b"ERROR_INVALID_POW\n").await;
-                return Ok(());
-            }
-
-            if nonce_registry.check_and_record(&node_id, nonce, now) {
-                warn!(
-                    "Rejected REGISTER_REVERSE for node {} (PoW replay detected)",
-                    node_id
-                );
-                use tokio::io::AsyncWriteExt;
-                let mut s = reader.into_inner();
-                let _ = s.write_all(b"ERROR_POW_REPLAY\n").await;
-                return Ok(());
-            }
-
-            let mut dir = directory.write().await;
-            if let Some(existing) = dir.get(&node_id) {
-                if subtle::ConstantTimeEq::ct_eq(
-                    existing.auth_token.as_bytes(),
-                    auth_token.as_bytes(),
-                )
-                .unwrap_u8()
-                    == 0
-                {
-                    warn!(
-                        "Rejected REGISTER_REVERSE for node {} (auth token mismatch/hijacking attempt)",
-                        node_id
-                    );
-                    println!("TRACKER sending ERROR_AUTH_TOKEN_MISMATCH");
-                    use tokio::io::AsyncWriteExt;
-                    let mut s = reader.into_inner();
-                    let _ = s.write_all(b"ERROR_AUTH_TOKEN_MISMATCH\n").await;
-                    println!("TRACKER sent ERROR_AUTH_TOKEN_MISMATCH");
-                    return Ok(());
-                }
-            }
-
-            info!(
-                "Registered reverse connection for authenticated Node: {}",
-                node_id
+            let (directory, waiting, acceptor, registry) = (
+                directory.clone(),
+                waiting.clone(),
+                acceptor.clone(),
+                self.nonce_registry.clone(),
             );
-
-            // Extract the underlying stream out of the BufReader
-            let raw_stream = reader.into_inner();
-
-            let entry = dir.entry(node_id).or_insert_with(|| ReverseNodeEntry {
-                auth_token,
-                streams: Arc::new(Mutex::new(Vec::new())),
+            let difficulty = self.pow_difficulty;
+            tasks.spawn(async move {
+                if let Ok(stream) = crate::onion::link::accept_tracker(&acceptor, stream).await {
+                    let _ = handle(stream, directory, waiting, registry, difficulty, permit).await;
+                }
             });
-            entry.streams.lock().await.push((raw_stream, permit));
-        } else {
-            warn!("Rejected malformed REGISTER_REVERSE (missing PoW credentials)");
-            use tokio::io::AsyncWriteExt;
-            let mut s = reader.into_inner();
-            let _ = s.write_all(b"ERROR_POW_REQUIRED\n").await;
-            return Ok(());
         }
-    } else if cmd.starts_with("CONNECT_REVERSE") {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let node_id = parts[1].to_string();
-            let provided_token = parts.get(2).copied().unwrap_or("");
-
-            let entry_opt = {
-                let dir = directory.read().await;
-                dir.get(&node_id).cloned()
+    }
+}
+async fn handle(
+    mut stream: Stream,
+    directory: Directory,
+    waiting: Arc<Semaphore>,
+    registry: Arc<crate::mesh::sybil::NonceRegistry>,
+    difficulty: u32,
+    permit: OwnedSemaphorePermit,
+) -> io::Result<()> {
+    let command = read_control(&mut stream).await?;
+    let parts: Vec<_> = command.split_whitespace().collect();
+    match parts.as_slice() {
+        ["REGISTER_REVERSE", node, token, timestamp, nonce]
+            if valid_node(node) && valid_token(token) =>
+        {
+            let now = crate::mesh::sybil::current_timestamp_secs();
+            let valid = timestamp
+                .parse::<u64>()
+                .ok()
+                .zip(nonce.parse::<u64>().ok())
+                .is_some_and(|(ts, n)| {
+                    crate::mesh::sybil::verify_pow(node, ts, n, difficulty, now)
+                        && !registry.check_and_record(node, n, now)
+                });
+            if !valid {
+                return write_control(&mut stream, "ERROR_INVALID_POW").await;
+            }
+            let Ok(wait_permit) = waiting.try_acquire_owned() else {
+                return write_control(&mut stream, "ERROR_BUSY").await;
             };
-
-            if let Some(entry) = entry_opt {
-                if !entry.auth_token.is_empty()
-                    && subtle::ConstantTimeEq::ct_eq(
-                        entry.auth_token.as_bytes(),
-                        provided_token.as_bytes(),
-                    )
-                    .unwrap_u8()
-                        == 0
-                {
-                    warn!(
-                        "Rejected unauthorized CONNECT_REVERSE for node {} (token mismatch)",
-                        node_id
-                    );
-                    use tokio::io::AsyncWriteExt;
-                    reader
-                        .into_inner()
-                        .write_all(b"ERROR_UNAUTHORIZED\n")
-                        .await?;
-                    return Ok(());
-                }
-
-                let popped_stream = entry.streams.lock().await.pop();
-
-                if let Some((mut target_stream, target_permit)) = popped_stream {
-                    info!("Bridging connection to authorized Node: {}", node_id);
-                    let mut client_stream = reader.into_inner();
-                    // Tell the client we are ready
-                    use tokio::io::AsyncWriteExt;
-                    client_stream.write_all(b"OK\n").await?;
-                    let _ =
-                        tokio::io::copy_bidirectional(&mut client_stream, &mut target_stream).await;
-                    drop(target_permit);
+            let id = rand::random::<u64>();
+            let (request, mut receive) = oneshot::channel();
+            let error = {
+                let mut dir = directory.lock().await;
+                let entry = dir.entry(node.to_string()).or_insert_with(|| Entry {
+                    token: token.to_string(),
+                    waiting: Vec::new(),
+                });
+                if !tokens_match(&entry.token, token) {
+                    Some("ERROR_UNAUTHORIZED")
+                } else if entry.waiting.len() >= MAX_PER_NODE {
+                    Some("ERROR_BUSY")
                 } else {
-                    use tokio::io::AsyncWriteExt;
-                    reader.into_inner().write_all(b"ERROR_NO_STREAMS\n").await?;
+                    entry.waiting.push(Waiting { id, request });
+                    None
                 }
-            } else {
-                use tokio::io::AsyncWriteExt;
-                reader
-                    .into_inner()
-                    .write_all(b"ERROR_NODE_NOT_FOUND\n")
-                    .await?;
+            };
+            if let Some(error) = error {
+                return write_control(&mut stream, error).await;
             }
-        }
-    } else if cmd.starts_with("GET /nodes") {
-        let dir = directory.read().await;
-        // Return active node IDs only — NEVER leak secret auth_tokens to unauthenticated discovery callers
-        let mut nodes = Vec::new();
-        for (id, entry) in dir.iter() {
-            if !entry.streams.lock().await.is_empty() {
-                nodes.push(id.clone());
-            }
-        }
-        nodes.sort();
-        let body = nodes.join("\n");
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        use tokio::io::AsyncWriteExt;
-        reader.into_inner().write_all(response.as_bytes()).await?;
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[tokio::test]
-    async fn test_tracker_pow_authentication() {
-        let test_difficulty = 12;
-        let directory: Directory = Arc::new(RwLock::new(HashMap::new()));
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let dir_clone = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        // 1. Send unauthenticated registration without PoW
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        client.write_all(b"REGISTER_REVERSE node1\n").await.unwrap();
-        let mut resp = [0u8; 64];
-        let n = client.read(&mut resp).await.unwrap();
-        assert!(String::from_utf8_lossy(&resp[..n]).contains("ERROR_POW_REQUIRED"));
-
-        // 2. Send registration with valid PoW
-        let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr2 = listener2.local_addr().unwrap();
-        let dir_clone2 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener2.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone2,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut client2 = TcpStream::connect(addr2).await.unwrap();
-        let now = crate::mesh::sybil::current_timestamp_secs();
-        let nonce = crate::mesh::sybil::solve_pow_bounded("node2", now, test_difficulty)
-            .expect("PoW failed");
-        let msg = format!("REGISTER_REVERSE node2 secret_auth_123 {} {}\n", now, nonce);
-        client2.write_all(msg.as_bytes()).await.unwrap();
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let dir = directory.read().await;
-        assert!(dir.contains_key("node2"));
-        let entry = dir.get("node2").unwrap();
-        assert_eq!(entry.auth_token, "secret_auth_123");
-        assert_eq!(entry.streams.lock().await.len(), 1);
-        drop(dir);
-
-        // 3. Test unauthorized CONNECT_REVERSE rejection
-        let listener3 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr3 = listener3.local_addr().unwrap();
-        let dir_clone3 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener3.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone3,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut attacker = TcpStream::connect(addr3).await.unwrap();
-        attacker
-            .write_all(b"CONNECT_REVERSE node2 wrong_token\n")
-            .await
-            .unwrap();
-        let mut err_resp = [0u8; 64];
-        let n = attacker.read(&mut err_resp).await.unwrap();
-        assert!(String::from_utf8_lossy(&err_resp[..n]).contains("ERROR_UNAUTHORIZED"));
-
-        // 4. Test REGISTER_REVERSE hijacking with empty token is strictly rejected
-        let listener4 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr4 = listener4.local_addr().unwrap();
-        let dir_clone4 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener4.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone4,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut attacker2 = TcpStream::connect(addr4).await.unwrap();
-        let nonce_atk = crate::mesh::sybil::solve_pow_bounded("node2", now, test_difficulty)
-            .expect("PoW failed");
-        let msg_atk = format!("REGISTER_REVERSE node2 {} {}\n", now, nonce_atk);
-        attacker2.write_all(msg_atk.as_bytes()).await.unwrap();
-        let mut err_resp2 = [0u8; 64];
-        let n2 = attacker2.read(&mut err_resp2).await.unwrap();
-        assert!(String::from_utf8_lossy(&err_resp2[..n2]).contains("ERROR_AUTH_TOKEN_MISMATCH"));
-
-        // 5. Test GET /nodes discovery NEVER leaks the secret auth_token
-        let listener5 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr5 = listener5.local_addr().unwrap();
-        let dir_clone5 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener5.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone5,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut discoverer = TcpStream::connect(addr5).await.unwrap();
-        discoverer
-            .write_all(b"GET /nodes HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let mut disc_resp = [0u8; 512];
-        let nd = discoverer.read(&mut disc_resp).await.unwrap();
-        let disc_text = String::from_utf8_lossy(&disc_resp[..nd]);
-        assert!(disc_text.contains("node2"));
-        assert!(
-            !disc_text.contains("secret_auth_123"),
-            "GET /nodes must NEVER leak secret auth_token!"
-        );
-
-        // 6. Test authorized CONNECT_REVERSE succeeds with correct token
-        let listener6 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr6 = listener6.local_addr().unwrap();
-        let dir_clone6 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener6.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone6,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut auth_client = TcpStream::connect(addr6).await.unwrap();
-        auth_client
-            .write_all(b"CONNECT_REVERSE node2 secret_auth_123\n")
-            .await
-            .unwrap();
-        let mut ok_resp = [0u8; 64];
-        let nok = auth_client.read(&mut ok_resp).await.unwrap();
-        assert!(String::from_utf8_lossy(&ok_resp[..nok]).contains("OK"));
-
-        // 7. Test oversized line input (>4096 bytes) is safely capped
-        let listener7 = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr7 = listener7.local_addr().unwrap();
-        let dir_clone7 = directory.clone();
-        tokio::spawn(async move {
-            let (stream, _) = listener7.accept().await.unwrap();
-            let test_sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let test_registry = std::sync::Arc::new(crate::mesh::sybil::NonceRegistry::new());
-            let _ = handle_connection(
-                stream,
-                dir_clone7,
-                test_difficulty,
-                test_registry,
-                test_sem.acquire_owned().await.unwrap(),
-            )
-            .await;
-        });
-
-        let mut spammer = TcpStream::connect(addr7).await.unwrap();
-        let huge_garbage = vec![b'A'; 8192];
-        spammer.write_all(&huge_garbage).await.unwrap();
-        drop(spammer);
-    }
-}
-
-#[cfg(test)]
-mod listener_boundary_tests {
-    use super::*;
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    async fn start() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = listener.local_addr().unwrap();
-        let tracker = TrackerServer::with_difficulty(endpoint.to_string(), 0);
-        let server = tokio::spawn(async move {
-            tracker.run_listener(listener).await.unwrap();
-        });
-        (endpoint, server)
-    }
-    async fn request(endpoint: std::net::SocketAddr, command: &str) -> String {
-        let mut client = TcpStream::connect(endpoint).await.unwrap();
-        client.write_all(command.as_bytes()).await.unwrap();
-        let mut response = String::new();
-        tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
-            .await
-            .unwrap()
-            .unwrap();
-        response
-    }
-
-    #[tokio::test]
-    async fn malformed_registrations_are_rejected_without_directory_entries() {
-        let (endpoint, server) = start().await;
-        let now = crate::mesh::sybil::current_timestamp_secs();
-        let cases = [
-            (
-                "REGISTER_REVERSE short\n".to_string(),
-                "ERROR_POW_REQUIRED\n",
-            ),
-            (
-                "REGISTER_REVERSE node private-token bad-time 1\n".to_string(),
-                "ERROR_INVALID_TIMESTAMP\n",
-            ),
-            (
-                format!("REGISTER_REVERSE node private-token {now} bad-nonce\n"),
-                "ERROR_INVALID_NONCE\n",
-            ),
-            (
-                format!("REGISTER_REVERSE node private-token {} 1\n", now - 301),
-                "ERROR_INVALID_POW\n",
-            ),
-            (
-                "CONNECT_REVERSE missing private-token\n".to_string(),
-                "ERROR_NODE_NOT_FOUND\n",
-            ),
-        ];
-        for (command, expected) in cases {
-            assert_eq!(request(endpoint, &command).await, expected);
-        }
-        let discovery = request(endpoint, "GET /nodes\n").await;
-        assert!(discovery.ends_with("Content-Length: 0\r\n\r\n"));
-        server.abort();
-        assert!(server.await.unwrap_err().is_cancelled());
-    }
-
-    #[tokio::test]
-    async fn cancellation_closes_queued_reverse_streams_and_partial_requests() {
-        let (endpoint, server) = start().await;
-        let mut registered = TcpStream::connect(endpoint).await.unwrap();
-        let now = crate::mesh::sybil::current_timestamp_secs();
-        registered
-            .write_all(format!("REGISTER_REVERSE owned private-token {now} 1\n").as_bytes())
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                if request(endpoint, "GET /nodes\n").await.ends_with("owned") {
-                    break;
+            // Always remove the registration even when writing its ACK fails.
+            let result = async {
+                write_control(&mut stream, "REGISTERED").await?;
+                let mut byte = [0u8; 1];
+                let target = tokio::select! {
+                    target=&mut receive => target.ok(),
+                    _=stream.read(&mut byte)=>None,
+                    _=tokio::time::sleep(WAIT_TIMEOUT)=>None,
+                };
+                if let Some(target) = target {
+                    write_control(&mut stream, "READY").await?;
+                    let _ = target.send((stream, permit));
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                Ok(())
             }
-        })
-        .await
-        .unwrap();
-        let mut pending = TcpStream::connect(endpoint).await.unwrap();
-        pending.write_all(b"REGISTER").await.unwrap();
-        server.abort();
-        assert!(server.await.unwrap_err().is_cancelled());
-        for mut connection in [registered, pending] {
-            let mut byte = [0];
-            let result = tokio::time::timeout(Duration::from_secs(2), connection.read(&mut byte))
+            .await;
+            let mut dir = directory.lock().await;
+            if let Some(entry) = dir.get_mut(*node) {
+                entry.waiting.retain(|slot| slot.id != id);
+                if entry.waiting.is_empty() {
+                    dir.remove(*node);
+                }
+            }
+            drop(wait_permit);
+            result
+        }
+        ["CONNECT_REVERSE", node, token] if valid_node(node) && valid_token(token) => {
+            let selected = {
+                let mut dir = directory.lock().await;
+                match dir.get_mut(*node) {
+                    Some(entry) if tokens_match(&entry.token, token) => entry.waiting.pop(),
+                    _ => None,
+                }
+            };
+            let Some(selected) = selected else {
+                return write_control(&mut stream, "ERROR_UNAVAILABLE").await;
+            };
+            let (target, receive) = oneshot::channel();
+            if selected.request.send(target).is_err() {
+                return write_control(&mut stream, "ERROR_UNAVAILABLE").await;
+            }
+            let Ok(Ok((mut relay, _relay_permit))) =
+                tokio::time::timeout(CONTROL_TIMEOUT, receive).await
+            else {
+                return write_control(&mut stream, "ERROR_UNAVAILABLE").await;
+            };
+            write_control(&mut stream, "OK").await?;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(3600),
+                tokio::io::copy_bidirectional(&mut stream, &mut relay),
+            )
+            .await;
+            Ok(())
+        }
+        ["NODES"] => {
+            let mut nodes: Vec<_> = directory
+                .lock()
                 .await
-                .expect("Tracker cancellation retained a client socket");
-            assert!(matches!(result, Ok(0) | Err(_)));
+                .iter()
+                .filter(|(_, entry)| !entry.waiting.is_empty())
+                .map(|(node, _)| node.clone())
+                .collect();
+            nodes.sort();
+            // Bounded listing; capabilities are never advertised.
+            let result = nodes.join("\n");
+            write_control(
+                &mut stream,
+                if result.is_empty() { "EMPTY" } else { &result },
+            )
+            .await
         }
+        _ => write_control(&mut stream, "ERROR_INVALID_COMMAND").await,
     }
 }

@@ -133,3 +133,10 @@ whole-device acceptance, complete host IPC containment, all-channel browser leak
 proof or a compromised-root defense. Backend-loss setup refusal can take the
 adapter's bounded 15-second timeout because firewall rules can also block kernel
 RST responses. Successful protocol connections are never replayed directly.
+
+Package upgrades intentionally retain restrictions and stop routing services.
+Use the [explicit upgrade recovery procedure](RELEASE_VERIFICATION.md#explicit-fail-closed-upgrade-recovery)
+from the local console after reviewing version/state compatibility. Automatic
+reconnection, protocol downgrade and security-state reset are not recovery paths.
+The Linux archive now carries native/browser helpers and reviewable addon sources,
+but extraction still does not constitute installation or signed browser delivery.

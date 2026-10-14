@@ -49,3 +49,71 @@ The release workflow verifies actual freshly generated signature bundles before
 publishing tagged assets. Local boundary tests stub Cosign to test orchestration;
 they are not evidence of cryptographic signature verification. See the
 [official signature verification documentation](https://docs.sigstore.dev/cosign/verifying/verify/).
+
+## Exact version and browser release gates
+
+Tagged builds require the release tag to equal `v` followed by Cargo's package
+version exactly. Before signing, Debian `Package`, `Version`, `Architecture` and
+artifact filename must agree with that version. A `v0.2.0` signature cannot be
+used to admit a package named `anonguard_0.1.0_amd64.deb`. Manual workflow builds
+without a tag do not publish or pretend to pass tagged signing admission.
+
+The release workflow now requires the reusable actual-Firefox integration gate
+in addition to the Rust/privileged verification workflow and dependency audit.
+That browser gate uses disposable profiles/fixtures and includes real local
+pinned onion testnet browsing. It does **not** verify a Mozilla-signed production
+addon or certify an operator-installed whole-device/browser combination.
+
+The Linux transport archive includes native setup/adapter/browser helpers,
+reviewable isolation-addon sources and native account/desktop examples alongside
+the existing daemon/PT/headless tools. It is still an archive, not a system
+installer: extracting it does not provision accounts, install browser policies,
+activate firewall rules or create a signed addon. The Debian package provides
+the corresponding fixed installed paths. Neither artifact supplies a signed
+isolation XPI or a separately bundled Firefox engine.
+
+## Explicit fail-closed upgrade recovery
+
+Package replacement stops routing services. It preserves native firewall rules,
+operator configuration and persistent security state; post-installation reloads
+systemd but **does not automatically restart an unaccepted deployment**. A service
+being stopped after upgrade is intentional fail-closed behavior, not successful
+runtime recovery. Retain local-console access and keep protected applications
+stopped until the upgraded installation has passed acceptance.
+
+Before upgrading, authenticate the selected release, back up and protect paired
+identity keys, authority votes, guard bindings, accepted consensus and retirement
+journals. Upgrade all v6 participants together. Raw legacy Ed pins, old cell
+formats and incompatible journals require a reviewed coordinated migration;
+do not delete state to bypass refusal. Operator approval of a version is separate
+from artifact-signature verification.
+
+On an already configured native client, review the retained bootstrap pins and
+units, then validate the firewall configuration from the device console:
+
+```sh
+sudo nft --check --file /etc/anonguard/native.nft
+sudo systemctl daemon-reload
+sudo systemctl restart anonguard-native-firewall.service
+sudo systemctl start anonguard-client.service anonguard-native-adapter.service
+systemctl is-active anonguard-native-firewall.service anonguard-client.service anonguard-native-adapter.service
+anonguard-browser --native-client --circuit-isolation --check
+```
+
+These commands presume previously accepted role configuration, dedicated accounts
+and a protected signed addon/browser setup. `--check` is preflight, not actual
+packet/policy acceptance. Starting services alone does not prove usable quorum
+or anonymity. Stop the affected transport/application and diagnose refusals;
+**never remove the firewall to recover direct traffic**. Volunteer and standalone
+roles require their own retained-unit review and explicit restart. System-wide
+firewall activation can interrupt SSH; use the local console.
+
+The disposable package lifecycle test now installs a distinct higher Debian
+version and then the original version, checking real upgrade/downgrade maintainer
+script paths and byte-for-byte persistence of a genuine paired identity and
+opaque journal fixtures. The higher package is explicitly a synthetic version
+of the same tested payload. This demonstrates lifecycle mechanics, **not**
+safe rollback between different protocols or acceptance of those journal fixtures
+by a daemon. Production downgrades still require operator-reviewed state and
+vulnerability compatibility. Purge keeps security state; the disposable test
+removes only state directories it created exclusively.

@@ -172,8 +172,18 @@ pub fn verify_pow(
 
 /// Solves a Proof-of-Work challenge for a given node identity.
 pub fn solve_pow_bounded(node_id: &str, timestamp: u64, difficulty_bits: u32) -> Option<u64> {
-    let mut nonce: u64 = 0;
-    while nonce < 10_000_000 {
+    solve_pow_bounded_from(node_id, timestamp, difficulty_bits, 0)
+}
+
+/// Independent starting points prevent pooled registrations from reusing proofs.
+pub fn solve_pow_bounded_from(
+    node_id: &str,
+    timestamp: u64,
+    difficulty_bits: u32,
+    start: u64,
+) -> Option<u64> {
+    let mut nonce = start;
+    for _ in 0..10_000_000 {
         let mut hasher = Sha256::new();
         hasher.update(node_id.as_bytes());
         hasher.update(timestamp.to_be_bytes());

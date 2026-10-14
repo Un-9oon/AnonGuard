@@ -1,17 +1,16 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::kernel::dns::{build_socks5h_connect_frame, TargetAddress};
 
 /// Handshakes with a single SOCKS5 proxy to establish a tunnel to a target (IP/Domain + Port).
 /// Guarantees that remote DNS and IPv6 blocking policies from kernel/dns.rs are enforced.
-pub async fn socks5_connect_through(
-    mut stream: TcpStream,
+pub async fn socks5_connect_through<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut stream: S,
     target_host: &str,
     target_port: u16,
     block_ipv6: bool,
-) -> std::io::Result<TcpStream> {
+) -> std::io::Result<S> {
     // 1. Initial auth negotiation (No Auth)
     stream.write_all(&[0x05, 0x01, 0x00]).await?;
 

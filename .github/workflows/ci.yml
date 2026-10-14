@@ -26,8 +26,10 @@ jobs:
       - name: Verify HTTP evaluation and failed-proxy refusal
         run: python3 scripts/test_latency_profile.py
 
-      - name: Verify signed-release admission boundaries
-        run: python3 scripts/test_verify_release.py
+      - name: Verify signed-release admission and version boundaries
+        run: |
+          python3 scripts/test_verify_release.py
+          python3 scripts/test_release_version.py
 
       - name: Verify offline two-VM deployment contracts and systemd units
         run: |
@@ -78,10 +80,10 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run Clippy Linter & Build (Strict Zero-Warning Enforcement - Release)
-        run: cargo clippy --release --all-targets -- -D warnings && cargo build --release
+        run: cargo clippy --locked --release --all-targets -- -D warnings && cargo build --locked --release
 
       - name: Check Benchmark Compilation
-        run: cargo bench --no-run
+        run: cargo bench --locked --no-run
 
       - name: Build Debian package from verified binary
         run: bash scripts/build_deb.sh --prebuilt
@@ -123,10 +125,10 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo +stable install cargo-fuzz --version 0.13.2 --locked
 
       - name: Check all fuzz harness APIs before campaigns
-        run: cargo check --locked --manifest-path fuzz/Cargo.toml --all-targets
+        run: cargo +nightly check --locked --manifest-path fuzz/Cargo.toml --all-targets
 
       - name: Replay proof-of-work short-header regression
         run: cargo +nightly fuzz run fuzz_verify_pow fuzz/regressions/verify-pow-short-header.input -- -runs=1
@@ -134,7 +136,7 @@ jobs:
       - name: Run Fuzz Targets
         run: |
           campaign_result=0
-          for target in fuzz_target_1 fuzz_consensus_deser fuzz_revocation_policy fuzz_proxy_node_parse fuzz_onion_cell_parse fuzz_peel_forward fuzz_exit_policy fuzz_decode_extend fuzz_decode_relay_target fuzz_socks5_frame fuzz_verify_pow fuzz_multipath_reassembler; do
+          for target in fuzz_target_1 fuzz_consensus_deser fuzz_revocation_policy fuzz_hybrid_identity fuzz_proxy_node_parse fuzz_onion_cell_parse fuzz_peel_forward fuzz_exit_policy fuzz_decode_extend fuzz_decode_relay_target fuzz_socks5_frame fuzz_verify_pow fuzz_multipath_reassembler; do
             if ! cargo +nightly fuzz run "$target" -- -max_total_time=60; then
               campaign_result=1
             fi

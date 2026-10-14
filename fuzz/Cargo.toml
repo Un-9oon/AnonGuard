@@ -10,7 +10,6 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1.0"
-ed25519-dalek = "=2.2.0"
 
 [dependencies.anonguard]
 path = ".."
@@ -97,6 +96,13 @@ bench = false
 [[bin]]
 name = "fuzz_multipath_reassembler"
 path = "fuzz_targets/fuzz_multipath_reassembler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hybrid_identity"
+path = "fuzz_targets/fuzz_hybrid_identity.rs"
 test = false
 doc = false
 bench = false

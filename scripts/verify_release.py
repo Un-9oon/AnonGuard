@@ -59,6 +59,10 @@ def verify(artifact, manifest, bundle, tag, staging, cosign):
         raise ValueError("This staging verifier currently supports Linux only")
     if not TAG.fullmatch(tag) or not ASSET.fullmatch(artifact.name):
         raise ValueError("Expected a version tag and a supported release asset name")
+    if artifact.name.endswith('.deb'):
+        version = artifact.name.removeprefix('anonguard_').rsplit('_', 1)[0]
+        if version != tag.removeprefix('v'):
+            raise ValueError("Debian artifact version must match the authenticated release tag")
     if not cosign.is_absolute() or not cosign.is_file() or not os.access(cosign, os.X_OK):
         raise ValueError("Provide an absolute path to a trusted Cosign executable")
     # Exclusive creation prevents overwriting prior artifacts or following a

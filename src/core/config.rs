@@ -60,6 +60,10 @@ pub struct GuardConfig {
     pub reverse_relay_mode: bool,
     pub tracker_url: Option<String>,
     #[serde(default)]
+    pub tracker_identity_pin: Option<[u8; 32]>,
+    #[serde(default)]
+    pub reverse_token_file: Option<std::path::PathBuf>,
+    #[serde(default)]
     pub padded_sessions: bool,
     #[serde(default = "default_privacy_profile")]
     pub privacy_profile: String,
@@ -136,6 +140,8 @@ impl Default for GuardConfig {
             is_exit: false,
             reverse_relay_mode: false,
             tracker_url: None,
+            tracker_identity_pin: None,
+            reverse_token_file: None,
             enable_onion_routing: false,
             padded_sessions: false,
             privacy_profile: default_privacy_profile(),

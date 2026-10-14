@@ -13,13 +13,23 @@ if dpkg-query -W -f='${Status}' anonguard 2>/dev/null | grep -q 'install ok inst
     echo 'Refusing to replace an existing installation' >&2
     exit 2
 fi
+# Exclusive disposable fixture ownership; never clear existing operator state.
+if [[ -e /var/lib/anonguard ]]; then
+    echo 'Refusing to overwrite pre-existing persistent AnonGuard state' >&2
+    exit 2
+fi
+fixture_root=$(mktemp -d)
+state_created=0
 cleanup() {
     systemctl stop anonguard.service || true
     dpkg --purge anonguard || true
+    if [[ "$state_created" == 1 ]]; then rm -rf /var/lib/anonguard; fi
+    rm -rf "$fixture_root"
 }
 trap cleanup EXIT
 dependencies=$(dpkg-deb --field "$1" Depends)
 [[ "$dependencies" == *libc6* && "$dependencies" == *libgcc-s1* ]]
+[[ "$dependencies" == *'python3 (>= 3.11)'* ]]
 dpkg --install "$1"
 test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
@@ -53,6 +63,45 @@ printf '\n# Package lifecycle preservation marker\n' >> /etc/anonguard/runtime.e
 before=$(sha256sum /etc/anonguard/runtime.env)
 dpkg --install "$1"
 test "$(sha256sum /etc/anonguard/runtime.env)" = "$before"
+# Distinct Debian versions exercise real upgrade/downgrade maintainer-script paths.
+# The higher version is a clearly synthetic fixture of the SAME tested payload:
+# this proves package/state lifecycle, not cross-protocol compatibility.
+original_version=$(dpkg-deb --field "$1" Version)
+upgrade_version="${original_version}+ci.1"
+dpkg --compare-versions "$upgrade_version" gt "$original_version"
+dpkg-deb --raw-extract "$1" "$fixture_root/upgrade"
+python3 - "$fixture_root/upgrade/DEBIAN/control" "$upgrade_version" <<'PYCONTROL'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines()
+assert sum(line.startswith('Version: ') for line in lines) == 1
+path.write_text('\n'.join('Version: ' + sys.argv[2] if line.startswith('Version: ') else line
+                          for line in lines) + '\n')
+PYCONTROL
+dpkg-deb --build --root-owner-group "$fixture_root/upgrade" "$fixture_root/upgraded.deb"
+mkdir -m 700 /var/lib/anonguard
+state_created=1
+/usr/bin/anonguard-daemon --initialize-identity --identity-key-path /var/lib/anonguard/identity.key > "$fixture_root/identity-public.json"
+test "$(stat -c '%s:%a' /var/lib/anonguard/identity.key)" = '72:600'
+# Opaque journal fixtures test byte preservation only; no daemon accepts these as votes.
+for journal in guards.json identity.votes.json guards.consensus.json retirement.accepted.json; do
+    printf '{"protocol_version":6,"fixture":"preserve-byte-for-byte"}\n' > "/var/lib/anonguard/$journal"
+    chmod 600 "/var/lib/anonguard/$journal"
+done
+sha256sum /var/lib/anonguard/* > "$fixture_root/persistent.sha256"
+for package in "$fixture_root/upgraded.deb" "$1"; do
+    dpkg --install "$package"
+    test "$(dpkg-query -W -f='${Version}' anonguard)" = "$(dpkg-deb --field "$package" Version)"
+    test "$(sha256sum /etc/anonguard/runtime.env)" = "$before"
+    sha256sum --check "$fixture_root/persistent.sha256"
+    /usr/bin/anonguard-daemon --initialize-identity --identity-key-path /var/lib/anonguard/identity.key > "$fixture_root/public-after.json"
+    cmp "$fixture_root/identity-public.json" "$fixture_root/public-after.json"
+    if systemctl is-active --quiet anonguard.service; then
+        echo 'Unaccepted upgrade unexpectedly started a service' >&2
+        exit 1
+    fi
+done
 dpkg --remove anonguard
 test -f /etc/anonguard/runtime.env
 test ! -e /usr/bin/anonguard-daemon
@@ -62,5 +111,9 @@ test "$(sha256sum /etc/anonguard/runtime.env)" = "$before"
 dpkg --purge anonguard
 test ! -e /etc/anonguard/runtime.env
 test ! -e /lib/systemd/system/anonguard.service
+sha256sum --check "$fixture_root/persistent.sha256"
+rm -rf /var/lib/anonguard
+state_created=0
+rm -rf "$fixture_root"
 trap - EXIT
-echo 'Package install, reinstall, remove, recovery and purge checks passed'
+echo 'Package install, synthetic-version upgrade/downgrade, persistent state, remove, recovery and purge checks passed'

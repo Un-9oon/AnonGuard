@@ -71,3 +71,23 @@ fn padded_profiles_refuse_legacy_customization_and_missing_onion() {
         "invalid value",
     );
 }
+
+#[test]
+fn reverse_tracker_configuration_requires_explicit_trust_and_capability() {
+    refuses(&["--fetch-from", "127.0.0.1:8080"], "--tracker-key");
+    refuses(&["--announce", "127.0.0.1:8080"], "--reverse-relay");
+    refuses(&["--reverse-relay"], "requires --announce");
+    refuses(
+        &["--fetch-from", "127.0.0.1:8080", "--tracker-key", "bad"],
+        "Invalid --tracker-key",
+    );
+    refuses(
+        &[
+            "--fetch-from",
+            "127.0.0.1:8080",
+            "--tracker-key",
+            &"00".repeat(32),
+        ],
+        "Tracker pin cannot be zero",
+    );
+}

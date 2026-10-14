@@ -8,7 +8,7 @@ fuzz_target!(|data: &[u8]| {
     let secret = [0x41; 64];
     let mut client = OnionCircuit::new(cid);
     client.add_hop(derive_hop_keys(&secret).unwrap()).unwrap();
-    let command = CellCommand::from_u8(data.first().copied().unwrap_or(7) % 10 + 1).unwrap();
+    let command = CellCommand::from_u8(data.first().copied().unwrap_or(7) % 18 + 1).unwrap();
     let mut cell =
         OnionCell::new(cid, 0, command, 1, &data[..data.len().min(PAYLOAD_SIZE)]).unwrap();
     let wire = client.wrap_forward(&mut cell).unwrap();
@@ -19,7 +19,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = hop.peel_forward(&mut replay);
 
     // Exercise malformed and tampered input without waiting for an empty corpus
-    // to discover a complete 2048-byte cell or forge an authentication tag.
+    // to discover a complete current-size cell or forge an authentication tag.
     let mut arbitrary = [0u8; ONION_CELL_SIZE];
     let n = data.len().min(ONION_CELL_SIZE);
     arbitrary[..n].copy_from_slice(&data[..n]);

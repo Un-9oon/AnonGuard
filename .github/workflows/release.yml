@@ -13,6 +13,25 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  version-contract:
+    name: Verify exact release version contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify version parser boundaries
+        run: python3 scripts/test_release_version.py
+      - name: Require tag to match Cargo version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check_release_version.py --tag "$RELEASE_TAG"
+      - name: Check manifest version for non-publishing manual builds
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        run: python3 scripts/check_release_version.py
+
+  browser-verification:
+    uses: ./.github/workflows/browser.yml
+
   verification:
     uses: ./.github/workflows/ci.yml
 
@@ -20,7 +39,7 @@ jobs:
     uses: ./.github/workflows/security.yml
 
   build-linux:
-    needs: [verification, dependency-audit]
+    needs: [verification, dependency-audit, browser-verification, version-contract]
     name: Build Linux Binary & Debian Package
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +72,13 @@ jobs:
           cp scripts/verify_release.py target/package_linux/verify_release.py
           cp scripts/latency_profile.py target/package_linux/latency_profile.py
           cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
+          install -m 755 scripts/device_setup.py target/package_linux/anonguard-setup
+          install -m 755 scripts/native_adapter.py target/package_linux/anonguard-native-adapter
+          install -m 755 scripts/browser_session.py target/package_linux/anonguard-browser
+          cp scripts/check_release_version.py target/package_linux/
+          cp contrib/anonguard-native.conf contrib/anonguard-browser.desktop target/package_linux/
+          mkdir -p target/package_linux/browser-isolation
+          cp browser/isolation/manifest.json browser/isolation/isolation.js browser/isolation/background.js target/package_linux/browser-isolation/
           cp README.md LICENSE-MIT LICENSE-APACHE target/package_linux/
           tar -czvf dist/anonguard-linux-amd64.tar.gz -C target/package_linux .
           cd dist && sha256sum anonguard-linux-amd64.tar.gz > anonguard-linux-amd64.tar.gz.sha256
@@ -64,7 +90,7 @@ jobs:
           path: dist/*
 
   build-windows:
-    needs: [verification, dependency-audit]
+    needs: [verification, dependency-audit, browser-verification, version-contract]
     name: Build Windows Executable Bundle
     runs-on: windows-latest
     steps:
@@ -100,7 +126,7 @@ jobs:
           path: dist/*
 
   build-macos:
-    needs: [verification, dependency-audit]
+    needs: [verification, dependency-audit, browser-verification, version-contract]
     name: Build macOS Universal Binary
     runs-on: macos-latest
     steps:
@@ -170,6 +196,18 @@ jobs:
         run: |
           cd release_assets
           sha256sum *.tar.gz *.zip *.deb > SHA256SUMS
+
+      - name: Verify packaged Debian version before signing
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          for package in release_assets/*.deb; do
+            if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+              python3 scripts/check_release_version.py --tag "$RELEASE_TAG" --deb "$package"
+            else
+              python3 scripts/check_release_version.py --deb "$package"
+            fi
+          done
 
       - name: Sign Release Assets with Cosign
         if: startsWith(github.ref, 'refs/tags/')
