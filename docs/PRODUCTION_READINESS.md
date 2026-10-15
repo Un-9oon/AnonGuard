@@ -8,6 +8,10 @@ of superiority to Tor or complete quantum protection is supported.
 
 ## Current engineering checkpoint
 
+The [protected-entry and context-cache checkpoint](PROTECTED_ENTRY_AND_CONTEXT_CACHE.md)
+adds an explicit transport-required CLI policy and removes a shared-lock circuit
+setup bottleneck. It does not claim reduced padding bandwidth or AI invisibility.
+
 The [15 October owned-VM validation](VM_VALIDATION_2026_10_15.md) records
 actual Firefox routing, public HTTPS captures, separate protocol/site-inference
 pilots and retained failures. Direct TLS ClientHello captures expose the

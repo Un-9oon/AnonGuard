@@ -140,6 +140,10 @@ struct Args {
     #[arg(long, requires = "onion", conflicts_with_all = ["relay", "authority", "reverse_relay", "initialize_identity", "tracker", "status"])]
     bridge_transports: Option<PathBuf>,
 
+    /// Require padded client routing plus protected entry AND authority bootstrap; no direct fallback
+    #[arg(long, requires_all = ["padded_sessions", "bridge_transports", "authority_transports"], conflicts_with_all = ["pool", "proxy", "fetch_from"])]
+    protected_entry: bool,
+
     /// Use independently provisioned unlisted entries, with protected authority bootstrap
     #[arg(long, requires_all = ["bridge_transports", "authority_transports"], conflicts_with_all = ["pool", "proxy", "fetch_from"])]
     private_bridges: bool,
@@ -492,6 +496,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             args.quorum_threshold,
         )?
         .with_transports(bindings.clone())?;
+    }
+    if args.protected_entry {
+        info!("Protected-entry policy: provisioned transports required for entry and authority bootstrap; no direct fallback. Indistinguishability is not guaranteed.");
+    } else if args.onion && !args.relay {
+        warn!("Direct or partially protected client mode: TLS protocol metadata may identify AnonGuard. Use --protected-entry with provisioned entry and authority transports for the protected policy.");
     }
     if args.unlisted_bridge
         && !args

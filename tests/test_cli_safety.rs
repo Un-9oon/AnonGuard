@@ -73,6 +73,33 @@ fn padded_profiles_refuse_legacy_customization_and_missing_onion() {
 }
 
 #[test]
+fn protected_entry_requires_both_transport_sets_and_padded_routing() {
+    refuses(&["--protected-entry"], "--padded-sessions");
+    refuses(
+        &[
+            "--protected-entry",
+            "--onion",
+            "--padded-sessions",
+            "--bridge-transports",
+            "missing.json",
+        ],
+        "--authority-transports",
+    );
+    refuses(
+        &[
+            "--protected-entry",
+            "--onion",
+            "--padded-sessions",
+            "--authority-transports",
+            "missing.json",
+            "--authorities",
+            "a@127.0.0.1:9443",
+        ],
+        "--bridge-transports",
+    );
+}
+
+#[test]
 fn reverse_tracker_configuration_requires_explicit_trust_and_capability() {
     refuses(&["--fetch-from", "127.0.0.1:8080"], "--tracker-key");
     refuses(&["--announce", "127.0.0.1:8080"], "--reverse-relay");

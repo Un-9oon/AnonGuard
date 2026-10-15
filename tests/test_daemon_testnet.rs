@@ -392,6 +392,9 @@ async fn exercise(padded: bool) {
         }
         if padded {
             gateway_extra.extend(["--padded-sessions", "--privacy-profile", "strict"]);
+            if private {
+                gateway_extra.push("--protected-entry");
+            }
         }
         testnet.start("gateway", addresses[7], &authority_args, &gateway_extra);
     } else {

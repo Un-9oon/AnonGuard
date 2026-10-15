@@ -3,4 +3,5 @@ pub mod chain;
 // The former multipath transport had incompatible exit framing and is retired.
 // Reassembly research utilities remain in onion::multipath, outside the runtime.
 pub mod server;
+mod session_cache;
 pub use server::GatewayServer;

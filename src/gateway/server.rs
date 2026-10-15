@@ -64,7 +64,7 @@ impl Drop for CachedSession {
         self.task.abort();
     }
 }
-type SessionCache = Arc<tokio::sync::Mutex<HashMap<[u8; 32], CachedSession>>>;
+type SessionCache = Arc<super::session_cache::SessionCache<CachedSession>>;
 
 impl GatewayServer {
     pub fn new(
@@ -131,7 +131,7 @@ impl GatewayServer {
             }
             crate::onion::session::Profile::parse(&self.config.privacy_profile)?;
         }
-        let sessions: SessionCache = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let sessions: SessionCache = Arc::new(super::session_cache::SessionCache::new(8));
         let mut tasks = tokio::task::JoinSet::new();
         self.pool
             .init_guard_state(self.config.guard_state_path.clone())
@@ -527,18 +527,20 @@ impl GatewayServer {
                         let mut replied=false;
                         let operation=async {
                             let key=context.unwrap_or([0;32]);
-                            let mut cache=tokio::time::timeout(std::time::Duration::from_secs(30),sessions.lock()).await?;
-                            cache.retain(|_,session| !session.task.is_finished());
-                            if !cache.contains_key(&key) {
-                                if cache.len()>=8 {return Err("Privacy context limit reached".into());}
-                                let profile=crate::onion::session::Profile::parse(&config.privacy_profile)?;
-                                let (stream,circuit)=tokio::time::timeout(std::time::Duration::from_secs(30), establish_session(&config,&pool,profile,kill_switch.atomic_handle())).await??;
-                                let upstream=GuardedSocket::new(stream,kill_switch.atomic_handle()).begin_verification().mark_verified();
-                                let (handle,task)=crate::onion::session::start_client(upstream,circuit,profile);
-                                cache.insert(key,CachedSession{handle,task});
-                            }
-                            let handle=cache.get(&key).ok_or("Session missing")?.handle.clone();
-                            drop(cache);
+                            let session = tokio::time::timeout(std::time::Duration::from_secs(30), sessions.get_or_start(key,
+                                |session| !session.task.is_finished(),
+                                || async {
+                                    let setup = async {
+                                        let profile=crate::onion::session::Profile::parse(&config.privacy_profile)?;
+                                        let (stream,circuit)=Box::pin(establish_session(&config,&pool,profile,kill_switch.atomic_handle())).await?;
+                                        let upstream=GuardedSocket::new(stream,kill_switch.atomic_handle()).begin_verification().mark_verified();
+                                        let (handle,task)=crate::onion::session::start_client(upstream,circuit,profile);
+                                        Ok::<_,Box<dyn std::error::Error + Send + Sync>>(CachedSession{handle,task})
+                                    }.await;
+                                    setup.map_err(|error| error.to_string())
+                                }
+                            )).await??;
+                            let handle=session.handle.clone();
                             let mut application=handle.open(target_host,target_port).await?;
                             crate::gateway::chain::send_socks5_reply(&mut client,0).await?;
                             replied=true;
