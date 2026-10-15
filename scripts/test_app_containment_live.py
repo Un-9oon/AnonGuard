@@ -21,11 +21,15 @@ with tempfile.TemporaryDirectory(prefix="anonguard-rootfs-", dir="/var/lib") as 
     root = Path(directory)
     root.chmod(0o755)
     (root / "app").mkdir()
+    # The probe runs as an unprivileged UID. Do not inherit the evidence
+    # runner's restrictive umask for files that UID must traverse/execute.
+    (root / "app").chmod(0o755)
     for name in ("proc", "dev", "tmp", "run"):
         (root / name).mkdir()
     source = Path(__file__).resolve().parent.parent / "tests/app_containment_probe.c"
     subprocess.run(["gcc", "-static", "-pthread", "-Wall", "-Wextra", "-Werror", str(source),
                     "-o", str(root / "app/probe")], check=True)
+    (root / "app/probe").chmod(0o755)
     with tempfile.TemporaryDirectory(prefix="anonguard-host-") as host_directory:
         sentinel = Path(host_directory) / "host-secret"
         sentinel.write_text("must not enter the sandbox")

@@ -8,6 +8,12 @@ of superiority to Tor or complete quantum protection is supported.
 
 ## Current engineering checkpoint
 
+The [15 October owned-VM validation](VM_VALIDATION_2026_10_15.md) records
+actual Firefox routing, public HTTPS captures, separate protocol/site-inference
+pilots and retained failures. Direct TLS ClientHello captures expose the
+`anonguard/6` ALPN marker; padding alone does not conceal protocol identity.
+The small measured pilots do not establish AI indistinguishability.
+
 The current [v6 protocol specification](PROTOCOL_V3.md) describes the mandatory
 network path. Its historical filename is retained; it supersedes v3/v5 details.
 
