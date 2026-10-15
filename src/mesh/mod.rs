@@ -1,5 +1,6 @@
 //! Dynamic proxy routing mesh and node abstraction.
 
+mod admission;
 pub mod authority;
 pub mod consensus;
 pub mod directory_client;

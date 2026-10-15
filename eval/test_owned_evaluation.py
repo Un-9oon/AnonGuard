@@ -1,10 +1,13 @@
 """Evidence integrity regression tests; synthetic inputs are not security results."""
 import tempfile
 import unittest
+import hashlib
+import socket
+import struct
 from pathlib import Path
 import numpy as np
 from capture_owned_testnet import parse_pcap, capture_window
-from evaluate_link_correlation import exit_events, bins
+from evaluate_link_correlation import exit_events, bins, similarity
 from evaluate_owned_capture import label_control, validate_split
 
 
@@ -40,8 +43,31 @@ class OwnedEvaluationTests(unittest.TestCase):
         validate_split([{'label':'a'}],[{'label':'a'}])
 
     def test_negative_and_long_events_do_not_wrap_bins(self):
-        actual = bins([[-1,1,100],[20,1,100],[0,-1,50]])
+        actual = bins([[-1,1,100],[-.001,1,100],[20,1,100],[0,-1,50]])
         self.assertEqual(float(actual.sum()),50)
         self.assertEqual(actual[1,0],50)
+
+    def test_short_capture_windows_are_not_extended_with_zero_tail(self):
+        short=bins([[0,1,100],[4.9,-1,50],[5,1,999]],5)
+        self.assertEqual(short.shape,(2,100))
+        self.assertEqual(float(short.sum()),150)
+        self.assertTrue(np.isfinite(similarity(short,short)))
+        with self.assertRaises(ValueError):similarity(short,bins([],20))
+        for window in (float('nan'),float('inf'),0,121):
+            with self.assertRaises(ValueError):bins([],window)
+
+    def test_link_capture_digest_is_verified_before_using_events(self):
+        ethernet=bytes(12)+b'\x08\x00'
+        ip=bytearray(20);ip[0]=0x45;ip[2:4]=struct.pack('!H',41);ip[9]=6
+        ip[12:16]=socket.inet_aton('127.0.0.1');ip[16:20]=socket.inet_aton('127.3.0.1')
+        tcp=bytearray(20);tcp[12]=0x50
+        packet=ethernet+ip+tcp+b'x'
+        header=b'\xd4\xc3\xb2\xa1'+struct.pack('<HHIIII',2,4,0,0,65535,1)
+        raw=header+struct.pack('<IIII',1,0,len(packet),len(packet))+packet
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'owned.pcap';path.write_bytes(raw)
+            self.assertEqual(exit_events(path,hashlib.sha256(raw).hexdigest()),[[0.0,1,len(packet)]])
+            with self.assertRaisesRegex(ValueError,'digest'):
+                exit_events(path,'0'*64)
 
 if __name__=='__main__':unittest.main()

@@ -33,7 +33,7 @@ jobs:
 
       - name: Verify offline two-VM deployment contracts and systemd units
         run: |
-          sudo apt-get update && sudo apt-get install -y nftables
+          sudo apt-get update && sudo apt-get install -y nftables python3-numpy
           python3 scripts/test_vm_profile.py
 
       - name: Verify disposable browser policy and session contracts
@@ -46,6 +46,11 @@ jobs:
         run: |
           python3 scripts/test_native_device.py
           python3 eval/test_evaluate_traces.py
+          python3 eval/test_open_world.py
+          python3 eval/test_protocol_detection.py
+          python3 eval/test_event_order.py
+          /usr/bin/python3 -c 'import numpy; print("NumPy", numpy.__version__)'
+          /usr/bin/python3 eval/test_owned_evaluation.py
 
       - name: Check Cargo.lock reproducibility
         run: cargo check --locked --all-targets

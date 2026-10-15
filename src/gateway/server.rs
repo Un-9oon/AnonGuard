@@ -815,6 +815,9 @@ impl GatewayServer {
         tracker_url: &str,
         node_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if node_id != hex::encode(self.relay_identity_key.verifying_key().to_bytes()) {
+            return Err("Reverse node ID must match the persisted composite identity".into());
+        }
         let mut tasks = tokio::task::JoinSet::new();
         let host_port = tracker_url.trim_start_matches("http://");
         let tracker_pin = self
@@ -866,10 +869,8 @@ impl GatewayServer {
                                     continue;
                                 }
                             };
-                            let payload = format!("REGISTER_REVERSE {} {} {} {}", nid, token, now, nonce);
                             let registration = async {
-                                crate::mesh::tracker::write_control(&mut stream, &payload).await?;
-                                if crate::mesh::tracker::read_control(&mut stream).await? != "REGISTERED" {
+                                if crate::mesh::tracker::register_reverse(&mut stream, &identity_key, &token, now, nonce).await? != "REGISTERED" {
                                     return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Reverse registration refused"));
                                 }
                                 if crate::mesh::tracker::read_control_wait(&mut stream).await? != "READY" {

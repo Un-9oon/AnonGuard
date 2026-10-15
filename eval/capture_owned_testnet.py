@@ -2,8 +2,10 @@
 """Capture actual client-to-guard packets for owned lab workloads only.
 Requires the opt-in Rust CLI testnet fixture and sudo -n tcpdump. Not a WF proof.
 """
-import json, math, os, random, signal, socket, struct, subprocess, threading, time
+import hashlib, json, math, os, random, signal, socket, struct, subprocess, threading, time
 from pathlib import Path
+from event_order import chronological_events
+from evaluate_traces import validate_document
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SIZES = [8192, 32768, 65536]
@@ -79,7 +81,7 @@ def parse_pcap(path,flows,origin=None):
         else:continue
         result.append([sec+frac/scale,direction,size])
     assert result,'No client-to-guard payload captured'
-    start=result[0][0] if origin is None else origin;return [[round(t-start,6),d,n] for t,d,n in result]
+    start=min(e[0] for e in result) if origin is None else origin;return [[round(t-start,6),d,n] for t,d,n in result]
 
 def main():
     gateway=int(os.environ['ANONGUARD_TESTNET_GATEWAY_PORT']);pid=int(os.environ['ANONGUARD_TESTNET_GATEWAY_PID'])
@@ -133,7 +135,7 @@ def main():
                 subprocess.run(['sudo','-n','rm','--',str(pcap)],check=True)
                 capture_log=log.read_text()
                 assert '0 packets dropped by kernel' in capture_log,'Capture loss invalidates this sample'
-                events=parse_pcap(readable,flows)
+                events,event_ordering=chronological_events(parse_pcap(readable,flows))
                 absolute_events=parse_pcap(readable,flows,request_wall)
                 latency_seconds=latency/1000
                 accounting={
@@ -144,12 +146,14 @@ def main():
                     'post_request_wait_seconds':1 if window is None else max(0,window-latency_seconds),
                     'fixed_observation_seconds':window}
                 traces.append({'id':trace_id,'label':f'owned-size-{label}','group':f'block-{group}','defense':profile,
-                    'events':events,'application_bytes':SIZES[label],'latency_ms':latency,'capture_accounting':accounting})
+                    'events':events,'application_bytes':SIZES[label],'latency_ms':latency,'capture_accounting':accounting,
+                    'capture_sha256':hashlib.sha256(raw).hexdigest(),'event_ordering':event_ordering})
                 (output/(profile+'.partial.json')).write_text(json.dumps({'version':1,'observation':'packet','complete':False,'traces':traces}))
                 print(json.dumps({'trace':trace_id,'events':len(events),'latency_ms':round(latency,2)}),flush=True)
         document={'version':1,'observation':'packet','complete':True,'traces':traces,
             'fixed_observation_seconds':window,
             'scope':'owned loopback CLI testnet; '+('application lifetime plus 1s' if window is None else str(window)+'s fixed request-independent observation')+'; same VM; TCP payload frames include retransmissions and headers'}
+        validate_document(document)
         (output/(profile+'.json')).write_text(json.dumps(document))
     except BaseException as error:
         partial.write_text(json.dumps({'version':1,'observation':'packet','complete':False,

@@ -1,6 +1,7 @@
 //! Pinned hybrid TLS rendezvous. Waiting registrations own their sockets and
 //! admission permits until handoff, EOF or a bounded lifetime.
-use crate::crypto::identity::SigningKey;
+use super::admission::{SourceAdmission, TokenBucket};
+use crate::crypto::identity::{Signature, SigningKey, VerifyingKey, PROOF_SIZE};
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -20,11 +21,17 @@ struct Entry {
 }
 type Directory = Arc<Mutex<HashMap<String, Entry>>>;
 pub const DEFAULT_MAX_TRACKER_CONNECTIONS: usize = 512;
+/// Separate from long-lived waiting/tunnel slots: unauthenticated peers must
+/// not occupy every connection with concurrent expensive hybrid handshakes.
+pub const DEFAULT_MAX_TRACKER_HANDSHAKES: usize = 16;
+pub const MAX_TRACKER_HANDSHAKES_PER_SOURCE: usize = super::admission::SOURCE_SLOTS;
+const HANDSHAKE_BURST: u32 = 32;
+const HANDSHAKE_REFILL: Duration = Duration::from_micros(62_500);
 const MAX_WAITING: usize = 128;
 const MAX_PER_NODE: usize = 3;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
-// Fits all 128 waiting node IDs (128 bytes each plus separators).
+// Fits all 128 canonical node IDs, composite registration proofs and separators.
 const MAX_CONTROL: usize = 32 * 1024;
 
 pub async fn read_control<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<String> {
@@ -70,11 +77,7 @@ pub async fn write_control<S: AsyncWrite + Unpin>(stream: &mut S, value: &str) -
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Tracker write timed out"))?
 }
 fn valid_node(node: &str) -> bool {
-    !node.is_empty()
-        && node.len() <= 128
-        && node
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    valid_token(node)
 }
 fn valid_token(token: &str) -> bool {
     token.len() == 64
@@ -85,11 +88,65 @@ fn valid_token(token: &str) -> bool {
 fn tokens_match(a: &str, b: &str) -> bool {
     subtle::ConstantTimeEq::ct_eq(a.as_bytes(), b.as_bytes()).unwrap_u8() == 1
 }
+
+fn registration_message(command: &str, challenge: &[u8; 32], exporter: &[u8; 32]) -> Vec<u8> {
+    let mut message = b"AnonGuard-tracker-registration-v2\0".to_vec();
+    message.extend_from_slice(&(command.len() as u32).to_be_bytes());
+    message.extend_from_slice(command.as_bytes());
+    message.extend_from_slice(challenge);
+    message.extend_from_slice(exporter);
+    message
+}
+
+/// Prove ownership of the canonical composite node ID on this exact TLS channel.
+/// The returned control response may be an explicit refusal; never retries or
+/// reinterprets an older registration protocol.
+pub async fn register_reverse<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut tokio_rustls::client::TlsStream<S>,
+    identity: &SigningKey,
+    token: &str,
+    timestamp: u64,
+    nonce: u64,
+) -> io::Result<String> {
+    if !valid_token(token) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid capability",
+        ));
+    }
+    let node = hex::encode(identity.verifying_key().to_bytes());
+    let command = format!("REGISTER_REVERSE {node} {token} {timestamp} {nonce}");
+    write_control(stream, &command).await?;
+    let response = read_control(stream).await?;
+    let Some(encoded) = response.strip_prefix("AUTH_CHALLENGE ") else {
+        return Ok(response);
+    };
+    let challenge: [u8; 32] = hex::decode(encoded)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "Invalid registration challenge")
+        })?;
+    let mut exporter = [0; 32];
+    stream
+        .get_ref()
+        .1
+        .export_keying_material(
+            &mut exporter,
+            b"AnonGuard-tracker-registration-v2",
+            Some(&challenge),
+        )
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let proof = identity.sign(&registration_message(&command, &challenge, &exporter));
+    write_control(stream, &hex::encode(proof.to_bytes())).await?;
+    read_control(stream).await
+}
 pub struct TrackerServer {
     listen_addr: String,
     pub pow_difficulty: u32,
     identity: SigningKey,
     connection_semaphore: Arc<Semaphore>,
+    handshake_semaphore: Arc<Semaphore>,
     nonce_registry: Arc<crate::mesh::sybil::NonceRegistry>,
 }
 impl TrackerServer {
@@ -102,6 +159,7 @@ impl TrackerServer {
             pow_difficulty,
             identity: SigningKey::generate(&mut rand::rngs::OsRng),
             connection_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_TRACKER_CONNECTIONS)),
+            handshake_semaphore: Arc::new(Semaphore::new(DEFAULT_MAX_TRACKER_HANDSHAKES)),
             nonce_registry: Arc::new(crate::mesh::sybil::NonceRegistry::new()),
         }
     }
@@ -122,14 +180,45 @@ impl TrackerServer {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let directory: Directory = Arc::new(Mutex::new(HashMap::new()));
         let waiting = Arc::new(Semaphore::new(MAX_WAITING));
+        let registration_budget = Arc::new(Semaphore::new(DEFAULT_MAX_TRACKER_HANDSHAKES));
         let acceptor = Arc::new(crate::onion::link::tracker_acceptor(&self.identity)?);
         let mut tasks = tokio::task::JoinSet::new();
+        let mut handshake_rate = TokenBucket::new(
+            HANDSHAKE_BURST,
+            HANDSHAKE_REFILL,
+            tokio::time::Instant::now(),
+        );
+        let mut sources = SourceAdmission::new();
+        let mut source_sweep = tokio::time::interval(Duration::from_secs(30));
+        source_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             while tasks.try_join_next().is_some() {}
-            let (stream, _) = listener.accept().await?;
+            let (stream, peer) = tokio::select! {
+                accepted = listener.accept() => accepted?,
+                _ = source_sweep.tick() => {
+                    sources.sweep(tokio::time::Instant::now());
+                    continue;
+                }
+            };
             let Ok(permit) = self.connection_semaphore.clone().try_acquire_owned() else {
                 continue;
             };
+            // Never enqueue accepted unauthenticated sockets behind a permit.
+            let Ok(handshake_permit) = self.handshake_semaphore.clone().try_acquire_owned() else {
+                continue;
+            };
+            let now = tokio::time::Instant::now();
+            // Reject exhausted global budget before allocating source accounting.
+            // Source refusal must not spend global rate credit.
+            if !handshake_rate.available(now) {
+                continue;
+            }
+            let Some(source_permit) = sources.try_admit(peer.ip(), now) else {
+                continue;
+            };
+            if !handshake_rate.take(now) {
+                continue;
+            }
             let (directory, waiting, acceptor, registry) = (
                 directory.clone(),
                 waiting.clone(),
@@ -137,9 +226,22 @@ impl TrackerServer {
                 self.nonce_registry.clone(),
             );
             let difficulty = self.pow_difficulty;
+            let registration_budget = registration_budget.clone();
             tasks.spawn(async move {
-                if let Ok(stream) = crate::onion::link::accept_tracker(&acceptor, stream).await {
-                    let _ = handle(stream, directory, waiting, registry, difficulty, permit).await;
+                let authenticated = crate::onion::link::accept_tracker(&acceptor, stream).await;
+                // Waiting registrations and active tunnels have their own bounds.
+                drop((handshake_permit, source_permit));
+                if let Ok(stream) = authenticated {
+                    let _ = handle(
+                        stream,
+                        directory,
+                        waiting,
+                        registry,
+                        difficulty,
+                        permit,
+                        registration_budget,
+                    )
+                    .await;
                 }
             });
         }
@@ -152,6 +254,7 @@ async fn handle(
     registry: Arc<crate::mesh::sybil::NonceRegistry>,
     difficulty: u32,
     permit: OwnedSemaphorePermit,
+    registration_budget: Arc<Semaphore>,
 ) -> io::Result<()> {
     let command = read_control(&mut stream).await?;
     let parts: Vec<_> = command.split_whitespace().collect();
@@ -166,11 +269,54 @@ async fn handle(
                 .zip(nonce.parse::<u64>().ok())
                 .is_some_and(|(ts, n)| {
                     crate::mesh::sybil::verify_pow(node, ts, n, difficulty, now)
-                        && !registry.check_and_record(node, n, now)
                 });
             if !valid {
                 return write_control(&mut stream, "ERROR_INVALID_POW").await;
             }
+            let Ok(proof_permit) = registration_budget.try_acquire_owned() else {
+                return write_control(&mut stream, "ERROR_BUSY").await;
+            };
+            let challenge = rand::random::<[u8; 32]>();
+            write_control(
+                &mut stream,
+                &format!("AUTH_CHALLENGE {}", hex::encode(challenge)),
+            )
+            .await?;
+            let encoded = read_control(&mut stream).await?;
+            // Bound before allocating or decoding a proof; verify the composite
+            // pin before allowing either directory ownership or nonce mutation.
+            if encoded.len() != PROOF_SIZE * 2 {
+                return write_control(&mut stream, "ERROR_UNAUTHORIZED").await;
+            }
+            let mut exporter = [0; 32];
+            stream
+                .get_ref()
+                .1
+                .export_keying_material(
+                    &mut exporter,
+                    b"AnonGuard-tracker-registration-v2",
+                    Some(&challenge),
+                )
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let authenticated = (|| -> io::Result<()> {
+                let bytes = hex::decode(encoded).map_err(io::Error::other)?;
+                let pin: [u8; 32] = hex::decode(node)
+                    .map_err(io::Error::other)?
+                    .try_into()
+                    .map_err(|_| io::Error::other("Invalid node pin"))?;
+                VerifyingKey::from_bytes(&pin)?.verify_strict(
+                    &registration_message(&command, &challenge, &exporter),
+                    &Signature::from_slice(&bytes)?,
+                )
+            })();
+            if authenticated.is_err() {
+                return write_control(&mut stream, "ERROR_UNAUTHORIZED").await;
+            }
+            let nonce = nonce.parse::<u64>().map_err(io::Error::other)?;
+            if registry.check_and_record(node, nonce, now) {
+                return write_control(&mut stream, "ERROR_INVALID_POW").await;
+            }
+            drop(proof_permit);
             let Ok(wait_permit) = waiting.try_acquire_owned() else {
                 return write_control(&mut stream, "ERROR_BUSY").await;
             };
@@ -266,5 +412,31 @@ async fn handle(
             .await
         }
         _ => write_control(&mut stream, "ERROR_INVALID_COMMAND").await,
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn completed_or_failed_handshake_churn_cannot_reset_rate_budget() {
+        let start = tokio::time::Instant::now();
+        let mut rate = TokenBucket::new(HANDSHAKE_BURST, HANDSHAKE_REFILL, start);
+        for _ in 0..HANDSHAKE_BURST {
+            assert!(rate.take(start));
+        }
+        for _ in 0..1000 {
+            assert!(!rate.take(start));
+        }
+        assert!(!rate.take(start + HANDSHAKE_REFILL - Duration::from_nanos(1)));
+        assert!(rate.take(start + HANDSHAKE_REFILL));
+        assert!(!rate.take(start + HANDSHAKE_REFILL));
+        // A long idle period restores a bounded burst, never an unbounded credit.
+        let later = start + Duration::from_secs(3600);
+        for _ in 0..HANDSHAKE_BURST {
+            assert!(rate.take(later));
+        }
+        assert!(!rate.take(later));
     }
 }

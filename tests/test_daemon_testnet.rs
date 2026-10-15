@@ -21,6 +21,12 @@ struct Testnet {
     directory: PathBuf,
     daemons: Vec<Child>,
 }
+fn fixture_source(relative: &str) -> PathBuf {
+    std::env::var_os("ANONGUARD_TEST_SOURCE_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+        .join(relative)
+}
 impl Testnet {
     fn new() -> Self {
         let directory =
@@ -434,10 +440,7 @@ async fn exercise(padded: bool) {
         let gateway_pid = testnet.daemons.last().unwrap().id();
         let output = tokio::task::spawn_blocking(move || {
             Command::new("python3")
-                .arg(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/eval/capture_owned_testnet.py"
-                ))
+                .arg(fixture_source("eval/capture_owned_testnet.py"))
                 .env("ANONGUARD_TESTNET_GATEWAY_PORT", gateway.port().to_string())
                 .env("ANONGUARD_TESTNET_GATEWAY_PID", gateway_pid.to_string())
                 .env("ANONGUARD_TESTNET_RELAYS", relays)
@@ -464,10 +467,7 @@ async fn exercise(padded: bool) {
         let gateway = addresses[7];
         let output = tokio::task::spawn_blocking(move || {
             Command::new("python3")
-                .arg(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/scripts/test_browser_testnet.py"
-                ))
+                .arg(fixture_source("scripts/test_browser_testnet.py"))
                 .env("ANONGUARD_TESTNET_GATEWAY_PORT", gateway.port().to_string())
                 .output()
                 .expect("Could not start Firefox testnet fixture")

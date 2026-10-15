@@ -15,11 +15,7 @@ MAX_TRACES = 10000
 MAX_EVENTS = 20000
 
 
-def load(path):
-    data = Path(path).read_bytes()
-    if len(data) > 64 * 1024 * 1024:
-        raise ValueError('Dataset exceeds 64 MiB')
-    doc = json.loads(data)
+def validate_document(doc):
     if (not isinstance(doc, dict) or doc.get('version') != 1
             or doc.get('observation') not in ('packet', 'onion-cell', 'synthetic')
             or not isinstance(doc.get('traces'), list)
@@ -49,6 +45,15 @@ def load(path):
             value = trace.get(name)
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
                 raise ValueError('Invalid optional measurement')
+    return doc
+
+
+def load(path):
+    with Path(path).open('rb') as stream:
+        data = stream.read(64 * 1024 * 1024 + 1)
+    if len(data) > 64 * 1024 * 1024:
+        raise ValueError('Dataset exceeds 64 MiB')
+    doc = validate_document(json.loads(data))
     return doc, hashlib.sha256(data).hexdigest()
 
 

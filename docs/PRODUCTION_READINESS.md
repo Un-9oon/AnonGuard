@@ -180,7 +180,7 @@ commands are refused. Waiting sockets are monitored for closure/early data,
 expire after 60 seconds, and are limited to three per node and 128 globally
 within a 512-connection budget. Client and volunteer callers use protected
 framed controls; private capabilities are provisioned out of band. Real local
-reverse transfer and refill tests accompany the change. Public node-ownership
+reverse transfer and refill tests accompany the change. Operator-independence
 certification and reverse onion circuit transport are not implemented; see
 [the private rendezvous contract](REVERSE_TRACKER.md).
 
@@ -191,3 +191,52 @@ All 13 fuzz harnesses compile against the v6 APIs and are included in CI.
 These changes improve specific engineering gates; they do not close the
 independent review, installed signed-browser, privileged v6 acceptance,
 sustained fuzzing or multi-network anonymity measurement requirements.
+
+### Node ownership and Ubuntu VM follow-up (2026-10-15)
+
+Tracker v2 (`anonguard-tracker/2`) now requires the registering relay to prove
+ownership of its canonical composite node pin with both Ed25519 and ML-DSA-65.
+The proof binds the exact registration command, fresh tracker challenge and TLS
+exporter. Unverified attempts cannot create directory entries or burn a victim's
+PoW nonce. Consumer capabilities remain mandatory. Separate 16-slot handshake
+and proof-exchange budgets plus a handshake-start bucket (burst 32, refill 16/s)
+bound concurrent work and rapid churn. Global bounds do not establish per-source
+fairness, independent operators or resistance to distributed bandwidth attacks.
+
+The ownership/concurrency candidate passed 273 full-suite tests (zero failed,
+two explicitly ignored privileged/transport tests) and all-target benchmark smoke
+checks locally. The later rate-budget addition has a separate boundary test and
+focused tracker regression checks; exact final-commit CI remains required.
+Optimized transfer, padded relay-loss refusal and the new tracker ownership path
+passed 12 tests on the user-provided Ubuntu 24.04 VM before that final rate-budget
+addition. Do not relabel earlier VM binaries as a later candidate.
+
+Fresh privileged VM namespace checks passed generated firewall/transparent TCP,
+DNS failure refusal, UDP/IPv6 blocking and backend-death closure with a controlled
+SOCKS backend. The headless private-rootfs/descriptor/UID/syscall/proxy-death probe
+initially hit Ubuntu's AppArmor user-namespace denial. After verifying no vendor
+Bubblewrap attachment, loading the documented executable-specific policy allowed
+the probe to pass with the global restriction enabled. These are isolated
+fixtures, not composed installed-device real-relay or public anonymity approval.
+
+The [Linux release ledger](LINUX_RELEASE_GATES.md) tracks the remaining engineering
+and external acceptance work. Independent audit, adaptive traffic-analysis,
+installed signed-browser delivery and multi-network operation remain open.
+
+### Source-group admission and separate protocol-detection evaluation
+
+The optional tracker now adds four concurrent handshakes per source group,
+bounded source start rates and capped/expiring in-memory accounting. IPv4-mapped
+addresses and IPv6 /64 rotation share their intended budgets. Shared NAT/forwarder
+users also share these limits; they are not an operator-identity or distributed
+DoS solution. Existing global admission and mandatory ownership/capability proofs
+remain intact. See [the rendezvous contract](REVERSE_TRACKER.md).
+
+A separate binary protocol-detection baseline now complements the website
+fingerprinting evaluator. It requires an explicit reference population and uses
+training-only scaling, validation-only thresholds and held-out reporting. Shape
+classification does not evaluate public relay addresses, visible ALPN, active
+probing or established deep models. Updated correlation analysis honors declared
+fixed observation durations and verifies supplied source-PCAP hashes. These are
+measurement/integrity improvements, not a demonstrated stealth property. See
+[the evaluation contract](../eval/TRACE_EVALUATION.md).

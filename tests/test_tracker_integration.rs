@@ -59,16 +59,19 @@ async fn reverse_gateway_transfers_and_refills_with_private_capability() {
         allow_private_exit: true,
         ..Default::default()
     };
+    let identity = Arc::new(SigningKey::generate(&mut rand::rngs::OsRng));
+    let node = hex::encode(identity.verifying_key().to_bytes());
+    let relay_node = node.clone();
     let gateway = GatewayServer::new(
         config,
         ProxyPool::new(),
         KillSwitchController::new(),
-        Arc::new(SigningKey::generate(&mut rand::rngs::OsRng)),
+        identity,
     );
     let endpoint = address.to_string();
     let relay_task = tokio::spawn(async move {
         gateway
-            .run_reverse_relay(&endpoint, "ownednode")
+            .run_reverse_relay(&endpoint, &relay_node)
             .await
             .unwrap()
     });
@@ -84,7 +87,7 @@ async fn reverse_gateway_transfers_and_refills_with_private_capability() {
             if anonguard::mesh::tracker::read_control(&mut query)
                 .await
                 .unwrap()
-                == "ownednode"
+                == node
             {
                 break;
             }
@@ -113,7 +116,7 @@ async fn reverse_gateway_transfers_and_refills_with_private_capability() {
                 .unwrap();
             anonguard::mesh::tracker::write_control(
                 &mut stream,
-                &format!("CONNECT_REVERSE ownednode {token}"),
+                &format!("CONNECT_REVERSE {node} {token}"),
             )
             .await
             .unwrap();

@@ -80,3 +80,129 @@ The exploratory link matcher reports tied maxima and events omitted by the fixed
 absolute timing lag. Repeated sessions and workloads invalidate interpreting its
 same-VM top-1 rate as global-adversary resistance. Destination-side, multi-network,
 open-world and established defense-aware attacks remain unevaluated.
+
+## Open-world baseline with a separate validation partition
+
+`evaluate_open_world.py` adds an explicit monitored-site/background experiment.
+It uses the same observed-trace schema, plus `complete: true`. Packet traces must
+include `capture_sha256`, the lowercase SHA-256 of their source PCAP. The owned
+collector now records this digest; older captures must have it derived from the
+preserved original PCAP, never invented from an ID. Cross-partition PCAP reuse
+refuses evaluation; duplicate source PCAPs within a profile also refuse rather
+than inflating the number of supposedly independent visits. Event-identical shapes are disclosed separately: fixed-size
+padding can legitimately make shapes identical, so matching shapes alone do not
+prove that a capture was copied. Digests identify files, not honest collection.
+
+```sh
+python3 eval/evaluate_open_world.py traces.json \
+  --monitored-label owned-site-a --monitored-label owned-site-b \
+  --train-group collection-day1 \
+  --validation-group collection-day2 \
+  --test-group collection-day3 \
+  --validation-max-fpr 0.01 --output open-world-result.json
+```
+
+All groups must be explicitly assigned exactly once to disjoint train, validation
+and test partitions. Each profile's training labels must equal the monitored set.
+Both later partitions need every monitored label and background visits; background
+site labels must differ between validation and test. Defense-aware feature scaling
+is fitted on training only. The squared-distance rejection threshold maximizes
+correct monitored identification subject to the empirical validation FPR limit.
+Held-out data cannot influence scaling or this threshold. Equidistant different
+monitored labels cause abstention. A reject-all operating point is labelled, not
+reported as proof of a successful defense. The baseline refuses more than one
+million pairwise distances per profile; use a separately validated scalable attack
+for larger experiments rather than silently subsampling observations.
+
+Outputs distinguish correct monitored identification, wrong monitored labels and
+background false alarms. They include Wilson intervals and precision projections
+at explicitly assumed monitored-visit priors (50%, 1%, 0.1%). Zero false alarms in
+a small background sample still has a nonzero uncertainty bound. Projected precision
+uses point estimates, not a guarantee about deployment prevalence. Output creation
+is exclusive and mode 0600. Incomplete captures refuse; synthetic data requires an
+explicit test-only opt-in. No measured attack result is supplied with unit tests.
+
+This implements one open-world baseline, not Deep Fingerprinting, Robust
+Fingerprinting, a global-observer evaluation, statistically independent collection,
+or resistance to adaptive attackers. Group names do not establish independence.
+Use separately collected devices/networks/days, larger background populations,
+failed-visit accounting and a frozen confirmation dataset. Published research
+motivates realistic open-world evaluation: [Cherubin et al., USENIX Security 2022](https://www.usenix.org/conference/usenixsecurity22/presentation/cherubin).
+
+## Separate protocol-detection baseline
+
+`evaluate_protocol_detection.py` evaluates AnonGuard-versus-reference packet-shape
+classification, not visited-site inference. It uses the same trace schema with
+`complete: true`, explicit `reference_population` and a per-trace `protocol_label`
+of `anonguard` or `reference`. `label` remains the opaque workload label; class
+names must not replace independent collection grouping. Every compared defense
+needs both protocol classes in all three group partitions. Record what the normal
+reference actually represents: browser/application mix, device/network, collection
+period and observation window. The tool cannot establish that it represents the
+Internet generally.
+
+```sh
+python3 eval/evaluate_protocol_detection.py protocol-traces.json \
+  --train-group collection-day1 --validation-group collection-day2 \
+  --test-group collection-day3 --validation-max-fpr 0.01 \
+  --output protocol-result.json
+```
+
+Feature scaling uses training data only. The nearest-class distance-ratio score
+is not a calibrated probability. Validation selects the threshold maximizing
+sensitivity under the requested empirical reference FPR constraint, moving tied
+scores together. An explicit reject-all point remains labelled. The held-out
+report includes sensitivity/FPR/precision, balanced accuracy, Wilson intervals,
+tie-aware AUROC, assumed-prevalence precision and workload overlap. Held-out AUROC
+is reporting only, never a threshold-selection input. The same one-million
+pairwise-distance ceiling, source-PCAP hashes, duplicate/split integrity checks,
+exclusive private output and explicit synthetic opt-in apply.
+
+This is a simple **shape-only** baseline. It does not inspect IP reputation,
+TLS/ALPN/certificate metadata or active probing, and is not an established deep
+protocol detector. A low shape score does not hide a public relay address or a
+visible custom ALPN. No real AnonGuard detection result is supplied by synthetic
+regression tests. The three-workload owned collector still needs a separately
+collected, honestly labelled reference population before this experiment exists.
+
+For paired link-window matching, the evaluator now uses a declared fixed capture
+window instead of extending a shorter observation to 20 seconds of artificial zeros.
+Legacy variable-duration input retains a disclosed 20-second cap. Supplied source
+PCAP hashes are checked before extracting exit-link events, and omitted events are
+counted for both sides. Each side is still independently aligned to its first
+payload: clock lag is discarded and this remains an exploratory same-VM baseline,
+not a destination-side/global-observer experiment. Choose the observation contract
+before confirmation collection; this integrity correction does not establish
+traffic-analysis resistance.
+
+The opt-in Rust testnet fixture accepts `ANONGUARD_TEST_SOURCE_ROOT` for locating
+the exact collector/browser fixture sources when running prebuilt test executables
+on a separate test VM. Omit it to retain the compile-time repository root. Record
+the executed source/binary hashes; this variable is for trusted lab fixtures, not
+a production service configuration or authority bootstrap mechanism.
+
+## Bounded timestamp ordering and preserved raw evidence
+
+Kernel/capture timestamp order can differ from packet-file order by a small
+amount. The owned collector now applies a documented stable chronological order
+only when backward displacement from the running maximum is at most 2 microseconds.
+It records count/largest backstep; larger jumps, cumulative drift beyond the bound
+and nonfinite timestamps refuse. Packet-file order and original PCAP bytes remain
+unchanged. Timestamp ordering is not clock synchronization or TCP reassembly.
+The collector validates the final dataset against the shared schema before marking
+its complete output ready for evaluation.
+
+For an already retained raw dataset, use an explicit derivative instead of editing
+it or weakening the schema validator:
+
+```sh
+python3 eval/event_order.py raw-traces.json --output timestamp-ordered.json
+```
+
+The tool records the raw dataset SHA256, changed traces, tolerance and policy;
+validates the entire derived schema before publishing; and creates exclusive 0600
+output. Source-PCAP hashes remain attached but this timestamp-only tool does not
+independently verify the files. Link analysis verifies provided source-PCAP hashes
+and includes exit timestamp-order metadata. Preserve the original failed analysis
+and raw dataset as part of the evidence trail. This bounded mechanical repair
+must not be represented as an anonymity improvement or used to hide clock jumps.

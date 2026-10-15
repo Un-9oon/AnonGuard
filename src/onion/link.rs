@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const ALPN: &[u8] = b"anonguard/6";
-pub const TRACKER_ALPN: &[u8] = b"anonguard-tracker/1";
+pub const TRACKER_ALPN: &[u8] = b"anonguard-tracker/2";
 const IDENTITY_OID: &str = "2.25.2676937280591097606";
 const IDENTITY_OID_ARCS: &[u64] = &[2, 25, 2676937280591097606];
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
