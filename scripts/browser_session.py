@@ -268,10 +268,13 @@ def validate_vm(document, host, port, addresses, routes):
 
 def validate_native(document):
     if (not isinstance(document, dict) or document.get('version') != 1
-            or document.get('role') != 'client' or document.get('socks') != '127.0.0.1:9050'):
+            or document.get('role') != 'client' or document.get('socks') != '127.0.0.1:9050'
+            or document.get('entry_policy') != 'protected-obfs4'
+            or not isinstance(document.get('transport_sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', document['transport_sha256'])):
         raise ValueError('Native device profile is not a supported client')
     for unit in ('anonguard-native-firewall.service', 'anonguard-client.service',
-                 'anonguard-native-adapter.service'):
+                 'anonguard-native-adapter.service', 'anonguard-native-pt.service'):
         subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet', unit],
                        check=True, timeout=5)
 

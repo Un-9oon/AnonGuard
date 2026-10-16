@@ -10,6 +10,49 @@ target. macOS/Windows whole-device isolation is not implemented. The native
 firewall has not been activated or leak-tested on the user's device in this
 change; local helper tests do not certify a host's effective firewall.
 
+## Protected entry is the native client default
+
+Client setup now refuses a missing entry policy. Supply `--transport-config`
+and its independently authenticated `--transport-config-sha256`. The private
+JSON follows the client configuration in
+[the transport guide](design/PLUGGABLE_TRANSPORT.md): exact fields `mode`,
+`binary`, `bridges`, `authorities`; mode `client`; packaged binary
+`/usr/bin/obfs4proxy`; 1..3 bridge and 1..16 authority bindings without `proxy`.
+Authority binding pins must exactly cover the trusted bootstrap authority set.
+Bridge pins/certificates and authority transport certificates must be supplied
+by the operators over an authenticated channel. A digest from the same untrusted
+download does not establish authenticity. Setup does not create a public network.
+
+Store input config mode 0600, owned by the invoking account or root. Symlinks,
+oversized files, unknown fields, duplicate binding identities/endpoints, local
+or nonnumeric endpoints, missing authority coverage and oversized/control-character
+PT arguments are refused before host changes. Native transport endpoints must
+be canonical unicast IPv4 addresses; ports 1..65535 include 443. Private routed
+IPv4 endpoints are permitted for owned networks. IPv6 transport provisioning is
+outside this native profile.
+
+The protected client enables `--protected-entry --private-bridges`, supervises
+obfs4 under the dedicated `anonguard-pt-native` account and loads negotiated
+bindings through systemd credentials after READY notification. The daemon can
+initiate only loopback TCP; the PT account can initiate external TCP only to
+provisioned address/port pairs. PT traffic bypasses transparent redirection to
+avoid a routing loop. Ordinary applications do not gain PT-port egress permission.
+Local input permits the negotiated unprivileged SOCKS port; the output policy
+remains the boundary denying ordinary users that port. These account privileges
+assume an uncompromised administrator and kernel.
+
+PT failure stops the bound gateway; explicit PT restart propagates to the gateway
+with freshly loaded credentials. Existing application streams close; there is
+no replay or direct fallback. If automatic recovery leaves a dependent unit
+inactive, restart `anonguard-native-pt.service` and then
+`anonguard-client.service` explicitly from the console, retaining the firewall.
+Actual installed lifecycle requires acceptance on the target systemd/kernel.
+
+Direct entry requires explicit `--direct-entry-lab`, is recorded as `direct-lab`,
+and is refused by the normal native browser launcher. It is not a transport
+concealment profile. Existing installations require reviewed migration; setup
+still refuses to overwrite configuration or security state.
+
 ## Provision a trusted network
 
 An independent operator must supply authority endpoints, composite identity pins and a
@@ -36,7 +79,9 @@ Render without changing the host first:
 
 ```sh
 anonguard-setup --role client --bootstrap network.json \
-  --bootstrap-sha256 TRUSTED_SHA256 --output native-client
+  --bootstrap-sha256 TRUSTED_SHA256 \
+  --transport-config pt-client.json --transport-config-sha256 TRUSTED_PT_SHA256 \
+  --output native-client
 anonguard-setup --role volunteer --bootstrap network.json \
   --bootstrap-sha256 TRUSTED_SHA256 --relay-advertise PUBLIC_IP:9443 \
   --output native-volunteer
@@ -53,7 +98,9 @@ is not established merely by `systemctl start`.
 ## Client behavior and limits
 
 The native client enables balanced padded sessions. A dedicated transport UID
-can establish backend TCP; an adapter UID can only contact loopback SOCKS and
+reaches only provisioned outer endpoint/port pairs in protected mode; the gateway
+UID reaches loopback PT TCP only. In the explicit direct laboratory mode the
+gateway retains its broader backend TCP permission. An adapter UID can only contact loopback SOCKS and
 reply to adapter clients. Ordinary IPv4 TCP is transparently redirected through
 SOCKS. DNS UDP/TCP port 53 is redirected to a local adapter which resolves through
 certificate-verified DNS-over-TLS at Cloudflare over the onion circuit; resolver
@@ -61,6 +108,13 @@ failure returns SERVFAIL. This is one explicit resolver dependency, not resolver
 anonymity or a distributed DNS design. Direct non-DNS UDP, QUIC and IPv6 are
 blocked. DNS-over-HTTPS from applications is ordinary proxied TCP. DHCP is a
 network-management exception and can reveal device/network information.
+
+`--link-cover-profile economy` is opt-in and must match every participating
+relay's link policy; mismatches refuse rather than downgrade. The default remains
+`strict` (20-ms links). `--privacy-profile balanced-longtail` is opt-in for the
+client's longer 60-second closure buckets and 20-second idle tail. Both selected
+profiles are recorded in `device.json`. Their source controls and small pilot
+results do not establish optimal defaults or total deployment bandwidth savings.
 
 The rules manage only `inet anonguard_native`, preserving other tables, which
 can still block legitimate traffic. There is no blanket established-output

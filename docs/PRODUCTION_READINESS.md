@@ -8,6 +8,12 @@ of superiority to Tor or complete quantum protection is supported.
 
 ## Current engineering checkpoint
 
+The [native protected-entry checkpoint](NATIVE_PROTECTED_ENTRY_CHECKPOINT.md)
+adds transport provisioning and supervision to native setup, removes implicit
+direct entry from client installation, and restricts the PT account to provisioned
+endpoints. The installed nftables/PT lifecycle and outer-transport anonymity
+measurements are not yet accepted; live testing is deferred for this checkpoint.
+
 The [cover-budget and traffic-evaluation checkpoint](COVER_BUDGET_AND_TRAFFIC_EVALUATION.md)
 records authenticated optional 40-ms links, longer session tails, same-stream
 packing and actual VM capture/browser results. These are scoped controls and

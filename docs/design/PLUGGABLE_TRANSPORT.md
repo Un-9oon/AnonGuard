@@ -6,13 +6,14 @@
 first-hop connection to traverse a provisioned local SOCKS5 pluggable transport.
 The adapter follows the PT v1 per-connection argument encoding. An independent
 obfs4proxy process transforms the wire traffic; AnonGuard still performs its own
-Ed25519-pinned TLS 1.3/ALPN authentication and hybrid onion handshake inside it.
+composite-identity-pinned TLS 1.3/ALPN authentication and hybrid onion handshake inside it.
 Neither the Tor daemon nor the public Tor network is required.
 
 For private entries, add `--private-bridges` and
 `--authority-transports /private/path/authorities.json`. The client then uses an
-independently provisioned entry absent from the public directory, followed by two
-current quorum-certified public hops. Every configured authority must have a
+independently provisioned entry absent from the public directory, followed by
+current quorum-certified middle relays and an exit within the configured 3..8-hop
+route bound. Every configured authority must have a
 transport binding to its exact pinned identity. There is no direct bootstrap
 fallback and no local authority hostname lookup in this mode. Quorum, expiry,
 rollback protection and authority handshake authentication are unchanged.
@@ -40,7 +41,7 @@ The JSON file is an array of one to three bindings:
 ```
 
 These are placeholders, not working credentials. Replace `identity` with the
-32 raw bytes of the independently verified entry relay Ed25519 pin, `proxy` with
+32 raw bytes of the independently verified v6 composite identity pin, `proxy` with
 the PT client's `CMETHOD obfs4 socks5` endpoint, and `bridge`/arguments with the
 server's `SMETHOD` endpoint and `ARGS`. Never substitute the obfs4 certificate for
 the AnonGuard identity pin: they authenticate different layers.
@@ -145,7 +146,7 @@ After=anonguard-pt@client.service
 LoadCredential=bridges.json:/run/anonguard-pt-client/bridges.json
 LoadCredential=authorities.json:/run/anonguard-pt-client/authorities.json
 ExecStart=
-ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --private-bridges --bridge-transports ${CREDENTIALS_DIRECTORY}/bridges.json --authority-transports ${CREDENTIALS_DIRECTORY}/authorities.json --identity-key-path /var/lib/anonguard/identity.key --guard-state-path /var/lib/anonguard/private-guards.json $ANONGUARD_ARGS
+ExecStart=/usr/bin/anonguard-daemon --listen 127.0.0.1:9050 --onion --padded-sessions --privacy-profile balanced --protected-entry --private-bridges --bridge-transports ${CREDENTIALS_DIRECTORY}/bridges.json --authority-transports ${CREDENTIALS_DIRECTORY}/authorities.json --identity-key-path /var/lib/anonguard/identity.key --guard-state-path /var/lib/anonguard/private-guards.json $ANONGUARD_ARGS
 ```
 
 Retain independently verified authority arguments in `runtime.env`; do not add
