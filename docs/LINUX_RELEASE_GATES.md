@@ -17,7 +17,7 @@ assigned: an open critical gate prevents public anonymity approval.
 | Headless app containment | Private rootfs, namespace, syscall/descriptor/UID restrictions | Privileged probe on the supported installed OS; no universal compromised-host protection |
 | Browser | Privacy policy, session attribution extension, packaging and integration tests | Real signed addon distribution/activation, vendor-update maintenance and fingerprint consistency |
 | Cryptographic protocol | Hybrid KEX, mandatory dual authentication, pinning, transcript binding and failure refusal | Independent protocol review, external vectors, key-compromise/migration exercises |
-| Distribution | Version agreement, release-manifest verification, explicit operator minimum-tag/exact-artifact/revocation admission, and package lifecycle gates | Authenticated signing identities, reproducibility, signed release publication and update/rollback ceremony |
+| Distribution | Version agreement, release-manifest verification, explicit operator minimum-tag/exact-artifact/revocation admission with a durable highest-admitted floor, and package lifecycle gates | Authenticated signing identities, reproducibility, signed release publication and update/rollback ceremony |
 
 Latest scoped VM results: [16 October 2026 validation](VM_VALIDATION_2026_10_16.md).
 Protected egress namespace, actual Firefox/onion testnet, and installed template

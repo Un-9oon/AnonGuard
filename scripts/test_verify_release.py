@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Release verifier boundary tests; the stub tests orchestration, not signatures."""
 import hashlib
+import fcntl
 import importlib.util
 import json
 import os
@@ -198,6 +199,90 @@ class ReleaseTests(unittest.TestCase):
         numeric = dict(base, minimum_tag='v0.9.0', approved_releases={'v0.10.0': {name: digest}})
         release.admit(numeric, 'v0.10.0', name, digest)
         with self.assertRaises(ValueError): release.admit(numeric, 'v0.8.0', name, digest)
+
+    def test_durable_floor_rejects_downgrade_and_same_version_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp) / 'admission'; name = 'anonguard-linux-amd64.tar.gz'
+            release.record_admission(state, 'v0.2.0', name, 'a'*64, initialize=True)
+            release.record_admission(state, 'v0.3.0', name, 'b'*64)
+            before = (state/'state.json').read_bytes()
+            for tag, digest in [('v0.2.0', 'a'*64), ('v0.3.0', 'c'*64)]:
+                with self.assertRaises(ValueError): release.record_admission(state, tag, name, digest)
+                self.assertEqual((state/'state.json').read_bytes(), before)
+            release.record_admission(state, 'v0.3.0', name, 'b'*64)
+            self.assertEqual((state/'state.json').read_bytes(), before)
+            self.assertEqual((state/'state.json').stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(FileExistsError):
+                release.record_admission(state, 'v0.4.0', name, 'd'*64, initialize=True)
+
+    def test_missing_corrupt_and_unsafe_state_never_reinitialize(self):
+        for kind in ('missing', 'corrupt', 'symlink', 'fifo', 'writable', 'directory', 'lock'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); state = root/'admission'; name = 'anonguard-linux-amd64.tar.gz'
+                release.record_admission(state, 'v0.2.0', name, 'a'*64, initialize=True)
+                path = state/'state.json'
+                if kind == 'missing': path.unlink()
+                elif kind == 'corrupt': path.write_text('{"version":1,"version":1}')
+                elif kind == 'symlink':
+                    other = root/'other'; other.write_text('sentinel'); path.unlink(); path.symlink_to(other)
+                elif kind == 'fifo': path.unlink(); os.mkfifo(path)
+                elif kind == 'writable': path.chmod(0o666)
+                elif kind == 'directory': state.chmod(0o755)
+                else: (state/'lock').chmod(0o666)
+                with self.assertRaises((OSError, ValueError)):
+                    release.record_admission(state, 'v0.3.0', name, 'b'*64)
+                if kind == 'symlink': self.assertEqual(other.read_text(), 'sentinel')
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)/'never-created'
+            with self.assertRaises(FileNotFoundError):
+                release.record_admission(state, 'v0.2.0', 'anonguard-linux-amd64.tar.gz', 'a'*64)
+            self.assertFalse(state.exists())
+
+    def test_journal_lock_refuses_overlapping_writer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)/'admission'; name = 'anonguard-linux-amd64.tar.gz'
+            release.record_admission(state, 'v0.2.0', name, 'a'*64, initialize=True)
+            # Separate open-file descriptions exercise the same kernel conflict
+            # as another process, without scheduler-dependent sleeps.
+            with (state/'lock').open('r+') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(BlockingIOError):
+                    release.record_admission(state, 'v0.3.0', name, 'b'*64)
+            release.record_admission(state, 'v0.3.0', name, 'b'*64)
+            self.assertEqual(json.loads((state/'state.json').read_text())['highest_tag'], 'v0.3.0')
+
+    def test_interrupted_publication_preserves_previous_journal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state = Path(temp)/'admission'; name = 'anonguard-linux-amd64.tar.gz'
+            release.record_admission(state, 'v0.2.0', name, 'a'*64, initialize=True)
+            before = (state/'state.json').read_bytes()
+            with patch.object(release.os, 'replace', side_effect=OSError('fixture write failure')):
+                with self.assertRaises(OSError): release.record_admission(state, 'v0.3.0', name, 'b'*64)
+            self.assertEqual((state/'state.json').read_bytes(), before)
+            self.assertFalse(list(state.glob('.state-*')))
+
+    def test_journal_requires_policy_and_publisher_approval_before_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp), reject=True); state = Path(temp)/'admission'
+            policy = Path(temp)/'policy.json'; policy.write_text(json.dumps(self.policy(args))); policy.chmod(0o600)
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.verify(*args, policy=policy, admission_state=state, initialize_state=True)
+            self.assertFalse(state.exists())
+            with self.assertRaises(ValueError): release.verify(*args, admission_state=state)
+            self.assertFalse(state.exists())
+
+    def test_verified_admission_records_floor_and_rejects_restored_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); args = list(self.fixture(root)); state = root/'admission'
+            policy = root/'policy.json'; policy.write_text(json.dumps(self.policy(args))); policy.chmod(0o600)
+            result = release.verify(*args, policy=policy, admission_state=state, initialize_state=True)
+            self.assertTrue(result['admission_recorded']); self.assertEqual(result['rollback_floor'], 'v0.2.0')
+            release.record_admission(state, 'v0.3.0', 'anonguard-linux-amd64.tar.gz', 'b'*64)
+            args[4] = root/'older-staging'
+            with self.assertRaisesRegex(ValueError, 'durable admitted version'):
+                release.verify(*args, policy=policy, admission_state=state)
+            self.assertFalse(args[4].exists())
+            self.assertEqual(json.loads((state/'state.json').read_text())['highest_tag'], 'v0.3.0')
 
     def test_manifest_rejects_ambiguous_names_and_duplicates(self):
         digest = "a" * 64

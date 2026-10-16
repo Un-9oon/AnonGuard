@@ -21,6 +21,7 @@ python3 -I /trusted/AnonGuard/scripts/verify_release.py \
   --bundle ./SHA256SUMS.sigstore.json \
   --cosign /usr/local/bin/cosign \
   --policy /trusted/operator/release-policy.json \
+  --admission-state /trusted/operator/admission-state \
   --staging ./verified-v0.2.0
 ```
 
@@ -77,8 +78,32 @@ can be signature-verified without a policy but cannot pass this admission policy
 An approval cannot override publisher signature verification or rebind Debian
 artifact filenames to a different release tag.
 
+For durable downgrade refusal, use `--admission-state` with a private directory
+owned by the verifying operator. On the first admitted release only, additionally
+pass `--initialize-admission-state`; the directory must not exist. On every later
+verification, omit that initialization flag and use the same directory. Missing,
+corrupt, permissive or symlinked state fails closed. Do not delete the directory
+to recover from a refusal; preserve its contents and investigate from the console.
+Do not share an admission directory across machines or unsupported network filesystems.
+
+The journal is updated only after publisher verification and operator-policy
+approval. A nonblocking kernel lock serializes writers; an overlapping request
+fails and may be retried. Private temporary state is file-fsynced, atomically
+replaced and directory-fsynced. It records the highest **admitted** stable tag
+and artifact digests for that tag. Older tags and replacement bytes for a recorded
+same-tag artifact are refused even if an older operator policy is supplied.
+It is not a record of successful installation. An admitted-but-uninstalled newer
+release can therefore prevent an older release from being admitted later.
+
+`admission_recorded: true` and `rollback_floor` identify durable admission.
+Without `--admission-state`, policy checking does not provide this persistent floor.
+A storage failure after atomic replacement may conservatively advance the floor
+while verification returns an error; inspect preserved state rather than resetting
+it. A crash during first initialization may leave incomplete state that deliberately
+refuses ordinary reuse. Recovery needs operator review; no reset/bypass flag exists.
+
 This is a local admission gate, not a complete secure updater or automatic
-monotonic installation journal. It does not authenticate the policy itself,
+installation journal. It does not authenticate the policy itself,
 prevent an administrator from restoring old policy/state, retrieve revocations,
 verify installed state compatibility, or provide signing-key compromise recovery.
 Operators must distribute fresh policy, raise the floor after accepted upgrades,

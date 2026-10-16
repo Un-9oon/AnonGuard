@@ -21,7 +21,14 @@ approval/revocation lists, canonical stable versions and no duplicate JSON keys.
 Prereleases are excluded from policy admission. Parent directories and the
 operator's policy-distribution channel must be trusted.
 
-Validation: 15 verifier tests passed locally and on Ubuntu 24.04; two version
+Follow-up: a private fsync/atomic-replacement journal now records the highest
+admitted tag and its artifact digests under a nonblocking kernel lock. Missing
+state never silently initializes; first use requires an explicit exclusive
+initialization flag. Restored older policy cannot bypass the retained admission
+floor. This records admission, not successful installation, and cannot resist
+administrator rollback of the complete state directory.
+
+Validation: 21 verifier tests passed locally and on Ubuntu 24.04; two version
 agreement tests passed locally. Cases cover signed-but-revoked/old/unapproved or
 modified artifacts, policy snapshots, permissions/types/size, duplicate keys,
 numeric ordering, and publisher-verification failure despite operator approval.
@@ -33,7 +40,7 @@ fixture policies now explicitly use mode 0600. The verifier's permission check
 was retained. Existing CI already runs the verifier tests.
 
 Remaining: independently maintained signing and policy channels, fresh revocation
-delivery, a monotonic accepted-installation journal, compatibility/compromise
+delivery, an accepted-installation workflow beyond the new admission journal, compatibility/compromise
 recovery, actual signed-browser delivery and composed installed-device acceptance.
 An administrator can restore old policy/state; this gate alone cannot prevent it.
 Do not describe this checkpoint as a complete secure updater or public-anonymity
