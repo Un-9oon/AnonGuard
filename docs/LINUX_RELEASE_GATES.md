@@ -19,6 +19,10 @@ assigned: an open critical gate prevents public anonymity approval.
 | Cryptographic protocol | Hybrid KEX, mandatory dual authentication, pinning, transcript binding and failure refusal | Independent protocol review, external vectors, key-compromise/migration exercises |
 | Distribution | Version agreement, release-manifest verification and package lifecycle gates | Authenticated signing identities, reproducibility, signed release publication and update/rollback ceremony |
 
+Latest scoped VM results: [16 October 2026 validation](VM_VALIDATION_2026_10_16.md).
+Protected egress namespace, actual Firefox/onion testnet, and installed template
+PT lifecycle checks passed; composed native boot/restart acceptance remains open.
+
 ## Evidence that must exist for a public release
 
 1. Record the exact commit, lockfile hashes, toolchains, full test/lint results,
