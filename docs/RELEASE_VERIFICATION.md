@@ -20,6 +20,7 @@ python3 -I /trusted/AnonGuard/scripts/verify_release.py \
   --manifest ./SHA256SUMS \
   --bundle ./SHA256SUMS.sigstore.json \
   --cosign /usr/local/bin/cosign \
+  --policy /trusted/operator/release-policy.json \
   --staging ./verified-v0.2.0
 ```
 
@@ -40,10 +41,50 @@ missing signatures and timeouts fail verification. Local unsigned lab builds nee
 an explicitly recorded build provenance and separate acceptance procedure; they
 cannot pass this signed-release gate.
 
-The exact tag is a required operator choice. This tool does not decide whether a
-tag is current, approved or revoked, and does not yet implement release rollback
-prevention. Never select an old release merely to bypass a failed upgrade. Apply
-the documented state compatibility and incident policy before deployment.
+The exact tag is a required operator choice. With `--policy`, admission additionally
+requires an operator-maintained minimum stable tag, exact approved artifact SHA-256,
+and absence from the revoked-tag list. Without `--policy`, the verifier performs
+signature/digest verification only and returns `release_admitted: false`; that is
+not update approval. Neither mode installs or executes the package.
+
+The policy is obtained through an independently authenticated operator channel,
+not from the candidate download. It must be a regular file owned by root or the
+current operator, not writable by group/others, and no larger than 64 KiB. Keep
+its parent under operator control. The verifier privately snapshots it and reports
+its SHA-256. Symlinks, FIFOs, duplicate JSON fields, unknown fields, ambiguous
+versions, revoked/older releases and unapproved artifact bytes fail closed.
+
+Policy schema (replace the placeholder with the actual independently approved
+64-character lowercase artifact digest; this example intentionally cannot admit
+an artifact as written):
+
+```json
+{
+  "version": 1,
+  "minimum_tag": "v0.2.0",
+  "approved_releases": {
+    "v0.2.0": {
+      "anonguard_0.2.0_amd64.deb": "REPLACE_WITH_APPROVED_SHA256"
+    }
+  },
+  "revoked_tags": []
+}
+```
+
+Policy-controlled admission currently supports canonical stable semantic versions
+only. Numeric comparison treats v0.10.0 as newer than v0.9.0. Prerelease artifacts
+can be signature-verified without a policy but cannot pass this admission policy.
+An approval cannot override publisher signature verification or rebind Debian
+artifact filenames to a different release tag.
+
+This is a local admission gate, not a complete secure updater or automatic
+monotonic installation journal. It does not authenticate the policy itself,
+prevent an administrator from restoring old policy/state, retrieve revocations,
+verify installed state compatibility, or provide signing-key compromise recovery.
+Operators must distribute fresh policy, raise the floor after accepted upgrades,
+revoke affected tags/digests and preserve security state. Never select an old
+release merely to bypass a failed upgrade. Apply the documented state compatibility
+and incident policy before deployment.
 
 The release workflow verifies actual freshly generated signature bundles before
 publishing tagged assets. Local boundary tests stub Cosign to test orchestration;

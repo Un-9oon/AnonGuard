@@ -2,6 +2,7 @@
 """Release verifier boundary tests; the stub tests orchestration, not signatures."""
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -124,6 +125,79 @@ class ReleaseTests(unittest.TestCase):
             args[5] = Path("cosign")
             with self.assertRaises(ValueError):
                 release.verify(*args)
+
+    def policy(self, args):
+        return {'version': 1, 'minimum_tag': 'v0.2.0', 'revoked_tags': [],
+                'approved_releases': {'v0.2.0': {
+                    args[0].name: hashlib.sha256(args[0].read_bytes()).hexdigest()}}}
+
+    def test_signature_alone_is_not_release_admission(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = release.verify(*self.fixture(Path(temp)))
+            self.assertFalse(result['release_admitted'])
+            self.assertFalse(result['release_policy_accepted'])
+
+    def test_exact_operator_policy_admits_only_verified_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp))
+            policy = Path(temp) / 'policy.json'
+            policy.write_text(json.dumps(self.policy(args)))
+            policy.chmod(0o600)
+            result = release.verify(*args, policy=policy)
+            self.assertTrue(result['release_admitted'])
+            self.assertFalse(result['deployment_accepted'])
+            staged = args[4] / 'release-policy.json'
+            self.assertEqual(staged.stat().st_mode & 0o777, 0o600)
+            policy.write_text('{}')
+            self.assertEqual(json.loads(staged.read_text())['minimum_tag'], 'v0.2.0')
+
+    def test_old_revoked_unapproved_and_changed_artifacts_are_refused(self):
+        for mutation in ('minimum', 'revoked', 'tag', 'digest', 'asset'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temp:
+                args = self.fixture(Path(temp))
+                policy = self.policy(args)
+                if mutation == 'minimum': policy['minimum_tag'] = 'v0.3.0'
+                elif mutation == 'revoked': policy['revoked_tags'] = ['v0.2.0']
+                elif mutation == 'tag': policy['approved_releases'] = {'v0.3.0': policy['approved_releases']['v0.2.0']}
+                elif mutation == 'digest': policy['approved_releases']['v0.2.0'][args[0].name] = '0' * 64
+                else: policy['approved_releases']['v0.2.0'] = {'anonguard_0.2.0_arm64.deb': 'a' * 64}
+                path = Path(temp) / 'policy.json'; path.write_text(json.dumps(policy)); path.chmod(0o600)
+                with self.assertRaises(ValueError): release.verify(*args, policy=path)
+                self.assertFalse(args[4].exists())
+
+    def test_policy_does_not_bypass_publisher_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            args = self.fixture(Path(temp), reject=True)
+            policy = Path(temp) / 'policy.json'; policy.write_text(json.dumps(self.policy(args)))
+            policy.chmod(0o600)
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.verify(*args, policy=policy)
+            self.assertFalse(args[4].exists())
+
+    def test_policy_file_types_permissions_bounds_and_duplicate_fields(self):
+        for kind in ('symlink', 'fifo', 'oversize', 'writable', 'duplicate'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp:
+                args = self.fixture(Path(temp)); path = Path(temp) / 'policy.json'
+                if kind == 'symlink': path.symlink_to(args[1])
+                elif kind == 'fifo': os.mkfifo(path)
+                elif kind == 'oversize': path.write_bytes(b' ' * 65537)
+                elif kind == 'duplicate': path.write_text('{"version":1,"version":1}')
+                else: path.write_text(json.dumps(self.policy(args))); path.chmod(0o666)
+                with self.assertRaises((OSError, ValueError)): release.verify(*args, policy=path)
+                self.assertFalse(args[4].exists())
+
+    def test_policy_schema_and_numeric_version_ordering(self):
+        name = 'anonguard_0.2.0_amd64.deb'; digest = 'a' * 64
+        base = {'version': 1, 'minimum_tag': 'v0.2.0', 'revoked_tags': [],
+                'approved_releases': {'v0.2.0': {name: digest}}}
+        for bad in (None, {}, dict(base, version=True), dict(base, extra=True),
+                    dict(base, minimum_tag='v0.02.0'), dict(base, minimum_tag='v0.2.0-rc1'),
+                    dict(base, revoked_tags=['v0.1.0'] * 2), dict(base, approved_releases={})):
+            with self.subTest(policy=bad), self.assertRaises(ValueError):
+                release.admit(bad, 'v0.2.0', name, digest)
+        numeric = dict(base, minimum_tag='v0.9.0', approved_releases={'v0.10.0': {name: digest}})
+        release.admit(numeric, 'v0.10.0', name, digest)
+        with self.assertRaises(ValueError): release.admit(numeric, 'v0.8.0', name, digest)
 
     def test_manifest_rejects_ambiguous_names_and_duplicates(self):
         digest = "a" * 64
