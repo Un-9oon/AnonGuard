@@ -43,6 +43,7 @@ cp "${ROOT_DIR}/scripts/pt_supervisor.py" "${STAGING_DIR}/usr/bin/anonguard-pt"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-pt"
 cp "${ROOT_DIR}/scripts/browser_session.py" "${STAGING_DIR}/usr/bin/anonguard-browser"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-browser"
+install -m 755 "${ROOT_DIR}/scripts/check_installed_browser.py" "${STAGING_DIR}/usr/bin/anonguard-check-browser"
 
 cp "${ROOT_DIR}/scripts/device_setup.py" "${STAGING_DIR}/usr/bin/anonguard-setup"
 cp "${ROOT_DIR}/scripts/native_adapter.py" "${STAGING_DIR}/usr/bin/anonguard-native-adapter"

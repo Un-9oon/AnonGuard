@@ -75,6 +75,7 @@ jobs:
           install -m 755 scripts/device_setup.py target/package_linux/anonguard-setup
           install -m 755 scripts/native_adapter.py target/package_linux/anonguard-native-adapter
           install -m 755 scripts/browser_session.py target/package_linux/anonguard-browser
+          install -m 755 scripts/check_installed_browser.py target/package_linux/anonguard-check-browser
           cp scripts/check_release_version.py target/package_linux/
           cp contrib/anonguard-native.conf contrib/anonguard-browser.desktop target/package_linux/
           mkdir -p target/package_linux/browser-isolation

@@ -156,7 +156,8 @@ shared-browser behavior must be preserved. Do not copy files into a vendor
 resource tree through symlinked directories.
 
 Circuit isolation additionally requires the genuine Mozilla-signed XPI at
-`/usr/share/anonguard/browser/isolation-signed.xpi`. The launcher now rejects
+`/usr/share/anonguard/browser/isolation-signed.xpi` and its coherent pinned receipt.
+Use the pinned installer described below. The launcher rejects
 unsigned archives, wrong extension identities, unexpected executable members,
 duplicate members, archive traversal, and oversized decompressed contents.
 Signature-member presence is only a structural preflight: Firefox must verify
@@ -220,3 +221,42 @@ URL. HTTPS-only interstitials, generic connection errors, stale error pages,
 missing locks and WebDriver failures are refused rather than counted as passes.
 The browser diagnostic establishing that refusal format used a disposable profile,
 not an installed signed-browser acceptance run.
+
+## Pinned signed-addon delivery
+
+The administrator can install an independently obtained Mozilla-signed XPI using
+an authenticated expected SHA-256 and exact addon version. Stop Firefox first:
+
+```sh
+sudo anonguard-browser --install-extension /operator/downloads/isolation-signed.xpi \
+  --extension-sha256 APPROVED_LOWERCASE_SHA256 --extension-version 0.1.1
+```
+
+The placeholder must be replaced by an independently authenticated digest; do not
+copy an untrusted download's self-reported hash. The installer refuses running
+Firefox, unsigned-looking/unsupported archive structures, unexpected addon IDs,
+wrong bytes/versions and unsafe installed paths. It never extracts or executes
+XPI contents, changes Firefox's signature enforcement or installs browser policy.
+Only Firefox can authenticate the actual Mozilla signature. Structural checks,
+a receipt and a pinned hash are not a Mozilla-signature verification verdict.
+
+An upgrade requires `--previous-extension-sha256` matching the installed artifact.
+Downgrades and changed bytes at the same normalized version are refused. Exact
+same-byte reinstallation can publish a missing receipt only with that explicit
+previous digest. Preserve a known-good artifact and receipt before maintenance.
+
+The installed pair is `/usr/share/anonguard/browser/isolation-signed.xpi` and
+`isolation-signed.json`. The normal isolated launcher and offline installed-browser
+checker require their hashes and versions to match. Publication is serialized by
+a private lock, with fsync and atomic replacement of each file. A crash between
+the two replacements leaves a mismatch that blocks the launcher; this is not a
+single atomic transaction or automatic rollback. Review and restore a coherent
+known-good pair from the console; never remove the receipt check to continue.
+These checks do not prove containment for browsers launched outside the managed
+launcher or replace the native firewall boundary.
+
+The package now includes `anonguard-check-browser`, equivalent to the source
+checker. Use it as the ordinary client user with the gateway stopped and its
+specified Firefox/geckodriver prerequisites. Its actual loaded-addon/signature,
+policy and refusal observations remain required. No signed XPI is supplied by
+these source changes, and no installed signed-browser acceptance is implied.

@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 """Experimental disposable Firefox ESR sessions on a native client or inside the optional SOCKS-only application VM."""
 import argparse
+import fcntl
 import hashlib
 import io
 import ipaddress
@@ -132,6 +133,13 @@ def validate_extension(content):
             if not {'META-INF/mozilla.rsa', 'META-INF/mozilla.sf'}.issubset(names):
                 raise ValueError('Isolation extension has no Mozilla signature structure')
             manifest = json.loads(archive.read('manifest.json'))
+            if (not isinstance(manifest, dict) or set(manifest) != {
+                    'manifest_version', 'name', 'version', 'description', 'browser_specific_settings',
+                    'permissions', 'background', 'content_security_policy'}
+                    or manifest.get('content_security_policy') != "script-src 'self'; object-src 'none'"
+                    or manifest.get('browser_specific_settings') != {
+                        'gecko': {'id': 'isolation@anonguard.local', 'strict_min_version': '140.0'}}):
+                raise ValueError('Unexpected addon manifest surface or weakened content policy')
             if (manifest.get('manifest_version') != 2
                     or manifest.get('browser_specific_settings', {}).get('gecko', {}).get('id')
                     != 'isolation@anonguard.local'
@@ -145,6 +153,106 @@ def validate_extension(content):
         raise ValueError('Invalid isolation extension archive') from error
     return {'version': manifest['version'], 'sha256': hashlib.sha256(content).hexdigest(),
             'signature_verified': False}
+
+
+def addon_version(value):
+    if not isinstance(value, str) or not re.fullmatch(r'(?:0|[1-9][0-9]{0,5})(?:\.(?:0|[1-9][0-9]{0,5})){1,3}', value):
+        raise ValueError('Unsupported addon version')
+    parts = tuple(map(int, value.split('.')))
+    return parts + (0,) * (4 - len(parts))
+
+
+def check_extension_receipt(content, receipt):
+    observed = validate_extension(content)
+    addon_version(observed['version'])
+    expected = {'version': 1, 'addon_id': 'isolation@anonguard.local',
+                'addon_version': observed['version'], 'sha256': observed['sha256'],
+                'signature_verified': False, 'browser_accepted': False}
+    if (not isinstance(receipt, dict) or type(receipt.get('version')) is not int
+            or receipt.get('signature_verified') is not False or receipt.get('browser_accepted') is not False
+            or receipt != expected):
+        raise ValueError('Installed addon differs from its operator-pinned receipt')
+    return observed
+
+
+def read_addon_file(path, maximum):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > maximum:
+            raise ValueError('Addon input must be a bounded regular file')
+        content = stream.read(maximum + 1)
+    if len(content) > maximum:
+        raise ValueError('Addon input exceeds bound')
+    return content
+
+
+def publish_extension(directory, content, digest, version, previous=None):
+    """Operator-pinned installation; Firefox still verifies the Mozilla signature.
+    Caller must control directory and its ancestors. Never extracts addon code.
+    """
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('Explicit authenticated addon digest required')
+    observed = validate_extension(content)
+    addon_version(version)
+    if observed['sha256'] != digest or observed['version'] != version:
+        raise ValueError('Addon bytes/version differ from operator approval')
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise ValueError('Addon directory must be operator-controlled')
+    lock = os.open(directory / '.install.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    temporary = []
+    try:
+        info = os.fstat(lock)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError('Unsafe addon installation lock')
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        artifact = directory / 'isolation-signed.xpi'
+        receipt_path = directory / 'isolation-signed.json'
+        if artifact.exists() or artifact.is_symlink():
+            old = read_addon_file(artifact, 1024 * 1024)
+            old_info = validate_extension(old)
+            if previous != old_info['sha256']:
+                raise ValueError('Existing addon requires explicit matching previous digest')
+            if receipt_path.exists() or receipt_path.is_symlink():
+                check_extension_receipt(old, json.loads(read_addon_file(receipt_path, 65536)))
+            if (addon_version(version) < addon_version(old_info['version']) or
+                    (addon_version(version) == addon_version(old_info['version']) and digest != previous)):
+                raise ValueError('Addon downgrade or same-version replacement refused')
+        elif previous is not None or receipt_path.exists() or receipt_path.is_symlink():
+            raise ValueError('Incomplete addon installation requires operator review')
+        receipt = {'version': 1, 'addon_id': 'isolation@anonguard.local',
+                   'addon_version': version, 'sha256': digest,
+                   'signature_verified': False, 'browser_accepted': False}
+        # Two atomic publications: interruption between them leaves an explicit
+        # hash mismatch/missing receipt, which the normal launcher refuses.
+        for target, data in ((artifact, content), (receipt_path, (json.dumps(receipt, sort_keys=True) + '\n').encode())):
+            descriptor, name = tempfile.mkstemp(prefix='.addon-', dir=directory)
+            temporary.append(name)
+            with os.fdopen(descriptor, 'wb') as output:
+                os.fchmod(output.fileno(), 0o644)
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(name, target)
+            temporary.remove(name)
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        return receipt
+    finally:
+        for name in temporary:
+            os.unlink(name)
+        os.close(lock)
+
+
+def installed_extension():
+    root = Path('/usr/share/anonguard/browser')
+    return check_extension_receipt(
+        trusted_file(root / 'isolation-signed.xpi', maximum=1024 * 1024),
+        json.loads(trusted_file(root / 'isolation-signed.json')))
 
 
 def emit_bundle(destination, host, port, native=False, isolated=False):
@@ -353,6 +461,10 @@ def main():
     action.add_argument('--validate-bundle', type=Path)
     action.add_argument('--check', action='store_true')
     action.add_argument('--launch', action='store_true')
+    action.add_argument('--install-extension', type=Path, help='Root-only pinned XPI installation; does not verify Mozilla signatures')
+    parser.add_argument('--extension-sha256')
+    parser.add_argument('--extension-version')
+    parser.add_argument('--previous-extension-sha256')
     parser.add_argument('--proxy-host')
     parser.add_argument('--native-client', action='store_true')
     parser.add_argument('--circuit-isolation', action='store_true',
@@ -364,6 +476,23 @@ def main():
     parser.add_argument('--browser', type=Path, default=Path('/usr/bin/firefox-esr'))
     args = parser.parse_args()
     try:
+        if args.install_extension:
+            if sys.platform != 'linux' or os.geteuid() != 0:
+                raise ValueError('Addon installation requires the Linux administrator')
+            running = subprocess.run(['/usr/bin/pgrep', '-x', 'firefox|firefox-esr|firefox-bin'], check=False, capture_output=True)
+            if running.returncode != 1:
+                raise ValueError('Stop Firefox before addon installation; process check must succeed')
+            destination = Path('/usr/share/anonguard/browser')
+            for parent in reversed((destination, *destination.parents)):
+                if not parent.exists() and not parent.is_symlink():
+                    parent.mkdir(mode=0o755)
+                info = parent.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                    raise ValueError('Addon installation ancestors must be root-controlled')
+            result = publish_extension(destination, read_addon_file(args.install_extension, 1024 * 1024),
+                                       args.extension_sha256, args.extension_version,
+                                       args.previous_extension_sha256)
+            print(json.dumps(result)); return 0
         host, port = endpoint(args.proxy_host or ('127.0.0.1' if args.native_client else '10.77.0.1'), args.proxy_port, args.native_client)
         if args.validate_bundle:
             print(json.dumps(validate_bundle(args.validate_bundle, host, port, args.native_client, args.circuit_isolation)))
@@ -393,7 +522,7 @@ def main():
             raise ValueError('Browser sessions require an ordinary user in the Linux client environment')
         validate_policy(json.loads(trusted_file(args.policy_path)), host, port, args.native_client, args.circuit_isolation)
         if args.circuit_isolation:
-            validate_extension(trusted_file(Path("/usr/share/anonguard/browser/isolation-signed.xpi"), maximum=1024 * 1024))
+            installed_extension()
         if args.native_client:
             validate_native(json.loads(trusted_file(args.device_profile)))
         else:

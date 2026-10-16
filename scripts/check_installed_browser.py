@@ -5,6 +5,7 @@ configuration as a whole; a host firewall can also account for canary refusal.
 """
 import argparse
 import importlib.util
+from importlib.machinery import SourceFileLoader
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,10 @@ import time
 import secrets
 from urllib.parse import parse_qs, urlsplit
 
-spec = importlib.util.spec_from_file_location('session', Path(__file__).with_name('browser_session.py'))
+module_path = Path(__file__).with_name('browser_session.py')
+if not module_path.exists():
+    module_path = Path(__file__).with_name('anonguard-browser')
+spec = importlib.util.spec_from_loader('session', SourceFileLoader('session', str(module_path)))
 session = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(session)
 
@@ -26,8 +30,7 @@ def preflight(browser, policy_path):
     if os.geteuid() == 0:
         raise ValueError('Run installed browser acceptance as the ordinary user')
     session.validate_policy(json.loads(session.trusted_file(policy_path)), '127.0.0.1', 9050, True, True)
-    artifact = session.validate_extension(session.trusted_file(
-        Path('/usr/share/anonguard/browser/isolation-signed.xpi'), maximum=1024 * 1024))
+    artifact = session.installed_extension()
     executable = browser.resolve(strict=True)
     session.trusted_file(executable, maximum=64 * 1024 * 1024)
     session.validate_autoconfig(executable)

@@ -35,6 +35,8 @@ test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-pt)" = '755:0:0'
+test -x /usr/bin/anonguard-check-browser
+/usr/bin/python3 -B /usr/bin/anonguard-check-browser --help >/dev/null
 test -x /usr/bin/anonguard-setup
 test -x /usr/bin/anonguard-native-adapter
 test -r /usr/lib/sysusers.d/anonguard-native.conf

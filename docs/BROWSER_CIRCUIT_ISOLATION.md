@@ -56,8 +56,11 @@ The Debian package ships **source for review**, never an active unsigned addon.
 A signing account and signed artifact have not been supplied or created.
 
 After authenticating the signed release, an administrator on the dedicated
-client installs it root-owned/non-writable at
-`/usr/share/anonguard/browser/isolation-signed.xpi`. Generate the opt-in policy:
+client installs it through `anonguard-browser --install-extension`, supplying an
+independently authenticated SHA-256 and exact addon version. This creates the
+root-controlled XPI and pinned receipt required by the isolated launcher. For
+replacement, confirm the previous artifact digest explicitly; see
+[BROWSER_SESSIONS.md](BROWSER_SESSIONS.md#pinned-signed-addon-delivery). Generate the opt-in policy:
 
 ```sh
 anonguard-browser --emit-policy /tmp/isolation-policy.json --native-client --circuit-isolation

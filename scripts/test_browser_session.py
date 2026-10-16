@@ -194,7 +194,12 @@ class BrowserSessionTests(unittest.TestCase):
         self.assertFalse(result['signature_verified'])
         wrong = json.loads(json.dumps(manifest))
         wrong['browser_specific_settings']['gecko']['id'] = 'other@example.com'
-        for content in (package(manifest, False), package(wrong),
+        weakened = dict(manifest, content_security_policy="script-src 'self' https:; object-src 'none'")
+        extra_surface = dict(manifest, content_scripts=[{'matches': ['<all_urls>'], 'js': ['isolation.js']}])
+        updater = json.loads(json.dumps(manifest))
+        updater['browser_specific_settings']['gecko']['update_url'] = 'https://example.invalid/update'
+        for content in (package(manifest, False), package(wrong), package(weakened),
+                        package(extra_surface), package(updater),
                         package(manifest, extra='../escape'), package(manifest, extra='extra.js'), b'bad'):
             with self.subTest(content=content[:20]), self.assertRaises(ValueError):
                 browser.validate_extension(content)
