@@ -206,3 +206,27 @@ independently verify the files. Link analysis verifies provided source-PCAP hash
 and includes exit timestamp-order metadata. Preserve the original failed analysis
 and raw dataset as part of the evidence trail. This bounded mechanical repair
 must not be represented as an anonymity improvement or used to hide clock jumps.
+
+
+## Defense-aware RF/SVM baselines
+
+Install NumPy and scikit-learn in the evaluation environment (Ubuntu CI uses
+`python3-sklearn`). Run `python3 eval/test_adaptive.py` for validation checks.
+Example, with all groups assigned exactly once:
+
+```sh
+python3 eval/evaluate_adaptive.py captured.json --task website \
+  --train-group block-0 --validation-group block-1 --test-group block-2 \
+  --feature-window 5 --output adaptive.json
+```
+
+`website` is closed-world activity classification; it also accepts owned size
+workload labels, which must not be described as actual websites. `protocol`
+requires the protocol-label dataset contract and uses validation-only threshold
+calibration. Both tasks reject overlapping groups, duplicate source-PCAP hashes
+and incomplete inventories. Features include aggregate/sequence, signed bursts
+and a fixed common time window. Models/hyperparameters are fixed; held-out data
+is not used for tuning. RF seeds are sensitivity checks, not independent samples.
+These custom baselines exclude TLS metadata and active probing and do not replace
+established adaptive deep attacks. Tiny datasets cannot establish undetectability
+or operational low-FPR performance. See the cover-budget checkpoint for results.

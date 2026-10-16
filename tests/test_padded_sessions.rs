@@ -123,6 +123,7 @@ async fn one_authenticated_circuit_multiplexes_independent_half_closed_streams()
 fn profiles_reject_ambiguous_or_unbounded_negotiation() {
     for profile in [
         Profile::Balanced,
+        Profile::LongTail,
         Profile::Strict,
         Profile::Rmt,
         Profile::Poisson,
@@ -134,7 +135,7 @@ fn profiles_reject_ambiguous_or_unbounded_negotiation() {
         &[1][..],
         &[0, 1][..],
         &[1, 0][..],
-        &[1, 5][..],
+        &[1, 6][..],
         &[1, 1, 0][..],
     ] {
         assert!(Profile::decode(payload).is_err());
@@ -147,31 +148,33 @@ async fn authenticated_exit_cannot_downgrade_the_requested_profile() {
         cell::{CellCommand, OnionCell, ONION_CELL_SIZE},
         circuit::{perform_client_relay_handshake, OnionCircuit, RelayCircuitHop},
     };
-    for payload in [&[1, 1][..], &[1, 2, 0][..]] {
-        let (client_keys, relay_keys) = perform_client_relay_handshake().unwrap();
-        let mut circuit = OnionCircuit::new(89);
-        circuit.add_hop(client_keys).unwrap();
-        let mut hop = RelayCircuitHop::new(89, relay_keys, 0);
-        let (mut client, mut server) = tokio::io::duplex(8192);
-        let payload = payload.to_vec();
-        let peer = tokio::spawn(async move {
-            let mut wire = [0; ONION_CELL_SIZE];
-            server.read_exact(&mut wire).await.unwrap();
-            hop.peel_forward(&mut wire).unwrap();
-            let request = OnionCell::parse(&wire).unwrap();
-            assert_eq!(request.command, CellCommand::Session);
-            let response =
-                OnionCell::new(89, 0, CellCommand::SessionAccepted, 0, &payload).unwrap();
-            let mut wire = response.serialize();
-            hop.wrap_backward_originate(&mut wire).unwrap();
-            server.write_all(&wire).await.unwrap();
-        });
-        assert!(
-            negotiate_padded_session(&mut client, &mut circuit, Profile::Strict)
-                .await
-                .is_err()
-        );
-        peer.await.unwrap();
+    for requested in [Profile::Strict, Profile::LongTail] {
+        for payload in [&[1, 1][..], &[1, 2, 0][..]] {
+            let (client_keys, relay_keys) = perform_client_relay_handshake().unwrap();
+            let mut circuit = OnionCircuit::new(89);
+            circuit.add_hop(client_keys).unwrap();
+            let mut hop = RelayCircuitHop::new(89, relay_keys, 0);
+            let (mut client, mut server) = tokio::io::duplex(8192);
+            let payload = payload.to_vec();
+            let peer = tokio::spawn(async move {
+                let mut wire = [0; ONION_CELL_SIZE];
+                server.read_exact(&mut wire).await.unwrap();
+                hop.peel_forward(&mut wire).unwrap();
+                let request = OnionCell::parse(&wire).unwrap();
+                assert_eq!(request.command, CellCommand::Session);
+                let response =
+                    OnionCell::new(89, 0, CellCommand::SessionAccepted, 0, &payload).unwrap();
+                let mut wire = response.serialize();
+                hop.wrap_backward_originate(&mut wire).unwrap();
+                server.write_all(&wire).await.unwrap();
+            });
+            assert!(
+                negotiate_padded_session(&mut client, &mut circuit, requested)
+                    .await
+                    .is_err()
+            );
+            peer.await.unwrap();
+        }
     }
 }
 

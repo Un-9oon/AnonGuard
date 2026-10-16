@@ -10,6 +10,35 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 pub const ALPN: &[u8] = b"anonguard/6";
+/// Common, explicitly authenticated cover policies; strict remains the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoverProfile {
+    #[default]
+    Strict,
+    Economy,
+}
+impl CoverProfile {
+    pub fn parse(value: &str) -> io::Result<Self> {
+        match value {
+            "strict" => Ok(Self::Strict),
+            "economy" => Ok(Self::Economy),
+            _ => Err(invalid("Unknown link cover profile")),
+        }
+    }
+    pub fn interval(self) -> std::time::Duration {
+        std::time::Duration::from_millis(match self {
+            Self::Strict => 20,
+            Self::Economy => 40,
+        })
+    }
+    fn alpn(self) -> &'static [u8] {
+        match self {
+            Self::Strict => ALPN,
+            Self::Economy => b"anonguard/6-cover40",
+        }
+    }
+}
 pub const TRACKER_ALPN: &[u8] = b"anonguard-tracker/2";
 const IDENTITY_OID: &str = "2.25.2676937280591097606";
 const IDENTITY_OID_ARCS: &[u64] = &[2, 25, 2676937280591097606];
@@ -81,7 +110,13 @@ impl ServerCertVerifier for IdentityVerifier {
     }
 }
 pub fn acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
-    acceptor_for(identity, ALPN)
+    acceptor_with_profile(identity, CoverProfile::Strict)
+}
+pub fn acceptor_with_profile(
+    identity: &SigningKey,
+    profile: CoverProfile,
+) -> io::Result<RelayAcceptor> {
+    acceptor_for(identity, profile.alpn())
 }
 pub fn tracker_acceptor(identity: &SigningKey) -> io::Result<RelayAcceptor> {
     acceptor_for(identity, TRACKER_ALPN)
@@ -140,8 +175,18 @@ pub async fn connect_guarded<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let tls = connect_authenticated(stream, pinned, ALPN).await?;
-    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+    connect_guarded_with_profile(stream, pinned, CoverProfile::Strict).await
+}
+pub async fn connect_guarded_with_profile<S>(
+    stream: S,
+    pinned: [u8; 32],
+    profile: CoverProfile,
+) -> io::Result<crate::onion::link_cover::CoveredStream>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let tls = connect_authenticated(stream, pinned, profile.alpn()).await?;
+    crate::onion::link_cover::wrap(tls, profile.interval())
 }
 pub async fn connect_tracker<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: S,
@@ -210,11 +255,15 @@ pub async fn accept<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Se
     acceptor: &RelayAcceptor,
     stream: S,
 ) -> io::Result<crate::onion::link_cover::CoveredStream> {
-    if acceptor.protocol != ALPN {
+    let profile = if acceptor.protocol == CoverProfile::Strict.alpn() {
+        CoverProfile::Strict
+    } else if acceptor.protocol == CoverProfile::Economy.alpn() {
+        CoverProfile::Economy
+    } else {
         return Err(invalid("Wrong acceptor protocol"));
-    }
+    };
     let tls = accept_authenticated(acceptor, stream).await?;
-    crate::onion::link_cover::wrap(tls, std::time::Duration::from_millis(20))
+    crate::onion::link_cover::wrap(tls, profile.interval())
 }
 pub async fn accept_tracker(
     acceptor: &RelayAcceptor,
@@ -314,6 +363,40 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+    #[tokio::test]
+    async fn cover_policy_is_authenticated_and_mismatch_has_no_fallback() {
+        for server_profile in [CoverProfile::Strict, CoverProfile::Economy] {
+            for client_profile in [CoverProfile::Strict, CoverProfile::Economy] {
+                let identity = SigningKey::from_bytes(&[24; 32]);
+                let pin = identity.verifying_key().to_bytes();
+                let server = acceptor_with_profile(&identity, server_profile).unwrap();
+                let (a, b) = tokio::io::duplex(128 * 1024);
+                let task = tokio::spawn(async move {
+                    let mut stream = accept(&server, a).await?;
+                    let mut cell = [0u8; crate::onion::cell::ONION_CELL_SIZE];
+                    stream.read_exact(&mut cell).await?;
+                    Ok::<_, io::Error>(cell[0])
+                });
+                let result = connect_guarded_with_profile(b, pin, client_profile).await;
+                if server_profile == client_profile {
+                    let mut stream = result.unwrap();
+                    stream
+                        .write_all(&[73; crate::onion::cell::ONION_CELL_SIZE])
+                        .await
+                        .unwrap();
+                    stream.flush().await.unwrap();
+                    assert_eq!(task.await.unwrap().unwrap(), 73);
+                } else {
+                    assert!(result.is_err());
+                    assert!(task.await.unwrap().is_err());
+                }
+            }
+        }
+        assert_ne!(
+            channel_auth_message(CoverProfile::Strict.alpn(), &[1; 32], &[2; 32]),
+            channel_auth_message(CoverProfile::Economy.alpn(), &[1; 32], &[2; 32])
+        );
+    }
     #[tokio::test]
     async fn tls_identity_and_version_are_mandatory() {
         let identity = SigningKey::from_bytes(&[8; 32]);

@@ -35,6 +35,7 @@ fn invalid(message: &'static str) -> Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
     Balanced,
+    LongTail,
     Strict,
     Rmt,
     Poisson,
@@ -43,6 +44,7 @@ impl Profile {
     pub fn parse(value: &str) -> Result<Self, Error> {
         match value {
             "balanced" => Ok(Self::Balanced),
+            "balanced-longtail" => Ok(Self::LongTail),
             "strict" => Ok(Self::Strict),
             "research-rmt" => Ok(Self::Rmt),
             "research-poisson" => Ok(Self::Poisson),
@@ -57,6 +59,7 @@ impl Profile {
                 Self::Strict => 2,
                 Self::Rmt => 3,
                 Self::Poisson => 4,
+                Self::LongTail => 5,
             },
         ]
     }
@@ -66,12 +69,13 @@ impl Profile {
             [1, 2] => Ok(Self::Strict),
             [1, 3] => Ok(Self::Rmt),
             [1, 4] => Ok(Self::Poisson),
+            [1, 5] => Ok(Self::LongTail),
             _ => Err(invalid("Unsupported session profile/version")),
         }
     }
     fn interval(self) -> Duration {
         match self {
-            Self::Balanced => Duration::from_millis(40),
+            Self::Balanced | Self::LongTail => Duration::from_millis(40),
             Self::Strict => Duration::from_millis(20),
             Self::Rmt => JitterEngine::Rmt(RmtTimingEngine::new(RmtEnsemble::GOE, 1.5, 1024))
                 .onion_interval(),
@@ -79,9 +83,15 @@ impl Profile {
         }
     }
     fn can_finish(self, age: Duration, idle: Duration, cells: u64) -> bool {
+        let (quantum, minimum_idle) = if self == Self::LongTail {
+            (60, 20)
+        } else {
+            (30, 10)
+        };
+        let last_activity = age.saturating_sub(idle).as_secs();
         age >= Duration::from_secs(
-            ((age.saturating_sub(idle).as_secs() + 10).div_ceil(30) * 30).max(30),
-        ) && idle >= Duration::from_secs(10)
+            ((last_activity + minimum_idle).div_ceil(quantum) * quantum).max(quantum),
+        ) && idle >= Duration::from_secs(minimum_idle)
             && (cells + 1).is_multiple_of(BUCKET)
     }
 }
@@ -111,10 +121,46 @@ impl ClientHandle {
     }
 }
 
+/// Pack already-queued reads from one byte stream into a scheduled cell.
+/// No waiting, cross-stream merging or extra emission opportunities are added.
+struct Outgoing {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    pending: Option<Vec<u8>>,
+}
+impl Outgoing {
+    fn try_next(&mut self) -> Result<Vec<u8>, mpsc::error::TryRecvError> {
+        let mut data = match self.pending.take() {
+            Some(data) => data,
+            None => self.receiver.try_recv()?,
+        };
+        debug_assert!(!data.is_empty() && data.len() <= PAYLOAD_SIZE);
+        // Bound work even when a producer on another worker keeps refilling the
+        // queue with tiny reads. One overflow remainder is separately bounded.
+        for _ in 1..QUEUE {
+            if data.len() == PAYLOAD_SIZE {
+                break;
+            }
+            let Ok(mut next) = self.receiver.try_recv() else {
+                break;
+            };
+            debug_assert!(!next.is_empty() && next.len() <= PAYLOAD_SIZE);
+            let available = PAYLOAD_SIZE - data.len();
+            if next.len() > available {
+                self.pending = Some(next.split_off(available));
+            }
+            data.extend_from_slice(&next);
+            if self.pending.is_some() {
+                break;
+            }
+        }
+        Ok(data)
+    }
+}
+
 struct Stream {
     workers: Vec<tokio::task::AbortHandle>,
     incoming: mpsc::Sender<Option<Vec<u8>>>,
-    outgoing: mpsc::Receiver<Vec<u8>>,
+    outgoing: Outgoing,
     window: SendWindow,
     received: u32,
     written: u32,
@@ -195,7 +241,10 @@ fn attach<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     Stream {
         workers: vec![writer_task, reader_task],
         incoming,
-        outgoing,
+        outgoing: Outgoing {
+            receiver: outgoing,
+            pending: None,
+        },
         window: SendWindow::default(),
         received: 0,
         written: 0,
@@ -385,7 +434,7 @@ async fn run<W: AsyncWrite + Unpin>(
                         if !stream.ready {continue;}
                         if let Some(ack)=stream.ack.take() {selected=Some((CellCommand::DataAck,id,ack.to_be_bytes().to_vec()));}
                         else if !stream.sent_end && stream.window.available() {
-                            match stream.outgoing.try_recv() {
+                            match stream.outgoing.try_next() {
                                 Ok(data)=> {stream.window.sent()?;selected=Some((CellCommand::Data,id,data));},
                                 Err(mpsc::error::TryRecvError::Disconnected)=> {stream.sent_end=true;selected=Some((CellCommand::End,id,vec![]));},
                                 Err(mpsc::error::TryRecvError::Empty)=>{},
@@ -517,6 +566,62 @@ mod tests {
             Crypto::Exit(RelayCircuitHop::new(101, exit, 0)),
         )
     }
+    #[tokio::test]
+    async fn packing_preserves_order_overflow_and_half_close() {
+        let (sender, receiver) = mpsc::channel(QUEUE);
+        sender.send(vec![1; 3]).await.unwrap();
+        sender.send(vec![2; PAYLOAD_SIZE - 1]).await.unwrap();
+        sender.send(vec![3; 7]).await.unwrap();
+        drop(sender);
+        let mut outgoing = Outgoing {
+            receiver,
+            pending: None,
+        };
+        let first = outgoing.try_next().unwrap();
+        assert_eq!(first.len(), PAYLOAD_SIZE);
+        assert_eq!(&first[..3], &[1; 3]);
+        assert!(first[3..].iter().all(|v| *v == 2));
+        let second = outgoing.try_next().unwrap();
+        assert_eq!(second, [vec![2; 2], vec![3; 7]].concat());
+        assert_eq!(
+            outgoing.try_next().unwrap_err(),
+            mpsc::error::TryRecvError::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn packing_is_nonblocking_and_work_bounded_for_tiny_reads() {
+        let (sender, receiver) = mpsc::channel(QUEUE * 2);
+        let mut outgoing = Outgoing {
+            receiver,
+            pending: None,
+        };
+        assert_eq!(
+            outgoing.try_next().unwrap_err(),
+            mpsc::error::TryRecvError::Empty
+        );
+        for n in 0..QUEUE + 8 {
+            sender.send(vec![n as u8]).await.unwrap();
+        }
+        let first = outgoing.try_next().unwrap();
+        assert_eq!(first.len(), QUEUE);
+        assert_eq!(first, (0..QUEUE).map(|v| v as u8).collect::<Vec<_>>());
+        let second = outgoing.try_next().unwrap();
+        assert_eq!(
+            second,
+            (QUEUE..QUEUE + 8).map(|v| v as u8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            outgoing.try_next().unwrap_err(),
+            mpsc::error::TryRecvError::Empty
+        );
+        drop(sender);
+        assert_eq!(
+            outgoing.try_next().unwrap_err(),
+            mpsc::error::TryRecvError::Disconnected
+        );
+    }
+
     #[test]
     fn profile_buckets_and_bounds_are_explicit() {
         assert!(!Profile::Balanced.can_finish(
@@ -536,8 +641,35 @@ mod tests {
             Duration::from_secs(20),
             63
         ));
+        assert!(!Profile::LongTail.can_finish(
+            Duration::from_secs(59),
+            Duration::from_secs(59),
+            63
+        ));
+        assert!(!Profile::LongTail.can_finish(
+            Duration::from_secs(60),
+            Duration::from_secs(19),
+            63
+        ));
+        assert!(Profile::LongTail.can_finish(Duration::from_secs(60), Duration::from_secs(60), 63));
+        assert!(!Profile::LongTail.can_finish(
+            Duration::from_secs(119),
+            Duration::from_secs(20),
+            63
+        ));
+        assert!(Profile::LongTail.can_finish(
+            Duration::from_secs(120),
+            Duration::from_secs(20),
+            63
+        ));
+        assert!(!Profile::LongTail.can_finish(
+            Duration::from_secs(120),
+            Duration::from_secs(20),
+            62
+        ));
         for profile in [
             Profile::Balanced,
+            Profile::LongTail,
             Profile::Strict,
             Profile::Rmt,
             Profile::Poisson,
@@ -550,43 +682,53 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn independent_idle_cover_persists_then_finishes_on_volume_boundary() {
-        let (mut client, exit) = pair();
-        let (tx, rx) = mpsc::channel(4);
-        let (writer, mut reader) = tokio::io::duplex(4096);
-        let task = tokio::spawn(async move {
-            run_exit(
-                writer,
-                rx,
-                match exit {
-                    Crypto::Exit(hop) => hop,
-                    _ => unreachable!(),
-                },
-                Profile::Balanced,
-                ExitPolicy::new(false),
-            )
-            .await
-        });
-        // No application stream/read event triggers this sender.
-        let mut count = 0;
-        loop {
-            let mut wire = [0; ONION_CELL_SIZE];
-            reader.read_exact(&mut wire).await.unwrap();
-            let cell = client.incoming(&mut wire).unwrap();
-            count += 1;
-            if count == 8 {
-                tx.send(client.outgoing(CellCommand::SessionFinish, 0, &[]).unwrap())
-                    .await
-                    .unwrap();
+        for profile in [Profile::Balanced, Profile::LongTail] {
+            let (mut client, exit) = pair();
+            let (tx, rx) = mpsc::channel(4);
+            let (writer, mut reader) = tokio::io::duplex(4096);
+            let task = tokio::spawn(async move {
+                run_exit(
+                    writer,
+                    rx,
+                    match exit {
+                        Crypto::Exit(hop) => hop,
+                        _ => unreachable!(),
+                    },
+                    profile,
+                    ExitPolicy::new(false),
+                )
+                .await
+            });
+            // No application stream/read event triggers this sender.
+            let mut count = 0;
+            loop {
+                let mut wire = [0; ONION_CELL_SIZE];
+                reader.read_exact(&mut wire).await.unwrap();
+                let cell = client.incoming(&mut wire).unwrap();
+                count += 1;
+                if count == 8 {
+                    tx.send(client.outgoing(CellCommand::SessionFinish, 0, &[]).unwrap())
+                        .await
+                        .unwrap();
+                }
+                if cell.command == CellCommand::SessionFinished {
+                    break;
+                }
+                assert_eq!(cell.command, CellCommand::Dummy);
+                assert!(count < 4000);
             }
-            if cell.command == CellCommand::SessionFinished {
-                break;
-            }
-            assert_eq!(cell.command, CellCommand::Dummy);
-            assert!(count < 2000);
+            assert_eq!(count % 64, 0);
+            assert!(
+                count
+                    >= if profile == Profile::LongTail {
+                        1500
+                    } else {
+                        750
+                    }
+            );
+            assert_eq!(Profile::decode(&profile.encode()).unwrap(), profile);
+            task.await.unwrap().unwrap();
         }
-        assert_eq!(count % 64, 0);
-        assert!(count >= 750); // >=30s at 40ms; tail survives an early finish request.
-        task.await.unwrap().unwrap();
     }
     #[tokio::test(start_paused = true)]
     async fn backpressure_does_not_trigger_a_catch_up_cell() {

@@ -122,6 +122,14 @@ impl GatewayServer {
             return Err("Padded client sessions require an onion gateway on loopback".into());
         }
         if self.config.padded_sessions {
+            if self.config.link_cover_profile == crate::onion::link::CoverProfile::Economy
+                && !matches!(
+                    self.config.privacy_profile.as_str(),
+                    "balanced" | "balanced-longtail"
+                )
+            {
+                return Err("Economy link cover requires the balanced session profile".into());
+            }
             if self.config.enable_jitter
                 || self.config.enable_chaos
                 || self.config.enable_rmt_morphing
@@ -483,14 +491,13 @@ impl GatewayServer {
                             info!("Relay Mode: Processing incoming in-band Onion Cell connection");
                             let exit_policy =
                                 crate::kernel::ExitPolicy::new(config.allow_private_exit);
-                            let _ = handle_onion_relay_connection(
+                            let _ = handle_relay_with_options(
                                 client,
                                 kill_switch.atomic_handle(),
                                 jitter.clone(),
                                 Some(exit_policy),
                                 &relay_identity_key,
-                                config.is_exit,
-                                pool.clone(),
+                                RelayOptions { is_exit_allowed: config.is_exit, pool: pool.clone(), cover_profile: config.link_cover_profile },
                             )
                             .await;
                         }
@@ -613,8 +620,8 @@ impl GatewayServer {
                             };
                             stream.set_nodelay(true)?;
                             let mut stream =
-                                match crate::onion::link::connect_guarded(
-                                    GuardedSocket::new(stream, kill_switch.atomic_handle()).begin_verification().mark_verified(), keys[0]).await {
+                                match crate::onion::link::connect_guarded_with_profile(
+                                    GuardedSocket::new(stream, kill_switch.atomic_handle()).begin_verification().mark_verified(), keys[0], config.link_cover_profile).await {
                                     Ok(stream) => stream,
                                     Err(error) => {
                                         pool.note_guard_link_failure(keys[0]).await;
@@ -843,6 +850,7 @@ impl GatewayServer {
             let kill_switch = self.kill_switch.clone();
             let pow_difficulty = self.config.pow_difficulty;
             let allow_private_exit = self.config.allow_private_exit;
+            let cover_profile = self.config.link_cover_profile;
             let allow_open_socks5 = self.config.allow_open_socks5;
             let identity_key = self.relay_identity_key.clone();
             let pool = self.pool.clone();
@@ -940,14 +948,13 @@ impl GatewayServer {
 
                                         let exit_policy =
                                             crate::kernel::ExitPolicy::new(allow_private_exit);
-                                        let _ = handle_onion_relay_connection(
+                                        let _ = handle_relay_with_options(
                                             guarded_stream,
                                             kill_switch.atomic_handle(),
                                             jitter.clone(),
                                             Some(exit_policy),
                                             &identity_key,
-                                            true, // require_auth via the onion handshake
-                                            pool.clone(),
+                                            RelayOptions { is_exit_allowed: true, pool: pool.clone(), cover_profile },
                                         )
                                         .await;
                                     }
@@ -1076,11 +1083,12 @@ async fn establish_session(
         }
     };
     stream.set_nodelay(true)?;
-    let mut stream = match crate::onion::link::connect_guarded(
+    let mut stream = match crate::onion::link::connect_guarded_with_profile(
         GuardedSocket::new(stream, kill_flag)
             .begin_verification()
             .mark_verified(),
         keys[0],
+        config.link_cover_profile,
     )
     .await
     {
@@ -1554,6 +1562,33 @@ pub async fn handle_onion_relay_connection(
     is_exit_allowed: bool,
     pool: crate::mesh::pool::ProxyPool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_relay_with_options(
+        client,
+        kill_switch_arc,
+        jitter,
+        exit_policy,
+        relay_identity_key,
+        RelayOptions {
+            is_exit_allowed,
+            pool,
+            cover_profile: crate::onion::link::CoverProfile::Strict,
+        },
+    )
+    .await
+}
+struct RelayOptions {
+    is_exit_allowed: bool,
+    pool: crate::mesh::pool::ProxyPool,
+    cover_profile: crate::onion::link::CoverProfile,
+}
+async fn handle_relay_with_options(
+    client: GuardedSocket<ActiveGuarded>,
+    kill_switch_arc: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    jitter: Option<JitterEngine>,
+    exit_policy: Option<crate::kernel::ExitPolicy>,
+    relay_identity_key: &Ed25519SigningKey,
+    options: RelayOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::time::timeout(
         std::time::Duration::from_secs(3600),
         // Keep the enlarged v6 relay state out of the parent connection future.
@@ -1564,8 +1599,7 @@ pub async fn handle_onion_relay_connection(
             jitter,
             exit_policy,
             relay_identity_key,
-            is_exit_allowed,
-            pool,
+            options,
         )),
     )
     .await
@@ -1578,12 +1612,16 @@ async fn handle_relay_inner(
     jitter: Option<JitterEngine>,
     exit_policy: Option<crate::kernel::ExitPolicy>,
     relay_identity_key: &Ed25519SigningKey,
-    is_exit_allowed: bool,
-    pool: crate::mesh::pool::ProxyPool,
+    options: RelayOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let acceptor = crate::onion::link::acceptor(relay_identity_key)?;
+    let RelayOptions {
+        is_exit_allowed,
+        pool,
+        cover_profile,
+    } = options;
+    let acceptor = crate::onion::link::acceptor_with_profile(relay_identity_key, cover_profile)?;
     let tls = crate::onion::link::accept(&acceptor, client).await?;
     let mut client = GuardedSocket::new(tls, kill_switch_arc.clone())
         .begin_verification()
@@ -1815,7 +1853,7 @@ async fn handle_relay_inner(
                             let next_s = policy.resolve_and_connect(&next_h, next_p).await
                                 .map_err(|_| "Next-hop connection failed".to_string())?;
                             next_s.set_nodelay(true).map_err(|_| "Next-hop socket setup failed".to_string())?;
-                            let mut next_s = crate::onion::link::connect_guarded(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified(), next_pin).await
+                            let mut next_s = crate::onion::link::connect_guarded_with_profile(GuardedSocket::new(next_s, kill_switch_arc.clone()).begin_verification().mark_verified(), next_pin, cover_profile).await
                                 .map_err(|_| "Next-hop TLS authentication failed".to_string())?;
                             let mut next_id: u32 = rand::random();
                             while next_id == 0 || next_id == relay_hop.circuit_id { next_id = rand::random(); }
@@ -1880,6 +1918,17 @@ async fn handle_relay_inner(
                     }
                     let profile =
                         crate::onion::session::Profile::decode(&client_buf[45..45 + len])?;
+                    if cover_profile == crate::onion::link::CoverProfile::Economy
+                        && !matches!(
+                            profile,
+                            crate::onion::session::Profile::Balanced
+                                | crate::onion::session::Profile::LongTail
+                        )
+                    {
+                        return Err(
+                            "Economy link cover requires the balanced session profile".into()
+                        );
+                    }
                     let response = OnionCell::new(
                         relay_hop.circuit_id,
                         0,

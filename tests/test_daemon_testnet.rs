@@ -57,6 +57,20 @@ impl Testnet {
         ];
         args.extend_from_slice(authority_args);
         args.extend(extra.iter().map(|s| s.to_string()));
+        if (extra.contains(&"--relay") || extra.contains(&"--onion"))
+            && std::env::var_os("ANONGUARD_TEST_LINK_COVER").is_some()
+        {
+            args.extend([
+                "--link-cover-profile".into(),
+                std::env::var("ANONGUARD_TEST_LINK_COVER").unwrap(),
+            ]);
+        }
+        if let Ok(profile) = std::env::var("ANONGUARD_TEST_SESSION_PROFILE") {
+            if let Some(index) = args.iter().position(|arg| arg == "--privacy-profile") {
+                args[index + 1] = profile;
+            }
+        }
+
         // Allow the same deployment regression to exercise the optimized artifact.
         let binary = std::env::var_os("ANONGUARD_TEST_DAEMON")
             .unwrap_or_else(|| env!("CARGO_BIN_EXE_anonguard-daemon").into());

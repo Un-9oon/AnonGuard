@@ -65,6 +65,9 @@ pub struct GuardConfig {
     pub reverse_token_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub padded_sessions: bool,
+    /// Explicit link-cover policy; economy requires matched relays and balanced sessions.
+    #[serde(default)]
+    pub link_cover_profile: crate::onion::link::CoverProfile,
     #[serde(default = "default_privacy_profile")]
     pub privacy_profile: String,
     /// Enable multi-hop layered onion encryption (authenticated cell peeling)
@@ -144,6 +147,7 @@ impl Default for GuardConfig {
             reverse_token_file: None,
             enable_onion_routing: false,
             padded_sessions: false,
+            link_cover_profile: crate::onion::link::CoverProfile::Strict,
             privacy_profile: default_privacy_profile(),
             enforce_subnet_diversity: true,
             authority_mode: false,

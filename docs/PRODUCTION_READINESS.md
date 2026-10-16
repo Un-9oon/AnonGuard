@@ -8,6 +8,11 @@ of superiority to Tor or complete quantum protection is supported.
 
 ## Current engineering checkpoint
 
+The [cover-budget and traffic-evaluation checkpoint](COVER_BUDGET_AND_TRAFFIC_EVALUATION.md)
+records authenticated optional 40-ms links, longer session tails, same-stream
+packing and actual VM capture/browser results. These are scoped controls and
+measurements, not closure of public-anonymity or advanced-analysis gates.
+
 The [protected-entry and context-cache checkpoint](PROTECTED_ENTRY_AND_CONTEXT_CACHE.md)
 adds an explicit transport-required CLI policy and removes a shared-lock circuit
 setup bottleneck. It does not claim reduced padding bandwidth or AI invisibility.

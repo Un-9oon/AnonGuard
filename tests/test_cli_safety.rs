@@ -118,3 +118,21 @@ fn reverse_tracker_configuration_requires_explicit_trust_and_capability() {
         "Tracker pin cannot be zero",
     );
 }
+
+#[test]
+fn economy_cover_refuses_faster_inner_session_and_unknown_profiles() {
+    refuses(
+        &[
+            "--onion",
+            "--proxy",
+            "socks5://127.0.0.1:19050",
+            "--padded-sessions",
+            "--privacy-profile",
+            "strict",
+            "--link-cover-profile",
+            "economy",
+        ],
+        "Economy link cover requires",
+    );
+    refuses(&["--link-cover-profile", "arbitrary"], "invalid value");
+}

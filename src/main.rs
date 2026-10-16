@@ -46,8 +46,12 @@ struct Args {
     padded_sessions: bool,
 
     /// Shared padding policy; research profiles have no established anonymity benefit
-    #[arg(long, requires = "padded_sessions", default_value = "balanced", value_parser = ["balanced", "strict", "research-rmt", "research-poisson"])]
+    #[arg(long, requires = "padded_sessions", default_value = "balanced", value_parser = ["balanced", "balanced-longtail", "strict", "research-rmt", "research-poisson"])]
     privacy_profile: String,
+
+    /// Experimental common link-cover policy; all circuit relays must match (no fallback)
+    #[arg(long, default_value = "strict", value_parser = ["strict", "economy"])]
+    link_cover_profile: String,
 
     /// Minimum onion circuit length (guard, middle relays, exit)
     #[arg(long, requires = "onion", default_value_t = 3, value_parser = clap::value_parser!(u8).range(3..=8))]
@@ -367,6 +371,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "A public gateway listener requires explicit --allow-open-socks5 authorization".into(),
         );
     }
+    if args.link_cover_profile == "economy"
+        && args.padded_sessions
+        && !matches!(
+            args.privacy_profile.as_str(),
+            "balanced" | "balanced-longtail"
+        )
+    {
+        return Err("Economy link cover requires the balanced session profile".into());
+    }
     if args.min_hops > args.max_hops {
         return Err("--min-hops must not exceed --max-hops".into());
     }
@@ -533,6 +546,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = GuardConfig {
         padded_sessions: args.padded_sessions,
         privacy_profile: args.privacy_profile.clone(),
+        link_cover_profile: anonguard::onion::link::CoverProfile::parse(&args.link_cover_profile)?,
         min_chain_length: if args.onion {
             usize::from(args.min_hops)
         } else {

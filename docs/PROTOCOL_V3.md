@@ -90,7 +90,7 @@ not a complete Byzantine agreement/liveness protocol.
 
 ## Relay TLS authentication and hop-local cover
 
-Adjacent links require TLS 1.3, ALPN `anonguard/6`, and the hybrid TLS group
+Adjacent links require TLS 1.3, an exact configured ALPN, and the hybrid TLS group
 `X25519MLKEM768`; classical-only group negotiation is excluded. Allowed ciphers
 are AES-256-GCM or ChaCha20-Poly1305. Early data, tickets and resumption are disabled.
 The current certificate signature/SPKI remains Ed25519. Its custom extension
@@ -109,7 +109,7 @@ certificates. This custom composition requires independent protocol review;
 external web PKI, addon signing and operating-system trust are separate surfaces.
 
 After authentication, each direction uses a hop-local covered stream: a fixed
-8196-byte encrypted-TLS envelope every 20 ms while the link is alive, with a
+8196-byte encrypted-TLS envelope every 20 ms by default while the link is alive, with a
 random starting phase. Four envelope bytes precede either an 8192-byte onion cell
 or random link-local dummy payload. Dummies do not reach the onion parser.
 Queues are bounded; partial cells, invalid envelopes, prolonged silence or blocked
@@ -118,6 +118,15 @@ bursts. Dropping a stream cancels its workers. Cover begins after authentication
 and ends with connection lifetime. Handshake boundaries, lifetime, congestion and
 multi-link correlation remain observable. Scheduled cost is about 409.8 kB/s per
 direction per link before TLS/TCP overhead, regardless of session profile.
+
+The opt-in `--link-cover-profile economy` uses 40 ms and ALPN
+`anonguard/6-cover40` (about 204.9 kB/s per direction before transport overhead).
+The default `strict` uses `anonguard/6`. Only one ALPN is offered; profile mismatch
+fails rather than falling back. ALPN is included in the exporter-bound proof.
+Every circuit hop must be provisioned consistently; directory records do not
+advertise this choice. Economy padded sessions accept only balanced or
+balanced-longtail scheduling. A direct ClientHello exposes its ALPN; cover is
+not a substitute for a protected entry transport.
 
 ## Onion cells and circuit establishment
 
@@ -153,8 +162,18 @@ keys, upload half-close and acknowledged response termination. Optional padded
 sessions authenticate an exact profile inside the circuit and multiplex bounded
 streams. Balanced schedules 40 ms; strict 20 ms; research RMT/Poisson modes use
 bounded samplers. Session DATA warm-up, idle duration/volume tails and finish
-handshakes are separate from mandatory 20-ms adjacent-link cover. The profile
+handshakes are separate from mandatory adjacent-link cover. The profile
 encoding remains its internal version 1 inside the mandatory v6 channel.
+`balanced-longtail` uses profile bytes `[1,5]`, 40-ms session scheduling,
+60-second closure quantization, at least 20 seconds idle and the existing
+64-cell volume boundary. Balanced retains 30 seconds / 10 seconds. The bounded
+300-second session lifetime remains; neither profile hides arbitrary activity.
+Older peers reject the unknown profile; there is no downgrade.
+
+Already queued reads from one stream are packed into one scheduled DATA cell,
+with at most 32 chunks inspected and one bounded overflow remainder. This does
+not merge streams or contexts, wait for more input, or add emission slots. FIFO,
+flow credit and half-close semantics remain enforced.
 
 SOCKS credentials are local context labels, not password authentication; they are
 not sent to relays. Browser isolation supplies distinct contexts; ordinary

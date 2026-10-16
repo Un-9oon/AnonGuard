@@ -152,6 +152,8 @@ def main():
                 print(json.dumps({'trace':trace_id,'events':len(events),'latency_ms':round(latency,2)}),flush=True)
         document={'version':1,'observation':'packet','complete':True,'traces':traces,
             'fixed_observation_seconds':window,
+            'link_cover_profile':os.environ.get('ANONGUARD_TEST_LINK_COVER','strict'),
+            'session_profile':os.environ.get('ANONGUARD_TEST_SESSION_PROFILE','strict'),
             'scope':'owned loopback CLI testnet; '+('application lifetime plus 1s' if window is None else str(window)+'s fixed request-independent observation')+'; same VM; TCP payload frames include retransmissions and headers'}
         validate_document(document)
         (output/(profile+'.json')).write_text(json.dumps(document))
