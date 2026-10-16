@@ -82,6 +82,9 @@ jobs:
       - name: Verify protected namespace and crash isolation
         run: sudo env RUSTUP_HOME="$HOME/.rustup" CARGO_HOME="$HOME/.cargo" "$(command -v cargo)" test --locked --test namespace_isolation_live -- --ignored
 
+      - name: Verify native dependency recovery and credential refresh on disposable runner
+        run: sudo env ANONGUARD_DISPOSABLE_RECOVERY_TEST=1 python3 scripts/test_native_recovery_live.py
+
       - name: Run Clippy Linter (Strict Zero-Warning Enforcement - Debug)
         run: cargo clippy --locked --all-targets -- -D warnings
 

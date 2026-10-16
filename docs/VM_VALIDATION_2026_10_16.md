@@ -74,16 +74,42 @@ with the existing AppArmor setup. Temporary installation, installed PT lifecycle
 and purge passed instead. Boot/reboot, real network changes, existing host sockets,
 and the fully composed generated native client/PT/firewall remain open.
 
-A bounded VM-loopback TCP capture was started during final integration. Its
-completion, contents and digest have not yet been retrieved or inspected; it is
-not packet-analysis evidence. Additional evaluator tests and local retrieval of
-raw VM logs remain pending. The next SSH invocation was not executed because
-automatic approval review hit an account usage limit, not because the action was
-determined unsafe. Observed results above came from completed runner output read
-before that interruption. Private logs remain under the candidate directory on
-the VM; bundle and runner scripts remain in the local dated evidence directory.
+Follow-up evidence retrieval and recovery verification completed in a later
+session on the same VM. All 21 updated native contracts passed. The generated
+service lifecycle fixture passed both initial and final runs; its synthetic
+transport/backend and no-op firewall must not be represented as full native
+real-relay acceptance. See [recovery hardening](NATIVE_RECOVERY_HARDENING.md).
+The portable Rust baseline logs contain 247 passed tests and one ignored test;
+explicit obfs4 interoperability was separately run with the ignored case enabled.
 
-Next: retrieve and hash raw evidence; finish composed native-service acceptance;
+The initial delayed capture contained only the 24-byte pcap header and is not
+usable evidence. A synchronized recapture reran actual Firefox/onion browsing
+successfully and produced 13,279 packet records over 13.408 seconds, with
+32,651,023 original captured frame bytes. Snapshot length was 256 bytes, truncating
+4,128 records; this preserves timing/lengths but not complete payloads. Observed
+IPv4 addresses were 127.0.0.1, 127.1.0.1, 127.2.0.1 and 127.3.0.1. The capture
+mixes owned testnet and browser-control TCP on loopback: it is not a per-link
+bandwidth, Internet leak, classifier-resistance or independent-network result.
+Pcap SHA-256:
+`ec7fdcc7f49e6ddce0037df9d79538cae949d4017be1c45c4d5e27555adf9145`.
+
+Raw logs, result manifests and pcap were retrieved and the archive digest verified:
+`1897b7ea6e48972a029f30766732b02d3334d7882ce7fb53a6cae6646331bc7b`.
+This first retrieval includes the earlier lifecycle run and initial evaluator
+failure; subsequent confirmation logs are retained separately. Private evidence
+is not committed to the public repository. The initial approval-review usage
+interruption was resolved when access became available; it no longer blocks
+these retrieved results.
+
+All six evaluator suites subsequently returned zero after installing Ubuntu's
+`python3-sklearn` dependency. The initial missing-dependency failure remains in
+the evidence. Evaluator tests validate analysis contracts, not real-world attack
+resistance. Final evidence archive (including the final recovery run and all
+post-dependency evaluator logs) was retrieved and hash-verified:
+`ff5e85bb744c228d087831e80793507e6a44ba98ffbb3d595ae4185cd0bac01b`.
+No temporary recovery units remained loaded, and SSH stayed active.
+
+Next: finish composed native-service acceptance;
 then test separate independently operated networks and evaluate representative
 held-out traffic, false positives, correlation, latency and bandwidth. Independent
 protocol review and authenticated release/browser delivery remain release gates.

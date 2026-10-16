@@ -279,6 +279,8 @@ EnvironmentFile=/etc/anonguard/{service_role}.env
 ExecStart=/usr/bin/anonguard-daemon {extra} --identity-key-path /var/lib/{directory}/identity.key --guard-state-path /var/lib/{directory}/guards.json $ANONGUARD_ARGS
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=5
+KillMode=control-group
 {SANDBOX}
 [Install]
 WantedBy=multi-user.target
@@ -290,6 +292,7 @@ WantedBy=multi-user.target
         files['etc/systemd/system/anonguard-native-adapter.service'] = f'''[Unit]
 Description=Native transparent TCP and protected DNS adapter
 BindsTo=anonguard-client.service
+PartOf=anonguard-client.service
 Requires=anonguard-native-firewall.service
 After=anonguard-native-firewall.service anonguard-client.service
 
@@ -300,6 +303,8 @@ Group=anonguard-adapter
 ExecStart=/usr/bin/anonguard-native-adapter
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=5
+KillMode=control-group
 {SANDBOX}
 [Install]
 WantedBy=multi-user.target

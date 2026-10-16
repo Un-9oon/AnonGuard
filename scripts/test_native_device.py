@@ -63,6 +63,20 @@ class Contracts(unittest.TestCase):
         self.assertNotIn('flush ruleset',firewall)
         self.assertNotIn('ExecStop=',setup.FIREWALL_SERVICE)
         self.assertFalse(json.loads(files['etc/anonguard/device.json'])['deployment_accepted'])
+    def test_native_recovery_keeps_adapter_in_gateway_restart_transaction(self):
+        # BindsTo stops the adapter on gateway loss; PartOf also propagates an
+        # explicit gateway restart, so the adapter is not left stopped afterward.
+        for files in (client(), setup.profile('client', document(), 'ab'*32, direct_entry_lab=True)):
+            adapter_unit = files['etc/systemd/system/anonguard-native-adapter.service']
+            self.assertIn('BindsTo=anonguard-client.service', adapter_unit)
+            self.assertIn('PartOf=anonguard-client.service', adapter_unit)
+            self.assertIn('After=anonguard-native-firewall.service anonguard-client.service', adapter_unit)
+            for name in ('anonguard-client.service', 'anonguard-native-adapter.service'):
+                unit = files['etc/systemd/system/' + name]
+                self.assertIn('TimeoutStopSec=5', unit)
+                self.assertIn('KillMode=control-group', unit)
+            self.assertNotIn('ExecStop=', files['etc/systemd/system/anonguard-native-firewall.service'])
+
     def test_volunteer_nonexit(self):
         files=setup.profile('volunteer',document(),'ab'*32,advertised='192.168.1.3:9443')
         self.assertNotIn('etc/anonguard/native.nft',files)

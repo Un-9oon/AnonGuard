@@ -11,8 +11,10 @@ of superiority to Tor or complete quantum protection is supported.
 The [native protected-entry checkpoint](NATIVE_PROTECTED_ENTRY_CHECKPOINT.md)
 adds transport provisioning and supervision to native setup, removes implicit
 direct entry from client installation, and restricts the PT account to provisioned
-endpoints. The installed nftables/PT lifecycle and outer-transport anonymity
-measurements are not yet accepted; live testing is deferred for this checkpoint.
+endpoints. The [16 October VM record](VM_VALIDATION_2026_10_16.md) adds protected-egress
+namespace and installed template PT lifecycle results. Fully composed native
+boot/restart/network-change acceptance and outer-transport anonymity measurements
+remain open.
 
 The [cover-budget and traffic-evaluation checkpoint](COVER_BUDGET_AND_TRAFFIC_EVALUATION.md)
 records authenticated optional 40-ms links, longer session tails, same-stream

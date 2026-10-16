@@ -23,6 +23,11 @@ Latest scoped VM results: [16 October 2026 validation](VM_VALIDATION_2026_10_16.
 Protected egress namespace, actual Firefox/onion testnet, and installed template
 PT lifecycle checks passed; composed native boot/restart acceptance remains open.
 
+Native recovery follow-up: [bounded shutdown and adapter restart propagation](NATIVE_RECOVERY_HARDENING.md).
+Updated contracts and synthetic generated-unit restart/credential lifecycle pass
+on Ubuntu. Actual native PT/client/firewall composition and boot/network-change
+acceptance remain pending.
+
 ## Evidence that must exist for a public release
 
 1. Record the exact commit, lockfile hashes, toolchains, full test/lint results,

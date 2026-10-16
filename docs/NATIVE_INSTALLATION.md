@@ -46,6 +46,10 @@ with freshly loaded credentials. Existing application streams close; there is
 no replay or direct fallback. If automatic recovery leaves a dependent unit
 inactive, restart `anonguard-native-pt.service` and then
 `anonguard-client.service` explicitly from the console, retaining the firewall.
+The adapter is bound to the gateway and shares explicit gateway stop/restart
+transactions through `PartOf=`. Client and adapter stop deadlines are five seconds
+with control-group termination, retaining the firewall. This does not replay
+application streams or guarantee automatic recovery after every dependency failure.
 Actual installed lifecycle requires acceptance on the target systemd/kernel.
 
 Direct entry requires explicit `--direct-entry-lab`, is recorded as `direct-lab`,
