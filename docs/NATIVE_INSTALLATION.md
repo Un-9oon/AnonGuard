@@ -10,6 +10,10 @@ target. macOS/Windows whole-device isolation is not implemented. The native
 firewall has not been activated or leak-tested on the user's device in this
 change; local helper tests do not certify a host's effective firewall.
 
+For the joined Client/Volunteer and browser setup flow, see
+[ONBOARDING.md](ONBOARDING.md). `anonguard-setup` remains the lower-level native
+configuration helper; `anonguard-onboard` joins prerequisites and browser provisioning.
+
 ## Protected entry is the native client default
 
 Client setup now refuses a missing entry policy. Supply `--transport-config`

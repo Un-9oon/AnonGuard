@@ -46,6 +46,7 @@ jobs:
       - name: Verify native setup, adapter and evaluation contracts
         run: |
           python3 scripts/test_native_device.py
+          python3 scripts/test_onboard.py
           python3 eval/test_evaluate_traces.py
           python3 eval/test_open_world.py
           python3 eval/test_protocol_detection.py

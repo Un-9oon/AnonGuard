@@ -72,12 +72,13 @@ jobs:
           cp scripts/verify_release.py target/package_linux/verify_release.py
           cp scripts/latency_profile.py target/package_linux/latency_profile.py
           cp deploy/apparmor/anonguard-bwrap target/package_linux/anonguard-bwrap.apparmor
+          install -m 755 scripts/onboard.py target/package_linux/anonguard-onboard
           install -m 755 scripts/device_setup.py target/package_linux/anonguard-setup
           install -m 755 scripts/native_adapter.py target/package_linux/anonguard-native-adapter
           install -m 755 scripts/browser_session.py target/package_linux/anonguard-browser
           install -m 755 scripts/check_installed_browser.py target/package_linux/anonguard-check-browser
           cp scripts/check_release_version.py target/package_linux/
-          cp contrib/anonguard-native.conf contrib/anonguard-browser.desktop target/package_linux/
+          cp contrib/anonguard-native.conf contrib/anonguard-browser.desktop contrib/anonguard-setup.desktop target/package_linux/
           mkdir -p target/package_linux/browser-isolation
           cp browser/isolation/manifest.json browser/isolation/isolation.js browser/isolation/background.js target/package_linux/browser-isolation/
           cp README.md LICENSE-MIT LICENSE-APACHE target/package_linux/

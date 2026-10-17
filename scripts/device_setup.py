@@ -372,9 +372,37 @@ def write_exclusive(path, text, mode=0o600):
         os.fsync(stream.fileno())
 
 
-def apply(files):
-    if sys.platform != 'linux' or os.geteuid() != 0 or os.environ.get('SSH_CONNECTION'):
-        raise ValueError('Apply requires root at the Linux device console, not an SSH session')
+def require_console():
+    """Refuse accidental remote/headless firewall activation, including sudo env reset.
+    This is an operational guard, not a boundary against a malicious administrator.
+    """
+    if (sys.platform != 'linux' or os.geteuid() != 0 or os.environ.get('SSH_CONNECTION')
+            or not sys.stdin.isatty()):
+        raise ValueError('Apply requires root at an interactive local Linux device console')
+    pid = os.getpid()
+    seen = set()
+    for _ in range(64):
+        if pid == 0:
+            return
+        if pid in seen:
+            break
+        seen.add(pid)
+        try:
+            name = Path(f'/proc/{pid}/comm').read_text().strip()
+            status = Path(f'/proc/{pid}/status').read_text()
+            parent = re.search(r'^PPid:\s*([0-9]+)$', status, re.MULTILINE)
+            if parent is None:
+                break
+            if name.startswith(('sshd', 'dropbear')) or name == 'ssh':
+                raise ValueError('Remote shell ancestry refused even when sudo removed SSH environment')
+            pid = int(parent[1])
+        except OSError as error:
+            raise ValueError('Cannot verify local console ancestry') from error
+    raise ValueError('Cannot verify local console ancestry')
+
+
+def validate_apply(files):
+    require_console()
     # Never reinterpret an existing installation or silently replace its keys/guards.
     if Path('/etc/anonguard/device.json').exists() or Path('/var/lib/anonguard/identity.key').exists():
         raise ValueError('Existing configuration/state requires an explicit reviewed migration')
@@ -412,6 +440,10 @@ def apply(files):
                 metadata = parent.stat()
                 if metadata.st_uid != 0 or metadata.st_mode & 0o022:
                     raise ValueError('Protected entry dependency ancestor must be administrator-controlled')
+
+
+def apply(files):
+    validate_apply(files)
     # Provision dedicated accounts before nft resolves their identities.
     subprocess.run(['/usr/bin/systemd-sysusers', '/usr/lib/sysusers.d/anonguard-native.conf'], check=True)
     for relative, content in files.items():

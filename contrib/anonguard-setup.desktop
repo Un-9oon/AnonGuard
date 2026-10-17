@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=AnonGuard Setup
+Comment=Configure a dedicated Linux Client or Volunteer relay
+Exec=/usr/bin/sudo /usr/bin/anonguard-onboard --apply
+Terminal=true
+Categories=Network;Settings;
+StartupNotify=false

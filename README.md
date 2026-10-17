@@ -88,6 +88,7 @@ Licensed under MIT or Apache-2.0.
 Opt-in `--onion --padded-sessions --privacy-profile balanced` adds authenticated
 profile negotiation, shared stream scheduling, independent bidirectional cover
 and bounded idle tails. See [the session contract](docs/PADDED_SESSIONS.md).
-The Debian package includes [native Client/Volunteer setup](docs/NATIVE_INSTALLATION.md);
+The Debian package includes [joined first-run onboarding](docs/ONBOARDING.md) and
+[native Client/Volunteer setup](docs/NATIVE_INSTALLATION.md);
 VMs remain optional test fixtures. The new [measured-trace evaluator](eval/TRACE_EVALUATION.md)
 is a defense-aware held-out baseline, not proof of AI resistance or production anonymity.

@@ -35,6 +35,8 @@ test "$(stat -c '%a:%u:%g' /etc/anonguard/runtime.env)" = '640:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-daemon)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-run-app)" = '755:0:0'
 test "$(stat -c '%a:%u:%g' /usr/bin/anonguard-pt)" = '755:0:0'
+test -x /usr/bin/anonguard-onboard
+/usr/bin/python3 -B /usr/bin/anonguard-onboard --help >/dev/null
 test -x /usr/bin/anonguard-check-browser
 /usr/bin/python3 -B /usr/bin/anonguard-check-browser --help >/dev/null
 test -x /usr/bin/anonguard-setup
@@ -54,6 +56,7 @@ for setting in MemoryHigh=768M MemoryMax=1G MemorySwapMax=0 TasksMax=256 CPUQuot
 done
 test ! -e /etc/apparmor.d/anonguard-bwrap
 systemd-analyze verify /lib/systemd/system/anonguard.service
+test -f /usr/share/applications/anonguard-setup.desktop
 test -f /usr/share/applications/anonguard-browser.desktop
 test -f /usr/share/doc/anonguard/browser-isolation/isolation.js
 test ! -e /usr/share/anonguard/browser/isolation-signed.xpi

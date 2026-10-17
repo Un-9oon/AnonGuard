@@ -45,6 +45,7 @@ cp "${ROOT_DIR}/scripts/browser_session.py" "${STAGING_DIR}/usr/bin/anonguard-br
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-browser"
 install -m 755 "${ROOT_DIR}/scripts/check_installed_browser.py" "${STAGING_DIR}/usr/bin/anonguard-check-browser"
 
+install -m 755 "${ROOT_DIR}/scripts/onboard.py" "${STAGING_DIR}/usr/bin/anonguard-onboard"
 cp "${ROOT_DIR}/scripts/device_setup.py" "${STAGING_DIR}/usr/bin/anonguard-setup"
 cp "${ROOT_DIR}/scripts/native_adapter.py" "${STAGING_DIR}/usr/bin/anonguard-native-adapter"
 chmod 755 "${STAGING_DIR}/usr/bin/anonguard-setup" "${STAGING_DIR}/usr/bin/anonguard-native-adapter"
@@ -54,6 +55,7 @@ chmod 644 "${STAGING_DIR}/usr/lib/sysusers.d/anonguard-native.conf"
 
 install -d -m 755 "${STAGING_DIR}/usr/share/applications"
 install -m 644 "${ROOT_DIR}/contrib/anonguard-browser.desktop" "${STAGING_DIR}/usr/share/applications/anonguard-browser.desktop"
+install -m 644 "${ROOT_DIR}/contrib/anonguard-setup.desktop" "${STAGING_DIR}/usr/share/applications/anonguard-setup.desktop"
 
 # Ship reviewable extension sources; never install an unsigned extension as active.
 install -d -m 755 "${STAGING_DIR}/usr/share/doc/anonguard/browser-isolation"
@@ -135,8 +137,9 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
-Depends: ${SHLIBS_DEPENDS}, python3 (>= 3.11)
-Suggests: iproute2, nftables, bubblewrap, python3, libseccomp2, util-linux, obfs4proxy
+Depends: ${SHLIBS_DEPENDS}, python3 (>= 3.11), systemd, iproute2, nftables, obfs4proxy, procps, sudo
+Recommends: firefox-esr
+Suggests: bubblewrap, libseccomp2, util-linux
 Maintainer: Muhammad Umar Shahzad <Un-9oon@users.noreply.github.com>
 Homepage: https://github.com/Un-9oon/AnonGuard
 Description: Experimental authenticated multihop anonymity transport
@@ -153,6 +156,10 @@ set -e
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
 fi
+if [ "${1:-}" = configure ]; then
+    echo "AnonGuard installed. Open AnonGuard Setup or run sudo anonguard-onboard --apply at the local console." >&2
+    echo "Trusted network inputs and a maintained Firefox ESR/signed addon are required for browsing." >&2
+fi
 if [ "${1:-}" = configure ] && [ -n "${2:-}" ]; then
     echo 'AnonGuard upgrade: routing services remain stopped; retained firewall restrictions are not removed.' >&2
     echo 'Review protocol/state compatibility and follow docs/RELEASE_VERIFICATION.md before explicitly restarting.' >&2
@@ -168,7 +175,7 @@ set -e
 if [ -d /run/systemd/system ]; then
     systemctl stop anonguard-native-adapter.service anonguard-client.service anonguard-relay.service 2>/dev/null || true
     # Preserve native firewall restrictions after package removal.
-    systemctl stop anonguard.service 2>/dev/null || true
+    systemctl stop anonguard-native-pt.service anonguard.service 2>/dev/null || true
     systemctl stop 'anonguard-pt@*.service' 2>/dev/null || true
 fi
 exit 0
