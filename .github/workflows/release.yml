@@ -58,6 +58,15 @@ jobs:
           cargo auditable build --locked --release
           ./scripts/build_deb.sh --prebuilt
 
+      - name: Build guided Linux installer distribution
+        run: |
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          python3 scripts/build_distribution.py \
+            --deb "dist/anonguard_${VERSION}_amd64.deb" \
+            --output target/AnonGuard-Linux-setup
+          cp target/AnonGuard-Linux-setup.tar.gz dist/anonguard-linux-setup-amd64.tar.gz
+          cd target/AnonGuard-Linux-setup && sha256sum --check --strict SHA256SUMS
+
       - name: Create Linux Tarball & Checksums
         run: |
           mkdir -p target/package_linux

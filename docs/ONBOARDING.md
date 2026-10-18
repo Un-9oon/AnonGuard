@@ -1,5 +1,8 @@
 # Joined Linux onboarding
 
+For copying the package to another computer with an installer and plain-English
+guide, see [Portable Linux distribution](PORTABLE_DISTRIBUTION.md).
+
 ## What this automates
 
 For a fresh dedicated Debian/Ubuntu-style systemd Linux installation:

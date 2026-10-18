@@ -3,6 +3,7 @@
 
 Requires the separately installed native firewall. No direct destination fallback.
 """
+import argparse
 import asyncio
 import ipaddress
 import secrets
@@ -278,6 +279,8 @@ async def main():
 
 
 if __name__ == '__main__':
+    # Parse before opening sockets: diagnostics must never start the adapter.
+    argparse.ArgumentParser(description=__doc__).parse_args()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
