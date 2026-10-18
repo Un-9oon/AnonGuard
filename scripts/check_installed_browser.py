@@ -44,6 +44,7 @@ def preflight(browser, policy_path):
 def validate_observation(state):
     if (state.get('policy') != session.policy('127.0.0.1', 9050, True, True)['policies']
             or state.get('locks') != {name: True for name in session.LOCKED_PREFERENCES}
+            or state.get('values') != session.LOCKED_PREFERENCES
             or state.get('proxy') != 1 or state.get('host') != '127.0.0.1'
             or state.get('port') != 9 or state.get('direct') is not False
             or state.get('signature_required') is not True):
@@ -115,6 +116,10 @@ def verify(browser, policy_path):
             state = driver.execute_script('''return {
               policy: Services.policies.getActivePolicies(),
               locks: Object.fromEntries(arguments[0].map(k => [k, Services.prefs.prefIsLocked(k)])),
+              values: Object.fromEntries(arguments[0].map(k => {
+                const p=Services.prefs; const t=p.getPrefType(k);
+                return [k,t===p.PREF_BOOL?p.getBoolPref(k):t===p.PREF_INT?p.getIntPref(k):p.getStringPref(k)];
+              })),
               proxy: Services.prefs.getIntPref('network.proxy.type'),
               host: Services.prefs.getStringPref('network.proxy.socks'),
               port: Services.prefs.getIntPref('network.proxy.socks_port'),

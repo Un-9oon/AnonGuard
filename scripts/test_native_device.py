@@ -191,6 +191,12 @@ class Contracts(unittest.TestCase):
             setup.transport_configuration(transport(),changed)
 
     def test_native_optimization_profiles_are_explicit_and_preserved(self):
+        fixed=setup.profile('client',document(),'ab'*32,transport=transport(),transport_digest='cd'*32,
+                            privacy_profile='fixed-window')
+        self.assertIn('--privacy-profile fixed-window', fixed['etc/systemd/system/anonguard-client.service'])
+        with self.assertRaisesRegex(ValueError,'strict link cover'):
+            setup.profile('client',document(),'ab'*32,transport=transport(),transport_digest='cd'*32,
+                          privacy_profile='fixed-window',link_cover_profile='economy')
         files=setup.profile('client',document(),'ab'*32,transport=transport(),transport_digest='cd'*32,
                             link_cover_profile='economy',privacy_profile='balanced-longtail')
         unit=files['etc/systemd/system/anonguard-client.service']

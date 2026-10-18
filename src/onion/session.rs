@@ -36,6 +36,7 @@ fn invalid(message: &'static str) -> Error {
 pub enum Profile {
     Balanced,
     LongTail,
+    FixedWindow,
     Strict,
     Rmt,
     Poisson,
@@ -45,6 +46,7 @@ impl Profile {
         match value {
             "balanced" => Ok(Self::Balanced),
             "balanced-longtail" => Ok(Self::LongTail),
+            "fixed-window" => Ok(Self::FixedWindow),
             "strict" => Ok(Self::Strict),
             "research-rmt" => Ok(Self::Rmt),
             "research-poisson" => Ok(Self::Poisson),
@@ -60,6 +62,7 @@ impl Profile {
                 Self::Rmt => 3,
                 Self::Poisson => 4,
                 Self::LongTail => 5,
+                Self::FixedWindow => 6,
             },
         ]
     }
@@ -70,19 +73,26 @@ impl Profile {
             [1, 3] => Ok(Self::Rmt),
             [1, 4] => Ok(Self::Poisson),
             [1, 5] => Ok(Self::LongTail),
+            [1, 6] => Ok(Self::FixedWindow),
             _ => Err(invalid("Unsupported session profile/version")),
         }
     }
     fn interval(self) -> Duration {
         match self {
             Self::Balanced | Self::LongTail => Duration::from_millis(40),
-            Self::Strict => Duration::from_millis(20),
+            Self::Strict | Self::FixedWindow => Duration::from_millis(20),
             Self::Rmt => JitterEngine::Rmt(RmtTimingEngine::new(RmtEnsemble::GOE, 1.5, 1024))
                 .onion_interval(),
             Self::Poisson => JitterEngine::Poisson(PoissonJitter::default()).onion_interval(),
         }
     }
     fn can_finish(self, age: Duration, idle: Duration, cells: u64) -> bool {
+        if self == Self::FixedWindow {
+            // Completion depends on public session age, not the last activity.
+            // The caller still requires drained streams/controls. Congestion,
+            // long-lived streams, setup and failures remain observable.
+            return age >= Duration::from_secs(120) && (cells + 1).is_multiple_of(6000);
+        }
         let (quantum, minimum_idle) = if self == Self::LongTail {
             (60, 20)
         } else {
@@ -446,8 +456,8 @@ async fn run<W: AsyncWrite + Unpin>(
                 let (command,id,data)=selected.or_else(||controls.pop_front()).unwrap_or((CellCommand::Dummy,0,vec![]));
                 let wire=crypto.outgoing(command,id,&data)?;
                 tokio::time::timeout(Duration::from_secs(30),writer.write_all(&wire)).await??;
-                // Backpressure must not leave an expired timer and trigger a catch-up burst.
-                clock.as_mut().reset(Instant::now()+profile.interval());
+                let next=super::pacing::next_deadline(clock.deadline(),Instant::now(),profile.interval());
+                clock.as_mut().reset(next);
                 cells=cells.checked_add(1).ok_or_else(||invalid("Cell count exhausted"))?;
                 let retired:Vec<_>=streams.iter().filter(|(_,stream)|stream.sent_end && stream.received_end && stream.window.drained() && stream.received==stream.written && stream.ack.is_none()).map(|(id,_)|*id).collect();
                 for id in retired {streams.remove(&id);closed.insert(id);}
@@ -670,6 +680,7 @@ mod tests {
         for profile in [
             Profile::Balanced,
             Profile::LongTail,
+            Profile::FixedWindow,
             Profile::Strict,
             Profile::Rmt,
             Profile::Poisson,
@@ -680,9 +691,40 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn fixed_window_finish_is_independent_of_last_activity() {
+        for idle in [0, 1, 20, 119, 120] {
+            assert!(Profile::FixedWindow.can_finish(
+                Duration::from_secs(120),
+                Duration::from_secs(idle),
+                5999
+            ));
+            assert!(!Profile::FixedWindow.can_finish(
+                Duration::from_secs(121),
+                Duration::from_secs(idle),
+                6000
+            ));
+        }
+        assert!(!Profile::FixedWindow.can_finish(
+            Duration::from_secs(119),
+            Duration::from_secs(119),
+            5999
+        ));
+        assert!(Profile::FixedWindow.can_finish(
+            Duration::from_secs(240),
+            Duration::from_secs(1),
+            11999
+        ));
+        assert_eq!(
+            Profile::parse("fixed-window").unwrap(),
+            Profile::FixedWindow
+        );
+        assert_eq!(Profile::decode(&[1, 6]).unwrap(), Profile::FixedWindow);
+        assert!(Profile::decode(&[1, 7]).is_err());
+    }
     #[tokio::test(start_paused = true)]
     async fn independent_idle_cover_persists_then_finishes_on_volume_boundary() {
-        for profile in [Profile::Balanced, Profile::LongTail] {
+        for profile in [Profile::Balanced, Profile::LongTail, Profile::FixedWindow] {
             let (mut client, exit) = pair();
             let (tx, rx) = mpsc::channel(4);
             let (writer, mut reader) = tokio::io::duplex(4096);
@@ -715,9 +757,17 @@ mod tests {
                     break;
                 }
                 assert_eq!(cell.command, CellCommand::Dummy);
-                assert!(count < 4000);
+                assert!(count < 12500);
             }
-            assert_eq!(count % 64, 0);
+            assert_eq!(
+                count
+                    % if profile == Profile::FixedWindow {
+                        6000
+                    } else {
+                        64
+                    },
+                0
+            );
             assert!(
                 count
                     >= if profile == Profile::LongTail {

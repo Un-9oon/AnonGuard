@@ -46,7 +46,7 @@ struct Args {
     padded_sessions: bool,
 
     /// Shared padding policy; research profiles have no established anonymity benefit
-    #[arg(long, requires = "padded_sessions", default_value = "balanced", value_parser = ["balanced", "balanced-longtail", "strict", "research-rmt", "research-poisson"])]
+    #[arg(long, requires = "padded_sessions", default_value = "balanced", value_parser = ["balanced", "balanced-longtail", "strict", "fixed-window", "research-rmt", "research-poisson"])]
     privacy_profile: String,
 
     /// Experimental common link-cover policy; all circuit relays must match (no fallback)

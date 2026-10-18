@@ -83,7 +83,8 @@ def inspect(args):
             raise ValueError('Client onboarding requires authentic protected-entry transport configuration')
         transport, transport_digest = setup.read_transport(args.transport_config, args.transport_config_sha256, document)
     files = setup.profile(args.role, document, digest, advertised=args.relay_advertise,
-                          transport=transport, transport_digest=transport_digest)
+                          transport=transport, transport_digest=transport_digest,
+                          privacy_profile=getattr(args, 'privacy_profile', 'balanced'))
     missing = [name for name in DEPENDENCIES if not os.access(name, os.X_OK)]
     if missing:
         raise ValueError('Install the native package dependencies first: ' + ', '.join(missing))
@@ -239,6 +240,8 @@ def main():
     action.add_argument('--launch', action='store_true', help='Launch the configured browser as the desktop user')
     action.add_argument('--start', action='store_true', help='Desktop flow: first-run setup if needed, then ordinary-user browsing')
     parser.add_argument('--role', choices=('client', 'volunteer'))
+    parser.add_argument('--privacy-profile', choices=('balanced', 'balanced-longtail', 'fixed-window'), default='balanced',
+                        help='Optional fixed-window cover has a high bandwidth cost; requires upgraded relays')
     parser.add_argument('--bootstrap', type=Path); parser.add_argument('--bootstrap-sha256')
     parser.add_argument('--transport-config', type=Path); parser.add_argument('--transport-config-sha256')
     parser.add_argument('--relay-advertise'); parser.add_argument('--browser', type=Path)

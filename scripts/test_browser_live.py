@@ -147,6 +147,8 @@ class BrowserIntegration(unittest.TestCase):
                     self.assertTrue(all(record[2] == one for record in selected), host)
                 self.assertTrue(all(record[3] == 3 for record in first), 'Domains must reach SOCKS without local DNS')
                 self.assertEqual(driver.execute_script('return typeof RTCPeerConnection'), 'undefined')
+                self.assertEqual(driver.execute_script('return navigator.language'), 'en-US')
+                self.assertEqual(driver.execute_script('return navigator.languages'), ['en-US', 'en'])
                 self.assertEqual(driver.find_element('tag name', 'body').get_attribute('data-timezone'), 'Atlantic/Reykjavik')
                 load('http://two.invalid/')
                 two = next(record[2] for record in records if record[0] == 'two.invalid')

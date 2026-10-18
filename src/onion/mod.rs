@@ -8,6 +8,7 @@ pub mod flow;
 pub mod link;
 pub mod link_cover;
 pub mod multipath;
+mod pacing;
 pub mod padding;
 pub mod session;
 pub mod transport;

@@ -25,12 +25,16 @@ LOCKED_PREFERENCES = {
     "network.http.http3.enable": False,
     "media.peerconnection.enabled": False,
     "network.dns.disablePrefetch": True,
+    "network.dns.disablePrefetchFromHTTPS": True,
     "network.prefetch-next": False,
     "network.http.speculative-parallel-limit": 0,
     "network.captive-portal-service.enabled": False,
     "network.connectivity-service.enabled": False,
     "privacy.resistFingerprinting": True,
     "privacy.resistFingerprinting.letterboxing": True,
+    "privacy.resistFingerprinting.exemptedDomains": "",
+    "intl.accept_languages": "en-US, en",
+    "intl.locale.requested": "en-US",
     "privacy.firstparty.isolate": True,
     "privacy.partition.network_state": True,
     "dom.security.https_only_mode": True,
@@ -42,7 +46,7 @@ LOCKED_PREFERENCES = {
 
 
 AUTOCONFIG_PREFERENCES = {
-    name: value for name, value in LOCKED_PREFERENCES.items() if name.startswith('privacy.')
+    name: value for name, value in LOCKED_PREFERENCES.items() if name.startswith(('privacy.', 'intl.'))
 }
 AUTOCONFIG_LOADER = ('// AnonGuard privacy preference locks\n'
                      'pref("general.config.filename", "anonguard.cfg");\n'
@@ -87,8 +91,14 @@ def policy(host, port, native=False, isolated=False):
                   "SOCKSVersion": 5, "UseProxyForDNS": True, "Passthrough": "",
                   "HTTPProxy": "", "SSLProxy": "", "AutoConfigURL": ""},
         "DNSOverHTTPS": {"Enabled": False, "Locked": True},
+        # Anonymous browsing must not grant physical-location or capture access.
+        "Permissions": {name: {"BlockNewRequests": True, "Locked": True}
+                        for name in ('Camera', 'Microphone', 'Location', 'Notifications')},
+        "SearchSuggestEnabled": False,
+        "AutofillAddressEnabled": False,
+        "AutofillCreditCardEnabled": False,
         "Preferences": {name: {"Value": value, "Status": "locked",
-                               "Type": "boolean" if isinstance(value, bool) else "number"}
+                               "Type": "boolean" if isinstance(value, bool) else "string" if isinstance(value, str) else "number"}
                         for name, value in LOCKED_PREFERENCES.items() if name not in AUTOCONFIG_PREFERENCES},
         "ExtensionSettings": {"*": {"installation_mode": "blocked"}},
         "DisableTelemetry": True,
@@ -403,7 +413,7 @@ def session_environment(root):
     # Drop inherited browser/sandbox overrides, proxy variables and preload hooks.
     keep = ('DISPLAY', 'WAYLAND_DISPLAY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'XAUTHORITY')
     environment = {key: os.environ[key] for key in keep if key in os.environ}
-    environment.update(PATH='/usr/bin:/bin', HOME=str(root), LANG='en_US.UTF-8',
+    environment.update(PATH='/usr/bin:/bin', HOME=str(root), LANG='en_US.UTF-8', TZ='UTC',
                        XDG_CACHE_HOME=str(root / 'cache'), XDG_CONFIG_HOME=str(root / 'config'),
                        MOZ_CRASHREPORTER_DISABLE='1')
     return environment

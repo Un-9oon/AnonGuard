@@ -24,6 +24,16 @@ acceptance_spec.loader.exec_module(acceptance)
 
 
 class BrowserSessionTests(unittest.TestCase):
+    def test_shared_locale_and_no_fingerprint_exemptions_are_locked(self):
+        required = {'intl.accept_languages': 'en-US, en', 'intl.locale.requested': 'en-US',
+                    'privacy.resistFingerprinting.exemptedDomains': ''}
+        for name, value in required.items():
+            self.assertEqual(browser.AUTOCONFIG_PREFERENCES[name], value)
+            self.assertIn(f'lockPref({json.dumps(name)}, {json.dumps(value)});', browser.autoconfig())
+        self.assertEqual(browser.session_environment(Path('/session'))['TZ'], 'UTC')
+        self.assertEqual(browser.policy('10.77.0.1', 9050)['policies']['Preferences']
+                         ['network.dns.disablePrefetchFromHTTPS']['Value'], True)
+
     def topology(self):
         return ({'version': 1, 'gateway': '10.77.0.1', 'port': 9050,
                  'application_interface': 'eth0', 'application': '10.77.0.2',
@@ -207,13 +217,26 @@ class BrowserSessionTests(unittest.TestCase):
     def test_installed_acceptance_refuses_vacuous_locks_and_disabled_signature_checks(self):
         observed = {'policy': browser.policy('127.0.0.1', 9050, True, True)['policies'],
                     'locks': {name: True for name in browser.LOCKED_PREFERENCES},
+                    'values': dict(browser.LOCKED_PREFERENCES),
                     'proxy': 1, 'host': '127.0.0.1', 'port': 9, 'direct': False,
                     'signature_required': True}
         acceptance.validate_observation(observed)
-        for weakened in (dict(observed, locks={}), dict(observed, signature_required=False),
+        wrong_values = dict(browser.LOCKED_PREFERENCES,
+                            **{'privacy.resistFingerprinting.exemptedDomains': 'example.com'})
+        for weakened in (dict(observed, locks={}), dict(observed, values={}),
+                         dict(observed, values=wrong_values),
+                         dict(observed, signature_required=False),
                          dict(observed, direct=True), dict(observed, port=9050)):
             with self.assertRaises(ValueError):
                 acceptance.validate_observation(weakened)
+
+    def test_sensitive_permissions_and_personal_data_are_blocked(self):
+        policies = browser.policy('127.0.0.1', 9050, True, True)['policies']
+        self.assertEqual(policies['Permissions'], {
+            name: {'BlockNewRequests': True, 'Locked': True}
+            for name in ('Camera', 'Microphone', 'Location', 'Notifications')})
+        for name in ('SearchSuggestEnabled', 'AutofillAddressEnabled', 'AutofillCreditCardEnabled'):
+            self.assertIs(policies[name], False)
 
     def test_installed_acceptance_requires_target_matched_proxy_error(self):
         target = 'http://127.0.0.1:54321/offline-canary-unique'

@@ -1,5 +1,9 @@
 # Production readiness
 
+See the [19 October fingerprinting checkpoint](FINGERPRINTING_CHECKPOINT_2026-10-19.md)
+for optional fixed-window sessions, pacing changes and browser acceptance controls.
+These changes do not close measured-anonymity release gates.
+
 Status: **experimental v6; not approved for public anonymity deployment**.
 The coordinated post-quantum authentication and link-cover migration changes
 wire formats, keys, cells and resource costs. Source implementation is not

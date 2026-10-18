@@ -68,6 +68,10 @@ class LoadedPolicy(unittest.TestCase):
                   return {active: Services.policies.getActivePolicies(),
                     status: Services.policies.status,
                     locks: Object.fromEntries(arguments[0].map(name => [name, Services.prefs.prefIsLocked(name)])),
+                    values: Object.fromEntries(arguments[0].map(k => {
+                      const p=Services.prefs; const t=p.getPrefType(k);
+                      return [k,t===p.PREF_BOOL?p.getBoolPref(k):t===p.PREF_INT?p.getIntPref(k):p.getStringPref(k)];
+                    })),
                     proxy: Services.prefs.getIntPref('network.proxy.type'),
                     host: Services.prefs.getStringPref('network.proxy.socks'),
                     port: Services.prefs.getIntPref('network.proxy.socks_port'),
@@ -76,10 +80,17 @@ class LoadedPolicy(unittest.TestCase):
                 ''',list(session.LOCKED_PREFERENCES))
                 self.assertEqual(observed['active'],document['policies'])
                 self.assertTrue(all(observed['locks'].values()),observed['locks'])
+                self.assertEqual(observed['values'],session.LOCKED_PREFERENCES)
                 self.assertEqual(observed['proxy'],1)
                 self.assertEqual(observed['host'],'127.0.0.1')
                 self.assertEqual(observed['port'],9 if isolated else 9050)
                 self.assertTrue(observed['remoteDNS']);self.assertFalse(observed['failover'])
+                defaults=driver.execute_script('''return Object.fromEntries(
+                  ['geo','camera','microphone','desktop-notification'].map(name =>
+                    [name, {value: Services.prefs.getIntPref('permissions.default.'+name),
+                            locked: Services.prefs.prefIsLocked('permissions.default.'+name)}]));''')
+                self.assertEqual(defaults, {name: {'value': 2, 'locked': True}
+                    for name in ('geo','camera','microphone','desktop-notification')})
                 print(json.dumps({'browser':driver.capabilities['browserVersion'],'generated_policy_loaded':True,'preferences_locked':True,'host_policy_installed':False,'production_accepted':False}))
             finally:driver.quit()
 

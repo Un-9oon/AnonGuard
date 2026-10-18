@@ -223,8 +223,10 @@ where
                     sent += CELL as u64;
                     let _ = progress_sender.send(sent);
                 }
-                // Reset after completion: never emit catch-up bursts after congestion.
-                clock.as_mut().reset(Instant::now() + interval);
+                // Keep the selected phase under ordinary write-cost variation;
+                // skip missed slots under congestion, never repay them in a burst.
+                let next = super::pacing::next_deadline(clock.deadline(), Instant::now(), interval);
+                clock.as_mut().reset(next);
             }
         },
         cancel.clone(),
@@ -274,6 +276,91 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Model variable TLS flush cost on the real covered writer, not only the
+    // deadline arithmetic. Paused time makes the assertion independent of CI load.
+    struct VariableFlush {
+        inner: DuplexStream,
+        writes: std::sync::Arc<std::sync::Mutex<Vec<Instant>>>,
+        delay: Option<Pin<Box<tokio::time::Sleep>>>,
+        flushes: u32,
+    }
+    impl AsyncRead for VariableFlush {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for VariableFlush {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let result = Pin::new(&mut self.inner).poll_write(cx, buf);
+            if matches!(result, Poll::Ready(Ok(n)) if n > 0) {
+                self.writes.lock().unwrap().push(Instant::now());
+            }
+            result
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            use std::future::Future;
+            if self.delay.is_none() {
+                let ms = if self.flushes.is_multiple_of(2) {
+                    1
+                } else {
+                    12
+                };
+                self.delay = Some(Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+            }
+            if self.delay.as_mut().unwrap().as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            let result = Pin::new(&mut self.inner).poll_flush(cx);
+            if result.is_ready() {
+                self.delay = None;
+                self.flushes += 1;
+            }
+            result
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn actual_writer_preserves_slots_across_variable_flush_cost() {
+        let (inner, mut raw) = tokio::io::duplex(FRAME * 8);
+        let writes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stream = VariableFlush {
+            inner,
+            writes: writes.clone(),
+            delay: None,
+            flushes: 0,
+        };
+        let mut covered = wrap(stream, Duration::from_millis(20)).unwrap();
+        covered.write_all(&[7; CELL]).await.unwrap();
+        let mut data_seen = false;
+        for _ in 0..6 {
+            let mut frame = [0; FRAME];
+            raw.read_exact(&mut frame).await.unwrap();
+            if frame[1] == 1 {
+                assert_eq!(&frame[4..], &[7; CELL]);
+                data_seen = true;
+            } else {
+                assert_eq!(frame[1], 2);
+            }
+        }
+        assert!(data_seen);
+        let times = writes.lock().unwrap();
+        assert_eq!(times.len(), 6);
+        for pair in times.windows(2) {
+            assert_eq!(pair[1] - pair[0], Duration::from_millis(20));
+        }
+    }
     #[tokio::test]
     async fn fragmented_roundtrip_and_shutdown() {
         let (a, b) = tokio::io::duplex(FRAME * 4);

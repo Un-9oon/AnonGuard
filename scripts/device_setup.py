@@ -223,8 +223,10 @@ def profile(role, document, digest, bind='0.0.0.0:9443', advertised=None,
             link_cover_profile='strict', privacy_profile='balanced'):
     if role not in ('client', 'volunteer'):
         raise ValueError('Choose client or volunteer')
-    if link_cover_profile not in ('strict', 'economy') or privacy_profile not in ('balanced', 'balanced-longtail'):
+    if link_cover_profile not in ('strict', 'economy') or privacy_profile not in ('balanced', 'balanced-longtail', 'fixed-window'):
         raise ValueError('Unsupported native cover or session profile')
+    if privacy_profile == 'fixed-window' and link_cover_profile != 'strict':
+        raise ValueError('Fixed-window sessions require strict link cover')
     if role != 'client' and privacy_profile != 'balanced':
         raise ValueError('Session profile applies only to a client')
     if role != 'client' and (transport is not None or direct_entry_lab):
@@ -513,7 +515,7 @@ def main():
     parser.add_argument('--transport-config-sha256', help='Independently authenticated transport config digest')
     parser.add_argument('--link-cover-profile', choices=('strict', 'economy'), default='strict',
                         help='Authenticated link schedule; economy requires matching configuration at every hop')
-    parser.add_argument('--privacy-profile', choices=('balanced', 'balanced-longtail'), default='balanced',
+    parser.add_argument('--privacy-profile', choices=('balanced', 'balanced-longtail', 'fixed-window'), default='balanced',
                         help='Client session tail policy; longer tails consume additional cover bandwidth')
     args = parser.parse_args()
     try:
