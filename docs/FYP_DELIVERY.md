@@ -1,7 +1,7 @@
 # Practical Linux FYP delivery
 
-Scope: an independent authenticated three-hop implementation, evaluated on an
-owned network. Target Ubuntu 24.04 LTS on x86_64 laptops. No additional mix-network
+Scope: an independent authenticated 3–8-hop implementation (CLI default 3–5),
+with a three-hop baseline for the owned-network demonstration. Target Ubuntu 24.04 LTS on x86_64 laptops. No additional mix-network
 redesign is part of this delivery. A completed lab acceptance is evidence for the
 tested configuration, not public anonymity certification.
 

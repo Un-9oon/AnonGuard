@@ -33,7 +33,7 @@ unsigned lab packages require their own explicitly recorded test-build procedure
 From the directory containing the actual package:
 
 ```sh
-sudo apt install ./anonguard_0.2.0_amd64.deb
+sudo apt install ./anonguard_0.2.0-0lab.20261019.1_amd64.deb
 anonguard-onboard --start
 ```
 

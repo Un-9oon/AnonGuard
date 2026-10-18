@@ -4,6 +4,13 @@ The distribution combines a real `.deb` with an ordinary-user installer and a
 plain-English guide. It targets a dedicated Ubuntu 24.04 LTS x86-64 lab device.
 The current local package is unsigned and is not a production release.
 
+The [published 19 October lab update](https://github.com/Un-9oon/AnonGuard/releases/tag/lab-linux-0.2.0-20261019)
+uses Debian revision `0.2.0-0lab.20261019.1`, built from `e870f28`. Crate version
+`0.2.0` and wire protocol v6 are separate identifiers. The build example below
+uses the build script's default filename; download recipients should use the
+actual versioned filename from their selected release. Published bundles are
+immutable snapshots, not automatically synchronized to later README changes.
+
 ## Operator build
 
 Build the package with `scripts/build_deb.sh` (or its explicitly documented

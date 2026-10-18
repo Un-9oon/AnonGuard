@@ -1,4 +1,4 @@
-> Historical pre-v3 report. Its implementation descriptions, audit-completion claims and anonymity measurements are not evidence about protocol v3. See [current protocol](../PROTOCOL_V3.md) and [release gates](../PRODUCTION_READINESS.md).
+> Historical, non-normative report: not a description or validation of current v6. Claims below about zero leakage, AI immunity, completed audits or obsolete protocol layouts must not be used as current results. See [current protocol](../PROTOCOL_V3.md), [release gates](../PRODUCTION_READINESS.md) and [documentation status](../DOCUMENTATION_STATUS.md).
 
 # Unwrap Inventory Triage
 

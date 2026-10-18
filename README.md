@@ -2,14 +2,28 @@
 
 Experimental authenticated onion-routing software written in Rust. No superiority to Tor or production anonymity certification has been established.
 
+## Download and first-run setup
+
+The [19 October Linux lab release](https://github.com/Un-9oon/AnonGuard/releases/tag/lab-linux-0.2.0-20261019)
+contains Debian package `0.2.0-0lab.20261019.1` and a guided installer bundle,
+built from source `e870f28`. Extract `AnonGuard-Linux-0.2.0-lab-20261019.tar.gz`
+and follow `QUICK_START.md`: run `./install.sh --check`, then `./install.sh` as an
+ordinary desktop user. See [portable installation](docs/PORTABLE_DISTRIBUTION.md).
+
+This is an **unsigned experimental lab prerelease**, distinct from the signed
+release workflow. Checksums do not authenticate the publisher. A public relay
+network, private operator inputs and Mozilla-signed browser addon are not bundled.
+Browsing requires authentic operator configuration, supported Firefox ESR and
+the approved signed addon; installation alone does not provide anonymous browsing.
+
 ## Supported protocol
 
-- One destination TCP stream through an authenticated randomized 3–8-hop circuit (CLI default range 3–5).
-- TLS 1.3 between adjacent nodes, mandatory `anonguard/6` ALPN, hybrid X25519/ML-KEM-768 TLS key exchange, exporter-bound Ed25519 + ML-DSA-65 authentication, and composite identity pins from a signed directory.
+- Authenticated randomized 3–8-hop circuits (CLI default range 3–5): legacy mode carries one destination TCP stream; optional padded sessions multiplex up to 16 streams per privacy context.
+- TLS 1.3 between adjacent nodes, mandatory versioned ALPN (`anonguard/6` for strict cover; `anonguard/6-cover40` for economy), hybrid X25519/ML-KEM-768 TLS key exchange, exporter-bound Ed25519 + ML-DSA-65 authentication, and composite identity pins from a signed directory.
 - Per-link circuit identifiers, hybrid X25519/ML-KEM-768 circuit handshakes, transcript-bound keys, and layered encryption.
 - Exact-snapshot directory quorum verification with persistent rollback/equivocation rejection.
 - Identity-pinned entry guards, bounded authenticated flow control, upload half-close, and explicit circuit teardown.
-- A continuous cell scheduler with bounded buffers and dummy cells: fixed 20 ms by default, or experimental RMT/Poisson/Lorenz timing when configured. See [multi-hop and scheduling contracts](docs/MULTIHOP_SCHEDULING.md). Traffic-analysis protection is unproven.
+- Mandatory authenticated hop-local cover and 8192-byte onion cells. Strict link cover schedules 8196-byte envelopes every 20 ms; session profiles separately select their inner schedule. Legacy RMT/Poisson/Lorenz modes are research options. See [multi-hop and scheduling contracts](docs/MULTIHOP_SCHEDULING.md). Traffic-analysis protection is unproven.
 - Linux application isolation in a loopback-only namespace, with a private Unix-socket bridge to the gateway outside it.
 - Optional obfs4 first-hop and authority-bootstrap transports, independently provisioned unlisted entry bridges, and supervised Linux PT services. See [deployment and limits](docs/design/PLUGGABLE_TRANSPORT.md). This does not establish resistance to any particular censor or traffic-correlation attack.
 
@@ -92,3 +106,12 @@ The Debian package includes [joined first-run onboarding](docs/ONBOARDING.md) an
 [native Client/Volunteer setup](docs/NATIVE_INSTALLATION.md);
 VMs remain optional test fixtures. The new [measured-trace evaluator](eval/TRACE_EVALUATION.md)
 is a defense-aware held-out baseline, not proof of AI resistance or production anonymity.
+
+Optional `fixed-window` sessions require strict link cover and upgraded relays;
+they use 20-ms scheduling, minimum age 120 seconds and 6000-cell finish boundaries.
+They consume substantial bandwidth and remain subject to draining, peer finish,
+errors and the 300-second hard lifetime. See [the fingerprinting checkpoint](docs/FINGERPRINTING_CHECKPOINT_2026-10-19.md).
+
+For current versus historical documentation and package/source version distinctions,
+see [documentation status](docs/DOCUMENTATION_STATUS.md). Dated evidence and
+historical reports are not fresh acceptance of the current checkout.

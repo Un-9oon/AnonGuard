@@ -170,6 +170,17 @@ encoding remains its internal version 1 inside the mandatory v6 channel.
 300-second session lifetime remains; neither profile hides arbitrary activity.
 Older peers reject the unknown profile; there is no downgrade.
 
+`fixed-window` uses profile bytes `[1,6]`, 20-ms session scheduling, minimum
+session age 120 seconds and 6000-cell finish boundaries independent of the
+last-activity timestamp. Streams, connections and controls must be drained;
+the peer finish exchange and 300-second lifetime still apply. It requires strict
+link cover and upgraded participating relays. Congestion can extend wall-clock
+duration; this is not exact fixed-duration or always-on cover.
+
+Covered-link and session writers preserve their phase when writes finish within
+the scheduled slot. Expired opportunities are skipped, never repaid as a burst;
+very long suspension safely rebases the clock. This does not hide TCP congestion.
+
 Already queued reads from one stream are packed into one scheduled DATA cell,
 with at most 32 chunks inspected and one bounded overflow remainder. This does
 not merge streams or contexts, wait for more input, or add emission slots. FIFO,

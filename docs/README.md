@@ -4,8 +4,9 @@ Start with [practical FYP delivery](FYP_DELIVERY.md), [Linux deployment](../depl
 [authority bootstrap](runbook_authority.md), [relay operations](RELAY_OPERATOR_GUIDE.md)
 and [headless application containment](LINUX_APP_CONTAINMENT.md).
 
-The current normative protocol is [v3](PROTOCOL_V3.md). Historical reports and
-research descriptions may describe earlier behavior; use the v3 specification,
+The current normative protocol is [v6](PROTOCOL_V3.md) (the filename is retained
+for link compatibility). Historical reports and research descriptions may describe
+earlier behavior; use the v6 specification,
 current source and [readiness gates](PRODUCTION_READINESS.md) for release claims.
 
 ## Artifact provenance
@@ -41,3 +42,16 @@ If no signature bundle exists, record the build as unsigned instead of claiming
 signed provenance. Record the source commit, build toolchain and dependency lock
 file. Embedded dependency metadata, when present, supports inventory and known
 advisory analysis; it is not an independent cryptographic or anonymity review.
+
+## Published lab distribution
+
+The [19 October Linux prerelease](https://github.com/Un-9oon/AnonGuard/releases/tag/lab-linux-0.2.0-20261019)
+contains package `0.2.0-0lab.20261019.1`, built from source `e870f28`.
+It is unsigned: the Sigstore instructions above describe the authenticated release
+workflow, not signatures supplied with this lab prerelease. Read
+[portable installation](PORTABLE_DISTRIBUTION.md) and the
+[fingerprinting checkpoint](FINGERPRINTING_CHECKPOINT_2026-10-19.md).
+
+Dated evidence describes its recorded commit/configuration only. `docs/reports/`
+contains historical, non-normative research/audit notes; unsupported claims there
+are not current project results. See [documentation reconciliation](DOCUMENTATION_STATUS.md).

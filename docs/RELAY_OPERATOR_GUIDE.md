@@ -1,6 +1,6 @@
 # AnonGuard relay operations
 
-AnonGuard is an experimental authenticated three-hop transport. Public anonymity, resistance to global traffic correlation and production reliability have not been independently established. The repository records no deployed independent operator network or core-team exit fleet.
+AnonGuard is an experimental authenticated 3–8-hop transport (CLI default range 3–5). Public anonymity, resistance to global traffic correlation and production reliability have not been independently established. The repository records no deployed independent operator network or core-team exit fleet.
 
 ## Roles and deployment
 
@@ -12,7 +12,7 @@ Keep normal proof of work and exit-address restrictions. Development switches pe
 
 ## Operational responsibilities
 
-No validated universal hardware, bandwidth or uptime guarantee exists. Establish load-tested budgets and circuit-success targets for the intended deployment. Use real operator/subnet diversity, synchronized clocks and retained authenticated v3 state. Monitor CPU/memory/descriptors, relay availability, expired/divergent directories and dependency updates. Restrict metrics and diagnostic logs; never add payload, credential or browsing-history logging.
+No validated universal hardware, bandwidth or uptime guarantee exists. Establish load-tested budgets and circuit-success targets for the intended deployment. Use real operator/subnet diversity, synchronized clocks and retained authenticated v6 state. Monitor CPU/memory/descriptors, relay availability, expired/divergent directories and dependency updates. Restrict metrics and diagnostic logs; never add payload, credential or browsing-history logging.
 
 Retain operational diagnostics needed to investigate failures, protect their access, and define retention. The project does not promise that all current runtime metadata is absent from logs. Keep client gateway ports private and set service/cgroup limits. Rehearse restart, upgrade, rollback rejection and compromised-key response before public service.
 

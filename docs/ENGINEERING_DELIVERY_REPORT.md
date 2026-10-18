@@ -1,3 +1,7 @@
+> Historical checkpoint from 9 October; not the current protocol specification.
+> Current v6 behavior and acceptance gates are in [the protocol](PROTOCOL_V3.md)
+> and [production readiness](PRODUCTION_READINESS.md). Later changes supersede this snapshot.
+
 # AnonGuard padded-session and native-device engineering delivery
 
 Verification date: 9 October 2026 (Asia/Karachi).

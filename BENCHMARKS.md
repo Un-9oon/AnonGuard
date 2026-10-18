@@ -1,6 +1,6 @@
 # AnonGuard performance evaluation
 
-Protocol v3 has no validated production performance baseline or measured
+Protocol v6 has no validated production performance baseline or measured
 superiority over Tor. Earlier microsecond, circuit-latency and hundreds-of-Mbps
 figures lacked reproducible measurements and have been removed. Correctness tests
 do not establish network throughput.
@@ -16,7 +16,7 @@ Measure circuit establishment separately from steady-state transfer. Include
 useful application bytes, total wire bytes in both directions, idle cover traffic,
 CPU/RAM consumption and connection failure behavior. Cell encryption benchmarks
 measure cryptographic operations, not application throughput. Current cells are
-2048 bytes; framing, onion layers and pacing impose additional limits. Read the
+8192 bytes; framing, onion layers and pacing impose additional limits. Read the
 active scheduler configuration when calculating capacity, and label estimates
 as models rather than measured results.
 

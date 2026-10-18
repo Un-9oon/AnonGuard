@@ -2,12 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased documentation reconciliation]
+
+- Align maintained guides with wire protocol v6, 8192-byte cells, current cover
+  costs, authenticated flow control and optional fixed-window sessions.
+- Distinguish current contracts, dated evidence and non-normative research notes.
+- Link the published unsigned Linux lab update and explain its prerequisites.
+
+## [Linux lab update 2026-10-19] — source e870f28
+
+- Phase-preserving covered-link/session pacing without catch-up bursts.
+- Opt-in fixed-window profile, strict-cover requirement and onboarding support.
+- Browser locale/RFP preference locks, actual-value acceptance, blocked sensitive
+  permission grants, search suggestions and personal-data autofill.
+- Fresh optimized Debian package `0.2.0-0lab.20261019.1` and installer bundle
+  published as unsigned lab assets; no production-anonymity acceptance implied.
+
+The older entries below are historical development records, not a current audit,
+exhaustive change list or statement of present defaults. Current protocol and
+readiness documents take precedence.
+
 ## [0.2.0] - 2026-09-17
 
 ### Security & Hardening
 - **CRITICAL**: Migrated onion circuit and transport Key Derivation Functions (KDF) to RFC 5869 HKDF-SHA256 (V-001).
 - **CRITICAL**: Added 7 new fuzz targets covering all untrusted-input attack surfaces (`peel_forward`, `decode_extend`, etc.).
-- **HIGH**: Fixed timing side-channel in Quantum RMT engine (GUE sampling) by using constant-time bounded iteration (V-002).
+- **HIGH**: Changed the classical RMT engine's GUE sampling to bounded work (historical V-002 record; not proof of constant-time execution or quantum protection).
 - **HIGH**: Implemented `NonceRegistry` to track and prevent PoW nonce replay within the validity window (V-006).
 - Reduced PoW timestamp drift tolerance from 10 minutes to 5 minutes to limit replay windows.
 - Replaced stub soak test with a full multi-relay concurrent load and E2E verification test.

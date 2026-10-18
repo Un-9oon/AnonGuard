@@ -1,4 +1,4 @@
-# Padded onion sessions (experimental protocol v5)
+# Padded onion sessions (experimental protocol v6)
 
 The target is reduced website-fingerprinting leakage to a local passive observer
 of the client link. This is not an undetectability promise, a global correlation
@@ -14,10 +14,10 @@ anonguard-daemon --onion --padded-sessions --privacy-profile balanced \
 ```
 
 The bracketed text above describes required arguments; it is not a shell command
-to copy verbatim. All relays and clients need protocol v5 (`anonguard/5` ALPN,
-versioned handshake domains). No fallback to older protocols or unpadded streams
-occurs when profile negotiation fails. Legacy `--jitter`, `--chaos`, `--rmt-morphing` and `--chaffing` flags cannot be combined with session profiles. Authorities still use their existing
-versioned directory transport. Legacy single-stream mode remains available when
+to copy verbatim. All relays and clients need protocol v6 and matching authenticated link-cover
+ALPN (`anonguard/6` for strict; `anonguard/6-cover40` for economy). No fallback to older protocols or unpadded streams
+occurs when profile negotiation fails. Legacy `--jitter`, `--chaos`, `--rmt-morphing` and `--chaffing` flags cannot be combined with session profiles. Authorities require the v6 deployment
+identity/directory migration described in [the protocol](PROTOCOL_V3.md). Legacy single-stream mode remains available when
 `--padded-sessions` is omitted; it does not get session tails or multiplexing.
 
 ## Implemented contract
@@ -29,17 +29,25 @@ an exit at hop index 2 or later accepts sessions. Profiles are common presets:
 | Profile | Scheduled interval per direction | Intended role |
 |---|---|---|
 | balanced | 40 ms | Fixed-rate baseline |
+| balanced-longtail | 40 ms | Longer idle/duration buckets |
+| fixed-window | 20 ms | Minimum 120 s; 6000-cell finish boundaries; strict link cover |
 | strict | 20 ms | Higher-bandwidth fixed-rate baseline |
 | research-rmt | GOE-derived, bounded 5–100 ms | Experimental comparison |
 | research-poisson | Poisson-derived, bounded 5–100 ms | Experimental comparison |
 
 A dedicated actor schedules both directions independently of application reads.
-At a scheduled opportunity it emits one 2048-byte onion cell: queued control,
+At a scheduled opportunity it emits one 8192-byte onion cell: queued control,
 ACK, application data or encrypted dummy. ACKs and data use round-robin fairness
 across streams. DATA waits for a one-second warm-up. Circuits remain alive after
-individual TCP streams finish. Once empty, an idle tail lasts at least ten
+individual TCP streams finish. For balanced/strict/research profiles, once empty,
+an idle tail lasts at least ten
 seconds, the duration reaches a common 30-second bucket and each direction's
 final scheduled cell count aligns to 64. A finish handshake ends the session.
+`balanced-longtail` instead uses at least 20 seconds idle and a 60-second age
+bucket, retaining 64-cell alignment. `fixed-window` ignores last-activity time
+for finish eligibility: minimum session age is 120 seconds and final scheduled
+cell count aligns to 6000. Drain conditions and the finish exchange remain
+mandatory. Older peers refuse its profile bytes `[1,6]`; there is no fallback.
 Concurrent arrivals can extend it. The hard lifetime is 300 seconds and closes
 active streams without transaction replay. Idle contexts are recreated on a
 later request, with a new circuit; a request racing a retiring session may fail.
@@ -74,9 +82,12 @@ The native adapter uses an ephemeral process label distinct from the default
 browser context. OS applications routed through that adapter share its context.
 Neither labels nor padding prevent login/cookie identity disclosure.
 
-At 40 ms, each active context schedules about 51.2 kB/s per direction; at 20 ms,
-about 102.4 kB/s, before TLS/TCP overhead and retransmission. Eight contexts
-multiply costs. Tail traffic and multiple hops add further costs. These are
+At 40 ms, each active context schedules about 204.8 kB/s of session cells per direction; at 20 ms,
+about 409.6 kB/s, before TLS/TCP overhead and retransmission. Eight contexts
+multiply costs. Mandatory strict hop-local cover uses an 8196-byte envelope every
+20 ms (409.8 kB/s per direction) independently of session activity. Session cells
+are payload inside those envelopes, not a second wire-byte total to add. Tail
+traffic and multiple hops add further costs. These are
 calculated scheduling costs, not measured throughput or anonymity improvements.
 
 ## Evidence and acceptance
